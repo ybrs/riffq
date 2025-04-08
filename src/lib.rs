@@ -4,12 +4,13 @@ use async_trait::async_trait;
 use futures::{Sink, StreamExt};
 use tokio::net::TcpListener;
 use tokio::signal;
-
-use tokio::io::AsyncWriteExt;
+use tokio::sync::oneshot;
+use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::net::TcpStream;
-use tokio::io::AsyncReadExt;
-
-
+use pyo3::types::PyTuple;
+use std::collections::HashMap;
+use std::sync::mpsc::{channel, Sender};
+use std::thread;
 
 use pgwire::api::auth::noop::NoopStartupHandler;
 use pgwire::api::copy::NoopCopyHandler;
@@ -17,19 +18,121 @@ use pgwire::api::query::{SimpleQueryHandler, PlaceholderExtendedQueryHandler};
 use pgwire::api::results::{
     DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag
 };
-use pgwire::api::{
-    ClientInfo, NoopErrorHandler, PgWireServerHandlers, Type
-};
+use pgwire::api::{ClientInfo, NoopErrorHandler, PgWireServerHandlers, Type};
 use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use pgwire::tokio::process_socket;
-use tokio::sync::oneshot;
+
+fn map_python_type_to_pgwire(t: &str) -> Type {
+    match t {
+        "int" => Type::INT8,
+        "float" => Type::FLOAT8,
+        "str" => Type::VARCHAR,
+        "bool" => Type::BOOL,
+        "date" => Type::DATE,
+        "datetime" => Type::TIMESTAMP,
+        _ => Type::VARCHAR,
+    }
+}
 
 
-use pyo3::types::PyTuple;
+#[pyclass]
+struct CallbackWrapper {
+    responder: Arc<Mutex<Option<oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>>>>,
+}
+
+#[pymethods]
+impl CallbackWrapper {
+    fn __call__(&self, result: PyObject) {
+        if let Some(sender) = self.responder.lock().unwrap().take() {
+            Python::with_gil(|py| {
+                let parsed: PyResult<(Vec<HashMap<String, String>>, Vec<Vec<PyObject>>)> = result.extract(py);
+                if let Ok((schema_desc, py_rows)) = parsed {
+                    let converted_rows: Vec<Vec<Option<String>>> = py_rows
+                        .into_iter()
+                        .map(|row| {
+                            row.into_iter()
+                                .map(|val| {
+                                    Python::with_gil(|py| {
+                                        let v = val.as_ref(py);
+                                        if v.is_none() {
+                                            Ok::<Option<String>, ()>(None)
+                                        } else {
+                                            match v.str() {
+                                                Ok(pystr) => Ok(Some(pystr.to_str().unwrap_or("").to_string())),
+                                                Err(_) => Ok(None),
+                                            }
+                                        }
+                                    }).unwrap_or(None)
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    let _ = sender.send((schema_desc, converted_rows));
+                }
+            });
+        }
+    }
+}
+
+pub struct PythonWorker {
+    sender: Sender<(String, oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>)>,
+}
+
+impl PythonWorker {
+    fn new(callback: Arc<Mutex<Option<Py<PyAny>>>>) -> Self {
+        let (tx, rx): (
+            Sender<(String, oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>)>,
+            std::sync::mpsc::Receiver<(String, oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>)>
+        ) = channel();
+
+        thread::spawn(move || {
+            println!("[PY_WORKER] Thread started");
+            pyo3::prepare_freethreaded_python();
+            loop {
+                println!("[PY_WORKER] waiting to receive on rx...");
+                match rx.recv() {
+                    Ok((query, responder)) => {
+                        println!("[PY_WORKER] received query: {}", query);
+                        let cb_opt = callback.lock().unwrap().clone();
+                        if let Some(cb) = cb_opt {
+                            Python::with_gil(|py| {
+                                println!("[PY_WORKER] GIL acquired, invoking callback");
+                                let wrapper = Py::new(py, CallbackWrapper {
+                                    responder: Arc::new(Mutex::new(Some(responder))),
+                                }).unwrap();
+                                let _ = cb.call1(py, PyTuple::new(py, &[query.into_py(py), wrapper.into_py(py)]));
+                            });
+                        }
+                    }
+                    Err(_) => {
+                        println!("[PY_WORKER] Channel closed");
+                        break;
+                    }
+                }
+            }
+        });
+
+        PythonWorker { sender: tx }
+    }
+
+
+    async fn query(&self, query: String) -> (Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>) {
+        let (tx, rx) = oneshot::channel();
+        println!("[RUST] Sending query to worker: {}", query);
+        self.sender.send((query, tx)).expect("Send failed!");
+        match rx.await {
+            Ok(result) => result,
+            Err(e) => {
+                println!("[RUST] Worker failed: {:?}", e);
+                (vec![], vec![])
+            }
+        }
+    }
+}
 
 pub struct DummyProcessor {
-    callback: Arc<Mutex<Option<Py<PyAny>>>>,
+    py_worker: Arc<PythonWorker>,
 }
 
 #[async_trait]
@@ -50,87 +153,21 @@ impl NoopStartupHandler for DummyProcessor {
     }
 }
 
-fn map_python_type_to_pgwire(t: &str) -> Type {
-    match t {
-        "int" => Type::INT8,
-        "float" => Type::FLOAT8,
-        "str" => Type::VARCHAR,
-        "bool" => Type::BOOL,
-        "date" => Type::DATE,
-        "datetime" => Type::TIMESTAMP,
-        _ => Type::VARCHAR,
-    }
-}
-
-#[pyclass]
-struct CallbackWrapper {
-    sender: Arc<Mutex<Option<oneshot::Sender<(Vec<std::collections::HashMap<String, String>>, Vec<Vec<Option<String>>>)>>>>,
-}
-
-#[pymethods]
-impl CallbackWrapper {
-    fn __call__(&self, result: PyObject) {
-        let sender = self.sender.lock().unwrap().take();
-        if let Some(s) = sender {
-            Python::with_gil(|py| {
-                let parsed: PyResult<(Vec<std::collections::HashMap<String, String>>, Vec<Vec<PyObject>>)> = result.extract(py);
-                if let Ok((schema_desc, py_rows)) = parsed {
-                    let converted_rows: Vec<Vec<Option<String>>> = py_rows
-                        .into_iter()
-                        .map(|row| {
-                            row.into_iter()
-                                .map(|val| {
-                                    Python::with_gil(|py| {
-                                        let v = val.as_ref(py);
-                                        if v.is_none() {
-                                            Ok::<Option<String>, ()>(None)
-
-                                        } else {
-                                            match v.str() {
-                                                Ok(pystr) => Ok(Some(pystr.to_str().unwrap_or("").to_string())),
-                                                Err(_) => Ok(None),
-                                            }
-                                        }
-                                    }).unwrap_or(None)
-                                })
-                                .collect()
-                        })
-                        .collect();
-                    let _ = s.send((schema_desc, converted_rows));
-                }
-            });
-        }
-    }
-}
-
-
 #[async_trait]
 impl SimpleQueryHandler for DummyProcessor {
     async fn do_query<'a, C>(
         &self,
         _client: &mut C,
         query: &'a str,
-    ) -> pgwire::error::PgWireResult<Vec<Response<'a>>>
+    ) -> PgWireResult<Vec<Response<'a>>>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: std::fmt::Debug,
-        pgwire::error::PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let cb = self.callback.lock().unwrap().clone();
-        if cb.is_none() {
-            return Ok(vec![Response::Execution(Tag::new("NO_CALLBACK"))]);
-        }
-
-        let (tx, rx) = oneshot::channel();
-        let sender = Arc::new(Mutex::new(Some(tx)));
-
-        Python::with_gil(|py| {
-            let wrapper = Py::new(py, CallbackWrapper { sender }).unwrap();
-            let cb = cb.unwrap();
-            let _ = cb.call1(py, PyTuple::new(py, &[query.into_py(py), wrapper.into_py(py)]));
-        });
-
-        let (schema_desc, rows_list) = rx.await.unwrap();
+        println!("[PGWIRE] 1 do_query called with: {}", query);
+        let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
+        println!("[PGWIRE] Schema and rows received");
 
         let mut fields = Vec::new();
         for col in &schema_desc {
@@ -161,6 +198,7 @@ impl SimpleQueryHandler for DummyProcessor {
         Ok(vec![Response::Query(QueryResponse::new(schema, data_row_stream))])
     }
 }
+
 struct DummyProcessorFactory {
     handler: Arc<DummyProcessor>,
 }
@@ -196,20 +234,13 @@ impl PgWireServerHandlers for DummyProcessorFactory {
 async fn detect_gssencmode(mut socket: TcpStream) -> Option<TcpStream> {
     let mut buf = [0u8; 8];
 
-    // Peek at the first 8 bytes without consuming them
     if let Ok(n) = socket.peek(&mut buf).await {
-        println!("peeked 8 bytes: {:?}", &buf[..n]);
-
         if n == 8 {
             let request_code = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
-            println!("request_code: {:?}", request_code);
-
             if request_code == 80877104 {
-                println!("Client attempted GSSAPI encryption, but it is not supported.");
                 if let Err(e) = socket.read_exact(&mut buf).await {
                     println!("Failed to consume GSSAPI request: {:?}", e);
                 }
-                // Send 'N' response to indicate GSSAPI encryption is not available
                 if let Err(e) = socket.write_all(b"N").await {
                     println!("Failed to send rejection message: {:?}", e);
                 }
@@ -240,23 +271,30 @@ impl Server {
         *self.callback.lock().unwrap() = Some(cb);
     }
 
-    fn start(&self) {
-        pyo3::prepare_freethreaded_python();
 
+    fn start(&self, py: Python) {
+        py.allow_threads(|| {
+            self.run_server();
+        });
+    }
+
+    fn run_server(&self) {
         let addr = self.addr.clone();
         let callback = self.callback.clone();
+
         if callback.lock().unwrap().is_none() {
             panic!("No callback set. Use set_callback() before starting the server.");
         }
-        //
-        let rt = tokio::runtime::Builder::new_current_thread()
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
 
         rt.block_on(async move {
+            let py_worker = Arc::new(PythonWorker::new(callback));
             let factory = Arc::new(DummyProcessorFactory {
-                handler: Arc::new(DummyProcessor { callback }),
+                handler: Arc::new(DummyProcessor { py_worker }),
             });
             let listener = TcpListener::bind(&addr).await.unwrap();
             println!("Listening on {}", addr);

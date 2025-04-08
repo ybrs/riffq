@@ -1,3 +1,5 @@
+import threading
+
 from riffq import riffq
 
 def handle_query(sql, callback):
@@ -14,3 +16,6 @@ if __name__ == "__main__":
     server = riffq.Server("127.0.0.1:5433")
     server.set_callback(handle_query)
     server.start()
+    # t = threading.Thread(target=server.start)
+    # t.start()
+    # t.join()

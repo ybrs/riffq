@@ -1,0 +1,5 @@
+pg8000
+sqlalchemy
+maturin
+duckdb
+pandas

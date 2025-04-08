@@ -1,14 +1,14 @@
 from riffq import riffq
 
-def run_query(query):
-    return [{"err": "str"}], [["unknown query"]]
-
-def handle_query(sql):
+def handle_query(sql, callback):
     print("< received (python):", sql)
-    return (
+
+    result = (
         [ {"name": "err", "type": "str"} ],
         [ ["unknown query"] ]
     )
+
+    callback(result)
 
 if __name__ == "__main__":
     server = riffq.Server("127.0.0.1:5433")

@@ -23,8 +23,14 @@ use pgwire::api::{
 use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use pgwire::tokio::process_socket;
+use tokio::sync::oneshot;
 
-pub struct DummyProcessor(Arc<Mutex<Option<Py<PyAny>>>>);
+
+use pyo3::types::PyTuple;
+
+pub struct DummyProcessor {
+    callback: Arc<Mutex<Option<Py<PyAny>>>>,
+}
 
 #[async_trait]
 impl NoopStartupHandler for DummyProcessor {
@@ -56,113 +62,105 @@ fn map_python_type_to_pgwire(t: &str) -> Type {
     }
 }
 
+#[pyclass]
+struct CallbackWrapper {
+    sender: Arc<Mutex<Option<oneshot::Sender<(Vec<std::collections::HashMap<String, String>>, Vec<Vec<Option<String>>>)>>>>,
+}
+
+#[pymethods]
+impl CallbackWrapper {
+    fn __call__(&self, result: PyObject) {
+        let sender = self.sender.lock().unwrap().take();
+        if let Some(s) = sender {
+            Python::with_gil(|py| {
+                let parsed: PyResult<(Vec<std::collections::HashMap<String, String>>, Vec<Vec<PyObject>>)> = result.extract(py);
+                if let Ok((schema_desc, py_rows)) = parsed {
+                    let converted_rows: Vec<Vec<Option<String>>> = py_rows
+                        .into_iter()
+                        .map(|row| {
+                            row.into_iter()
+                                .map(|val| {
+                                    Python::with_gil(|py| {
+                                        let v = val.as_ref(py);
+                                        if v.is_none() {
+                                            Ok::<Option<String>, ()>(None)
+
+                                        } else {
+                                            match v.str() {
+                                                Ok(pystr) => Ok(Some(pystr.to_str().unwrap_or("").to_string())),
+                                                Err(_) => Ok(None),
+                                            }
+                                        }
+                                    }).unwrap_or(None)
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    let _ = s.send((schema_desc, converted_rows));
+                }
+            });
+        }
+    }
+}
+
 
 #[async_trait]
 impl SimpleQueryHandler for DummyProcessor {
     async fn do_query<'a, C>(
         &self,
-        client: &mut C,
+        _client: &mut C,
         query: &'a str,
-    ) -> PgWireResult<Vec<Response<'a>>>
+    ) -> pgwire::error::PgWireResult<Vec<Response<'a>>>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: std::fmt::Debug,
-        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+        pgwire::error::PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        println!("Received query: {}", query);
-
-        let lowercase = query.trim().to_lowercase();
-        if lowercase.starts_with("begin") {
-            // Return "BEGIN" as the tag
-            return Ok(vec![Response::Execution(Tag::new("BEGIN"))]);
-        } else if lowercase.starts_with("commit") {
-            return Ok(vec![Response::Execution(Tag::new("COMMIT"))]);
-        } else if lowercase.starts_with("rollback") {
-            return Ok(vec![Response::Execution(Tag::new("ROLLBACK"))]);
+        let cb = self.callback.lock().unwrap().clone();
+        if cb.is_none() {
+            return Ok(vec![Response::Execution(Tag::new("NO_CALLBACK"))]);
         }
 
-        println!("Received query 1.2: {}", query);
+        let (tx, rx) = oneshot::channel();
+        let sender = Arc::new(Mutex::new(Some(tx)));
 
-        if let Some(cb) = self.0.lock().unwrap().as_ref() {
+        Python::with_gil(|py| {
+            let wrapper = Py::new(py, CallbackWrapper { sender }).unwrap();
+            let cb = cb.unwrap();
+            let _ = cb.call1(py, PyTuple::new(py, &[query.into_py(py), wrapper.into_py(py)]));
+        });
 
-            println!("Received query 2: {}", query);
+        let (schema_desc, rows_list) = rx.await.unwrap();
 
+        let mut fields = Vec::new();
+        for col in &schema_desc {
+            let col_name = col.get("name").unwrap();
+            let col_type = col.get("type").unwrap();
 
-            let result = Python::with_gil(|py| {
-                cb.call1(py, (query,))
-                    .and_then(|obj| {
-                        obj.extract::<(
-                            Vec<std::collections::HashMap<String, String>>,
-                            Vec<Vec<PyObject>>,
-                        )>(py)
-                    })
-                    .and_then(|(schema_desc, py_rows)| {
-                        println!("Received query 3: {}", query);
+            fields.push(FieldInfo::new(
+                col_name.clone().into(),
+                None,
+                None,
+                map_python_type_to_pgwire(col_type),
+                FieldFormat::Text,
+            ));
+        }
 
-                        // Pre-convert rows to Vec<Vec<Option<String>>>
-                        let converted_rows: Vec<Vec<Option<String>>> = py_rows
-                            .into_iter()
-                            .map(|row| {
-                                row.into_iter()
-                                    .map(|val| {
-                                        let s: Result<Option<String>, ()> = Python::with_gil(|py| {
-                                            let v = val.as_ref(py);
-                                            if v.is_none() {
-                                                Ok(None)
-                                            } else {
-                                                match v.str() {
-                                                    Ok(pystr) => Ok(Some(pystr.to_str().unwrap_or("").to_string())),
-                                                    Err(_) => Ok(None),
-                                                }
-                                            }
-                                        });
-                                        s.unwrap_or(None)
-                                    })
-                                    .collect()
-                            })
-                            .collect();
-                        Ok((schema_desc, converted_rows))
-                    })
+        let schema = Arc::new(fields);
+        let schema_ref = schema.clone();
+
+        let data_row_stream =
+            futures::stream::iter(rows_list.into_iter()).map(move |row| {
+                let mut encoder = DataRowEncoder::new(schema_ref.clone());
+                for val in row {
+                    encoder.encode_field(&val)?;
+                }
+                encoder.finish()
             });
 
-            if let Ok((schema_desc, rows_list)) = result {
-                let mut fields = Vec::new();
-                for col in &schema_desc {
-                    let col_name = col.get("name").unwrap();
-                    let col_type = col.get("type").unwrap();
-
-                    fields.push(FieldInfo::new(
-                        col_name.clone().into(),
-                        None,
-                        None,
-                        map_python_type_to_pgwire(col_type),
-                        FieldFormat::Text,
-                    ));
-                }
-
-                let schema = Arc::new(fields);
-                let schema_ref = schema.clone();
-
-                let data_row_stream =
-                    futures::stream::iter(rows_list.into_iter()).map(move |row| {
-                        let mut encoder = DataRowEncoder::new(schema_ref.clone());
-                        for val in row {
-                            encoder.encode_field(&val)?;
-                        }
-                        encoder.finish()
-                    });
-
-                return Ok(vec![Response::Query(QueryResponse::new(
-                    schema,
-                    data_row_stream,
-                ))]);
-            }
-        }
-
-        Ok(vec![Response::Execution(Tag::new("OK").with_rows(1))])
+        Ok(vec![Response::Query(QueryResponse::new(schema, data_row_stream))])
     }
 }
-
 struct DummyProcessorFactory {
     handler: Arc<DummyProcessor>,
 }
@@ -258,7 +256,7 @@ impl Server {
 
         rt.block_on(async move {
             let factory = Arc::new(DummyProcessorFactory {
-                handler: Arc::new(DummyProcessor(callback)),
+                handler: Arc::new(DummyProcessor { callback }),
             });
             let listener = TcpListener::bind(&addr).await.unwrap();
             println!("Listening on {}", addr);

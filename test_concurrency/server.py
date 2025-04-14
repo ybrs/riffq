@@ -55,8 +55,19 @@ def _handle_query(sql, callback):
             ]
         )
 
-        callback(result)
-        return
+        return callback(result)
+
+
+    if sql.strip().lower() == "show transaction isolation level":
+        return callback(([
+            {"name": "transaction_isolation", "type": "string"},
+        ], [ ["read committed"] ] ))
+
+    if sql.strip().lower() == "select current_schema()":
+        return callback(([
+                             {"name": "current_schema", "type": "string"},
+                         ], [ ["public"] ] ))
+
 
     try:
         res = local_con.sql(sql)

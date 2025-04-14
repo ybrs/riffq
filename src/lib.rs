@@ -14,20 +14,20 @@ use std::thread;
 
 use pgwire::api::auth::noop::NoopStartupHandler;
 use pgwire::api::copy::NoopCopyHandler;
-use pgwire::api::query::{SimpleQueryHandler, PlaceholderExtendedQueryHandler};
-use pgwire::api::results::{
-    DataRowEncoder, FieldFormat, FieldInfo, QueryResponse, Response, Tag
-};
-use pgwire::api::{ClientInfo, NoopErrorHandler, PgWireServerHandlers, Type};
+use pgwire::api::query::{SimpleQueryHandler, ExtendedQueryHandler};
+use pgwire::api::results::{DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
+use pgwire::api::{ClientInfo, ClientPortalStore, NoopErrorHandler, PgWireServerHandlers, Type};
+use pgwire::api::portal::Portal;
 use pgwire::error::{PgWireError, PgWireResult};
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use pgwire::tokio::process_socket;
+use pgwire::api::stmt::{StoredStatement, NoopQueryParser};
 
 fn map_python_type_to_pgwire(t: &str) -> Type {
     match t {
         "int" => Type::INT8,
         "float" => Type::FLOAT8,
-        "str" => Type::VARCHAR,
+        "str" | "string" => Type::VARCHAR,
         "bool" => Type::BOOL,
         "date" => Type::DATE,
         "datetime" => Type::TIMESTAMP,
@@ -165,9 +165,22 @@ impl SimpleQueryHandler for DummyProcessor {
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        let lowercase = query.trim().to_lowercase();
+        if lowercase.starts_with("begin") {
+            println!("[PGWIRE] X BEGIN");
+            return Ok(vec![Response::Execution(Tag::new("BEGIN"))]);
+        } else if lowercase.starts_with("commit") {
+            return Ok(vec![Response::Execution(Tag::new("COMMIT"))]);
+        } else if lowercase.starts_with("rollback") {
+            println!("[PGWIRE] X ROLLBACK");
+            return Ok(vec![Response::Execution(Tag::new("ROLLBACK"))]);
+        }
+
+
         println!("[PGWIRE] 1 do_query called with: {}", query);
         let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
         println!("[PGWIRE] Schema and rows received");
+
 
         let mut fields = Vec::new();
         for col in &schema_desc {
@@ -199,14 +212,135 @@ impl SimpleQueryHandler for DummyProcessor {
     }
 }
 
+pub struct MyExtendedQueryHandler {
+    pub py_worker: Arc<PythonWorker>,
+}
+#[derive(Clone)]
+pub struct MyStatement {
+    pub query: String,
+}
+pub struct MyQueryParser;
+
+#[async_trait]
+impl pgwire::api::stmt::QueryParser for MyQueryParser {
+    type Statement = MyStatement;
+
+    async fn parse_sql(&self, sql: &str, _types: &[Type]) -> PgWireResult<Self::Statement> {
+        Ok(MyStatement {
+            query: sql.to_string(),
+        })
+    }
+}
+
+#[async_trait]
+impl ExtendedQueryHandler for MyExtendedQueryHandler {
+    type Statement = MyStatement;
+    type QueryParser = MyQueryParser;
+
+    fn query_parser(&self) -> Arc<Self::QueryParser> {
+        Arc::new(MyQueryParser)
+    }
+
+
+    async fn do_query<'a, 'b: 'a, C>(
+        &'b self,
+        _client: &mut C,
+        portal: &'a Portal<Self::Statement>,
+        _max_rows: usize,
+    ) -> PgWireResult<Response<'a>>
+    where
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: std::fmt::Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        let query = &portal.statement.statement.query;
+        println!("[PGWIRE EXTENDED] do_query: {:?}", portal.statement.statement.query);
+
+        let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
+
+        let mut fields = Vec::new();
+        for col in &schema_desc {
+            let col_name = col.get("name").unwrap();
+            let col_type = col.get("type").unwrap();
+            fields.push(FieldInfo::new(
+                col_name.clone().into(),
+                None,
+                None,
+                map_python_type_to_pgwire(col_type),
+                FieldFormat::Text,
+            ));
+        }
+
+        let schema = Arc::new(fields);
+        let schema_ref = schema.clone();
+
+        let data_row_stream = futures::stream::iter(rows_list.into_iter()).map(move |row| {
+            let mut encoder = DataRowEncoder::new(schema_ref.clone());
+            for val in row {
+                encoder.encode_field(&val)?;
+            }
+            encoder.finish()
+        });
+
+        Ok(Response::Query(QueryResponse::new(schema, data_row_stream)))
+    }
+
+    async fn do_describe_statement<C>(
+        &self,
+        _client: &mut C,
+        _statement: &StoredStatement<Self::Statement>,
+    ) -> PgWireResult<DescribeStatementResponse>
+    where
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: std::fmt::Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        Ok(DescribeStatementResponse::new(vec![], vec![]))
+    }
+
+
+    async fn do_describe_portal<C>(
+        &self,
+        _client: &mut C,
+        portal: &Portal<Self::Statement>,
+    ) -> PgWireResult<DescribePortalResponse>
+    where
+        C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
+        C::Error: std::fmt::Debug,
+        PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
+    {
+        let query = &portal.statement.statement.query;
+        let (schema_desc, _) = self.py_worker.query(query.to_string()).await;
+
+        let mut fields = Vec::new();
+        for col in &schema_desc {
+            let col_name = col.get("name").unwrap();
+            let col_type = col.get("type").unwrap();
+            fields.push(FieldInfo::new(
+                col_name.clone().into(),
+                None,
+                None,
+                map_python_type_to_pgwire(col_type),
+                FieldFormat::Text,
+            ));
+        }
+
+        Ok(DescribePortalResponse::new(fields))
+    }
+
+
+
+}
+
 struct DummyProcessorFactory {
     handler: Arc<DummyProcessor>,
+    extended_handler: Arc<MyExtendedQueryHandler>,
 }
 
 impl PgWireServerHandlers for DummyProcessorFactory {
     type StartupHandler = DummyProcessor;
     type SimpleQueryHandler = DummyProcessor;
-    type ExtendedQueryHandler = PlaceholderExtendedQueryHandler;
+    type ExtendedQueryHandler = MyExtendedQueryHandler;
     type CopyHandler = NoopCopyHandler;
     type ErrorHandler = NoopErrorHandler;
 
@@ -214,8 +348,9 @@ impl PgWireServerHandlers for DummyProcessorFactory {
         self.handler.clone()
     }
 
+
     fn extended_query_handler(&self) -> Arc<Self::ExtendedQueryHandler> {
-        Arc::new(PlaceholderExtendedQueryHandler)
+        self.extended_handler.clone()
     }
 
     fn startup_handler(&self) -> Arc<Self::StartupHandler> {
@@ -293,9 +428,12 @@ impl Server {
 
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(callback));
+
             let factory = Arc::new(DummyProcessorFactory {
-                handler: Arc::new(DummyProcessor { py_worker }),
+                handler: Arc::new(DummyProcessor { py_worker: py_worker.clone() }),
+                extended_handler: Arc::new(MyExtendedQueryHandler { py_worker }),
             });
+
             let listener = TcpListener::bind(&addr).await.unwrap();
             println!("Listening on {}", addr);
 

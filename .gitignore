@@ -2,3 +2,7 @@
 .DS_Store/
 target/
 .DS_Store
+/test_concurrency/duckdata.db
+/test_concurrency/duckdata.db.wal
+examples/
+__pycache__/

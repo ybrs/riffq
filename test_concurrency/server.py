@@ -42,7 +42,7 @@ def get_schema_from_duckdb(columns, types):
     return schema
 
 
-def _handle_query(sql, callback):
+def _handle_query(sql, callback, **kwargs):
     local_con = duckdb_con.cursor()
     print("< received (python):", sql)
     if sql.strip().lower() == "select pg_catalog.version()":
@@ -81,7 +81,7 @@ def _handle_query(sql, callback):
         )
         callback(result)
 
-def handle_query(sql, callback):
+def handle_query(sql, callback, **kwargs):
     def task():
         try:
             _handle_query(sql, callback)

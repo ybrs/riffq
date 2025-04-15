@@ -45,7 +45,7 @@ def run_heavy_polars_query():
         pl.col("result").sum()
     ]).collect()
 
-def _handle_query(sql, callback):
+def _handle_query(sql, callback, **kwargs):
     print("< received (python):", sql)
     sql_lc = sql.strip().lower()
 
@@ -82,7 +82,7 @@ def _handle_query(sql, callback):
         )
         callback(result)
 
-def handle_query(sql, callback):
+def handle_query(sql, callback, **kwargs):
     def task():
         try:
             _handle_query(sql, callback)

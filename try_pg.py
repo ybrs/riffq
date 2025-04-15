@@ -3,8 +3,8 @@ import threading
 
 from riffq import riffq
 
-def _handle_query(sql, callback):
-    print("< received (python):", sql)
+def _handle_query(sql, callback, **kwargs):
+    print("< received (python):", sql, kwargs)
 
     print("sql", sql.strip().lower())
     if sql.strip().lower() == "select pg_catalog.version()":
@@ -31,9 +31,9 @@ def _handle_query(sql, callback):
 
     callback(result)
 
-def handle_query(sql, callback):
+def handle_query(sql, callback, **kwargs):
     try:
-        _handle_query(sql, callback)
+        _handle_query(sql, callback, **kwargs)
     except:
         logging.exception("exception on executing query")
 
@@ -42,6 +42,3 @@ if __name__ == "__main__":
     server = riffq.Server("127.0.0.1:5433")
     server.set_callback(handle_query)
     server.start()
-    # t = threading.Thread(target=server.start)
-    # t.start()
-    # t.join()

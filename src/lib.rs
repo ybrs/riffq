@@ -7,7 +7,7 @@ use tokio::signal;
 use tokio::sync::oneshot;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::net::TcpStream;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyDict, PyList, PyTuple};
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
@@ -39,6 +39,14 @@ fn map_python_type_to_pgwire(t: &str) -> Type {
     }
 }
 
+
+pub struct WorkerMessage {
+    pub query: String,
+    pub params: Option<Vec<Option<Bytes>>>,
+    pub param_types: Option<Vec<Type>>,
+    pub do_describe: bool,
+    pub responder: oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>,
+}
 
 #[pyclass]
 struct CallbackWrapper {
@@ -80,15 +88,12 @@ impl CallbackWrapper {
 }
 
 pub struct PythonWorker {
-    sender: Sender<(String, oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>)>,
+    sender: Sender<WorkerMessage>,
 }
 
 impl PythonWorker {
     fn new(callback: Arc<Mutex<Option<Py<PyAny>>>>) -> Self {
-        let (tx, rx): (
-            Sender<(String, oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>)>,
-            std::sync::mpsc::Receiver<(String, oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>)>
-        ) = channel();
+        let (tx, rx) = channel::<WorkerMessage>();
 
         thread::spawn(move || {
             println!("[PY_WORKER] Thread started");
@@ -96,22 +101,79 @@ impl PythonWorker {
             loop {
                 println!("[PY_WORKER] waiting to receive on rx...");
                 match rx.recv() {
-                    Ok((query, responder)) => {
+                    Ok(msg) => {
+                        let WorkerMessage {
+                            query,
+                            params,
+                            param_types,
+                            do_describe,
+                            responder,
+                        } = msg;
+
                         println!("[PY_WORKER] received query: {}", query);
                         let cb_opt = callback.lock().unwrap().clone();
+
                         if let Some(cb) = cb_opt {
                             Python::with_gil(|py| {
                                 println!("[PY_WORKER] GIL acquired, invoking callback");
                                 let wrapper = Py::new(py, CallbackWrapper {
                                     responder: Arc::new(Mutex::new(Some(responder))),
                                 }).unwrap();
-                                // TODO: for extended query we need to pass another keyword argument "query_args"
-                                // TODO: for extended query we need to pass another keyword argument "do_describe"
-                                //   so user can decide what to do
-                                let _ = cb.call1(py, PyTuple::new(py, &[query.into_py(py), wrapper.into_py(py)]));
+
+                                let args = PyTuple::new(py, &[query.into_py(py), wrapper.into_py(py)]);
+                                let kwargs = PyDict::new(py);
+
+                                // Add do_describe flag
+                                kwargs.set_item("do_describe", do_describe).unwrap();
+
+                                // Add query_args if present
+                                if let (Some(params), Some(param_types)) = (&params, &param_types) {
+                                    let py_args = PyList::empty(py);
+                                    for (val, ty) in params.iter().zip(param_types.iter()) {
+                                        let py_obj = match val {
+                                            None => py.None(),
+                                            Some(bytes) => {
+                                                let mut buf = &bytes[..];
+                                                match ty {
+                                                    &Type::INT2 => i16::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
+                                                    &Type::INT4 => i32::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
+                                                    &Type::INT8 => i64::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
+                                                    &Type::FLOAT4 => f32::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
+                                                    &Type::FLOAT8 => f64::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
+                                                    &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR => {
+                                                        String::from_sql(ty, &mut buf).map(|v| v.into_py(py))
+                                                    }
+                                                    _ => Ok(py.None()),
+                                                }.unwrap_or_else(|_| py.None())
+                                            }
+                                        };
+                                        py_args.append(py_obj).unwrap();
+                                    }
+
+                                    kwargs.set_item("query_args", py_args).unwrap();
+                                }
+
+                                let _ = cb.call(py, args, Some(kwargs));
                             });
                         }
                     }
+
+                    // Ok((query, responder)) => {
+                    //     println!("[PY_WORKER] received query: {}", query);
+                    //     let cb_opt = callback.lock().unwrap().clone();
+                    //     if let Some(cb) = cb_opt {
+                    //         Python::with_gil(|py| {
+                    //             println!("[PY_WORKER] GIL acquired, invoking callback");
+                    //             let wrapper = Py::new(py, CallbackWrapper {
+                    //                 responder: Arc::new(Mutex::new(Some(responder))),
+                    //             }).unwrap();
+                    //             // TODO: for extended query we need to pass another keyword argument "query_args"
+                    //             // TODO: for extended query we need to pass another keyword argument "do_describe"
+                    //             //   so user can decide what to do
+                    //             let _ = cb.call1(py, PyTuple::new(py, &[query.into_py(py), wrapper.into_py(py)]));
+                    //         });
+                    //     }
+                    // }
                     Err(_) => {
                         println!("[PY_WORKER] Channel closed");
                         break;
@@ -124,10 +186,24 @@ impl PythonWorker {
     }
 
 
-    async fn query(&self, query: String) -> (Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>) {
+    pub async fn query(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+    ) -> (Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>) {
         let (tx, rx) = oneshot::channel();
         println!("[RUST] Sending query to worker: {}", query);
-        self.sender.send((query, tx)).expect("Send failed!");
+
+        self.sender.send(WorkerMessage {
+            query,
+            params,
+            param_types,
+            do_describe,
+            responder: tx,
+        }).expect("Send failed!");
+
         rx.await.unwrap_or_else(|e| {
             println!("[RUST] Worker failed: {:?}", e);
             (vec![], vec![])
@@ -181,7 +257,10 @@ impl SimpleQueryHandler for DummyProcessor {
 
 
         println!("[PGWIRE] do_query called with: {}", query);
-        let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
+        // let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
+        let (schema_desc, rows_list) = self.py_worker
+            .query(query.to_string(), None, None, false, )
+            .await;
         println!("[PGWIRE] Schema and rows received");
 
 
@@ -284,7 +363,15 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
         let query = &portal.statement.statement.query;
         println!("[PGWIRE EXTENDED] do_query: {} {}", portal.statement.statement.query, _debug_parameters(&portal.parameters, &portal.statement.parameter_types));
 
-        let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
+
+        let (schema_desc, rows_list) = self.py_worker
+            .query(
+                query.to_string(),
+                Some(portal.parameters.clone()),
+                Some(portal.statement.parameter_types.clone()),
+                false,
+            )
+            .await;
 
         let mut fields = Vec::new();
         for col in &schema_desc {
@@ -342,7 +429,15 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
 
 
 
-        let (schema_desc, _) = self.py_worker.query(query.to_string()).await;
+
+        let (schema_desc, rows_list) = self.py_worker
+            .query(
+                query.to_string(),
+                Some(portal.parameters.clone()),
+                Some(portal.statement.parameter_types.clone()),
+                true,
+            )
+            .await;
 
         let mut fields = Vec::new();
         for col in &schema_desc {

@@ -1,3 +1,5 @@
+mod director;
+
 use pyo3::prelude::*;
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
@@ -426,9 +428,6 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
     {
         let query = &portal.statement.statement.query;
         let params = &portal.parameters;
-
-
-
 
         let (schema_desc, rows_list) = self.py_worker
             .query(

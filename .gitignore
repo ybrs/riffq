@@ -6,3 +6,5 @@ target/
 /test_concurrency/duckdata.db.wal
 examples/
 __pycache__/
+duckdata.db
+duckdata.db.wal

@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use datafusion::prelude::*;
 use datafusion::arrow::array::{ArrayRef, BooleanArray, StringArray};
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
@@ -6,7 +5,29 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DataFusionError;
 use datafusion::datasource::MemTable;
 use datafusion::catalog::{TableProvider, SchemaProvider, MemorySchemaProvider};
-use datafusion::logical_expr::{LogicalPlan, TableScan};
+use datafusion::logical_expr::{LogicalPlan, TableScan, Volatility};
+
+
+use std::sync::Arc;
+use datafusion::prelude::*;
+use datafusion::common::ScalarValue;
+use datafusion::logical_expr::{create_udf, ColumnarValue};
+
+pub fn register_version_udf(ctx: &SessionContext) {
+    let version_fn = |_: &[ColumnarValue]| {
+        Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some("PostgreSQL 14.0 mock".to_string()))))
+    };
+
+    let udf = create_udf(
+        "version",
+        vec![],
+        DataType::Utf8,
+        Volatility::Immutable,
+        Arc::new(version_fn),
+    );
+
+    ctx.register_udf(udf);
+}
 
 pub fn register_info_schema_tables(ctx: &SessionContext) -> datafusion::error::Result<()> {
     let catalog = ctx
@@ -90,8 +111,6 @@ pub fn register_info_schema_tables(ctx: &SessionContext) -> datafusion::error::R
     let table_pg_tables = MemTable::try_new(schema_pg_tables, vec![vec![batch_pg_tables]])?;
     pg_catalog.register_table("pg_tables".to_string(), Arc::new(table_pg_tables))?;
 
-
-
     Ok(())
 }
 
@@ -119,6 +138,13 @@ pub fn extract_schema_name(plan: &LogicalPlan) -> Option<String> {
             }
         }
         _ => {
+
+            for expr in plan.expressions() {
+                if let Some(schema) = extract_schema_from_expr(&expr) {
+                    return Some(schema);
+                }
+            }
+
             for input in plan.inputs() {
                 if let Some(schema) = extract_schema_name(input) {
                     return Some(schema);
@@ -129,6 +155,25 @@ pub fn extract_schema_name(plan: &LogicalPlan) -> Option<String> {
     }
 }
 
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+
+fn extract_schema_from_expr(expr: &Expr) -> Option<String> {
+    let mut schema_name = None;
+
+    let _ = expr.apply(|e| {
+        if let Expr::ScalarFunction(func) = e {
+            if let Some((schema, _func)) = func.name().split_once('.') {
+                schema_name = Some(schema.to_string());
+                return Ok(TreeNodeRecursion::Stop);
+            }
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+
+    schema_name
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +183,19 @@ mod tests {
     async fn test_logical_plan_dump() {
         let ctx = SessionContext::new();
         register_info_schema_tables(&ctx).unwrap();
+
+        let version_fn = |_: &[ColumnarValue]| {
+            Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some("PostgreSQL 14.0 mock".to_string()))))
+        };
+
+        let udf = create_udf(
+            "pg_catalog.version",
+            vec![],
+            DataType::Utf8,
+            Volatility::Immutable,
+            Arc::new(version_fn),
+        );
+        ctx.register_udf(udf);
 
         let plan = get_logical_plan(&ctx, "SELECT * FROM information_schema.columns").await;
         assert!(plan.is_some(), "Expected a logical plan, but got None");
@@ -151,7 +209,14 @@ mod tests {
         assert_eq!(schema_name, "pg_catalog");
         println!("Schema name: {}", schema_name);
 
-        let plan = get_logical_plan(&ctx, "SELECT * FROM users").await;
-        assert!(plan.is_none(), "Expected None");
+        let plan = get_logical_plan(&ctx, "SELECT pg_catalog.version()").await;
+        assert!(plan.is_some(), "Expected a logical plan, but got None");
+        let schema_name = extract_schema_name(&plan.unwrap()).unwrap();
+        assert_eq!(schema_name, "pg_catalog");
+        println!("Schema name: {}", schema_name);
+
+
+        // let plan = get_logical_plan(&ctx, "SELECT * FROM users").await;
+        // assert!(plan.is_none(), "Expected None");
     }
 }

@@ -2710,6 +2710,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "datafusion",
+ "datafusion-expr",
  "futures",
  "hex",
  "pgwire",

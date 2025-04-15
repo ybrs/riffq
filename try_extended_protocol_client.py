@@ -4,6 +4,8 @@ with psycopg.connect("postgresql://user:password@localhost:5433/dbname") as conn
     with conn.cursor() as cur:
         cur.execute("SELECT %s AS foo", (42,))
         print(cur.fetchone())
+        cur.execute("SELECT %s AS foo", ('42',))
+        print(cur.fetchone())
 
 
 # from sqlalchemy import create_engine, text

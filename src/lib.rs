@@ -12,6 +12,10 @@ use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
 
+use bytes::Bytes;
+use std::error::Error;
+use postgres_types::FromSql;
+
 use pgwire::api::auth::noop::NoopStartupHandler;
 use pgwire::api::copy::NoopCopyHandler;
 use pgwire::api::query::{SimpleQueryHandler, ExtendedQueryHandler};
@@ -101,6 +105,9 @@ impl PythonWorker {
                                 let wrapper = Py::new(py, CallbackWrapper {
                                     responder: Arc::new(Mutex::new(Some(responder))),
                                 }).unwrap();
+                                // TODO: for extended query we need to pass another keyword argument "query_args"
+                                // TODO: for extended query we need to pass another keyword argument "do_describe"
+                                //   so user can decide what to do
                                 let _ = cb.call1(py, PyTuple::new(py, &[query.into_py(py), wrapper.into_py(py)]));
                             });
                         }
@@ -121,13 +128,10 @@ impl PythonWorker {
         let (tx, rx) = oneshot::channel();
         println!("[RUST] Sending query to worker: {}", query);
         self.sender.send((query, tx)).expect("Send failed!");
-        match rx.await {
-            Ok(result) => result,
-            Err(e) => {
-                println!("[RUST] Worker failed: {:?}", e);
-                (vec![], vec![])
-            }
-        }
+        rx.await.unwrap_or_else(|e| {
+            println!("[RUST] Worker failed: {:?}", e);
+            (vec![], vec![])
+        })
     }
 }
 
@@ -165,19 +169,18 @@ impl SimpleQueryHandler for DummyProcessor {
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        // TODO: this should be up to the user to be handled here
         let lowercase = query.trim().to_lowercase();
         if lowercase.starts_with("begin") {
-            println!("[PGWIRE] X BEGIN");
             return Ok(vec![Response::Execution(Tag::new("BEGIN"))]);
         } else if lowercase.starts_with("commit") {
             return Ok(vec![Response::Execution(Tag::new("COMMIT"))]);
         } else if lowercase.starts_with("rollback") {
-            println!("[PGWIRE] X ROLLBACK");
             return Ok(vec![Response::Execution(Tag::new("ROLLBACK"))]);
         }
 
 
-        println!("[PGWIRE] 1 do_query called with: {}", query);
+        println!("[PGWIRE] do_query called with: {}", query);
         let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
         println!("[PGWIRE] Schema and rows received");
 
@@ -232,6 +235,31 @@ impl pgwire::api::stmt::QueryParser for MyQueryParser {
     }
 }
 
+
+fn _debug_parameters(params: &[Option<Bytes>], types: &[Type]) -> String {
+    params.iter().zip(types.iter()).map(|(param, ty)| {
+        match param {
+            None => "NULL".to_string(),
+            Some(bytes) => {
+                let mut buf = &bytes[..];
+                let decoded = match ty {
+                    &Type::INT2 => i16::from_sql(ty, &mut buf).map(|v| v.to_string()),
+                    &Type::INT4 => i32::from_sql(ty, &mut buf).map(|v| v.to_string()),
+                    &Type::INT8 => i64::from_sql(ty, &mut buf).map(|v| v.to_string()),
+                    &Type::FLOAT4 => f32::from_sql(ty, &mut buf).map(|v| v.to_string()),
+                    &Type::FLOAT8 => f64::from_sql(ty, &mut buf).map(|v| v.to_string()),
+                    &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR => {
+                        String::from_sql(ty, &mut buf).map(|s| format!("{:?}", s))
+                    }
+                    _ => Err("unsupported type".into())
+                };
+                decoded.unwrap_or_else(|_| format!("0x{}", hex::encode(bytes)))
+            }
+        }
+    }).collect::<Vec<_>>().join(", ")
+}
+
+
 #[async_trait]
 impl ExtendedQueryHandler for MyExtendedQueryHandler {
     type Statement = MyStatement;
@@ -254,7 +282,7 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let query = &portal.statement.statement.query;
-        println!("[PGWIRE EXTENDED] do_query: {:?}", portal.statement.statement.query);
+        println!("[PGWIRE EXTENDED] do_query: {} {}", portal.statement.statement.query, _debug_parameters(&portal.parameters, &portal.statement.parameter_types));
 
         let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
 
@@ -310,6 +338,10 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let query = &portal.statement.statement.query;
+        let params = &portal.parameters;
+
+
+
         let (schema_desc, _) = self.py_worker.query(query.to_string()).await;
 
         let mut fields = Vec::new();
@@ -347,7 +379,6 @@ impl PgWireServerHandlers for DummyProcessorFactory {
     fn simple_query_handler(&self) -> Arc<Self::SimpleQueryHandler> {
         self.handler.clone()
     }
-
 
     fn extended_query_handler(&self) -> Arc<Self::ExtendedQueryHandler> {
         self.extended_handler.clone()

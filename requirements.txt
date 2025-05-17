@@ -1,4 +1,4 @@
-pg8000
+psycopg[binary]
 sqlalchemy
 maturin
 duckdb

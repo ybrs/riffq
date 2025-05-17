@@ -30,14 +30,27 @@ def _run_server(port: int):
 
     def handle_query(sql, callback, **kwargs):
         args = kwargs.get("query_args")
+
+        sql_clean = sql.strip().lower()
+        if sql_clean == "select multi":
+            schema = [
+                {"name": "a", "type": "int"},
+                {"name": "b", "type": "str"},
+                {"name": "c", "type": "float"},
+                {"name": "d", "type": "int"},
+            ]
+            rows = [[1, "foo", 3.14, None]]
+            callback((schema, rows))
+            return
+
         if args:
             value = int(args[0])
         else:
-            sql = sql.strip().lower()
-            if sql.startswith("select ") and sql[7:].isdigit():
-                value = int(sql[7:])
+            if sql_clean.startswith("select ") and sql_clean[7:].isdigit():
+                value = int(sql_clean[7:])
             else:
                 value = 1
+
         result = ([{"name": "val", "type": "int"}], [[value]])
         callback(result)
 
@@ -82,4 +95,19 @@ class ServerTest(unittest.TestCase):
         with conn.cursor() as cur:
             cur.execute("SELECT %s", (42,))
             self.assertEqual(cur.fetchone()[0], 42)
+        conn.close()
+
+    def test_multiple_columns(self):
+        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
+        with conn.cursor() as cur:
+            cur.execute("SELECT multi")
+            row = cur.fetchone()
+            self.assertEqual(row, (1, "foo", 3.14, None))
+            self.assertIsInstance(row[0], int)
+            self.assertIsInstance(row[1], str)
+            self.assertIsInstance(row[2], float)
+            self.assertIsNone(row[3])
+
+            names = [desc.name for desc in cur.description]
+            self.assertEqual(names, ["a", "b", "c", "d"])
         conn.close()

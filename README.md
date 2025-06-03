@@ -93,6 +93,19 @@ psql -h localhost -p 5432
 
 ---
 
+## Running Tests
+
+Install the development requirements and run the test suite:
+
+```bash
+pip install -r requirements.txt
+python -m unittest
+```
+
+The tests require the Rust extension to build successfully; any build failure will cause the suite to fail.
+
+---
+
 ## License
 
 MIT or Apache 2.0 — your choice.

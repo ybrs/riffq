@@ -7,6 +7,7 @@ from pathlib import Path
 
 import psycopg
 import unittest
+import pyarrow as pa
 
 
 def _ensure_riffq_built():
@@ -27,20 +28,27 @@ def _ensure_riffq_built():
 
 def _run_server(port: int):
     import riffq
+    import pyarrow as pa
+    import pyarrow.ipc as ipc
 
     def handle_query(sql, callback, **kwargs):
         args = kwargs.get("query_args")
 
         sql_clean = sql.strip().lower()
         if sql_clean == "select multi":
-            schema = [
-                {"name": "a", "type": "int"},
-                {"name": "b", "type": "str"},
-                {"name": "c", "type": "float"},
-                {"name": "d", "type": "int"},
-            ]
-            rows = [[1, "foo", 3.14, None]]
-            callback((schema, rows))
+            batch = pa.record_batch(
+                [
+                    pa.array([1], pa.int64()),
+                    pa.array(["foo"], pa.string()),
+                    pa.array([3.14], pa.float64()),
+                    pa.array([None], pa.int64()),
+                ],
+                names=["a", "b", "c", "d"],
+            )
+            sink = pa.BufferOutputStream()
+            with ipc.new_stream(sink, batch.schema) as writer:
+                writer.write_batch(batch)
+            callback(sink.getvalue().to_pybytes())
             return
 
         if args:
@@ -51,8 +59,13 @@ def _run_server(port: int):
             else:
                 value = 1
 
-        result = ([{"name": "val", "type": "int"}], [[value]])
-        callback(result)
+        batch = pa.record_batch([
+            pa.array([value], pa.int64())
+        ], names=["val"])
+        sink = pa.BufferOutputStream()
+        with ipc.new_stream(sink, batch.schema) as writer:
+            writer.write_batch(batch)
+        callback(sink.getvalue().to_pybytes())
 
     server = riffq.Server(f"127.0.0.1:{port}")
     server.set_callback(handle_query)

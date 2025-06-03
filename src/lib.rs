@@ -58,6 +58,16 @@ impl CallbackWrapper {
     fn __call__(&self, result: PyObject) {
         if let Some(sender) = self.responder.lock().unwrap().take() {
             Python::with_gil(|py| {
+                // First try to treat the result as Arrow IPC bytes. This is a placeholder
+                // implementation. Parsing of the bytes into rows would be done using an
+                // Arrow crate, which is not available in this environment.
+                if let Ok(pybytes) = result.extract::<&pyo3::types::PyBytes>(py) {
+                    let _data = pybytes.as_bytes();
+                    // TODO: parse Arrow IPC into schema and rows
+                    let _ = sender.send((vec![], vec![]));
+                    return;
+                }
+
                 let parsed: PyResult<(Vec<HashMap<String, String>>, Vec<Vec<PyObject>>)> = result.extract(py);
                 if let Ok((schema_desc, py_rows)) = parsed {
                     let converted_rows: Vec<Vec<Option<String>>> = py_rows

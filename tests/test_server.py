@@ -13,6 +13,7 @@ import pyarrow as pa
 def _ensure_riffq_built():
     try:
         import riffq  # noqa: F401
+
         return
     except ImportError:
         pass
@@ -50,6 +51,13 @@ def _run_server(port: int):
                 writer.write_batch(batch)
             callback(sink.getvalue().to_pybytes())
             return
+        if sql_clean == "select bool":
+            batch = pa.record_batch([pa.array([True], pa.bool_())], names=["flag"])
+            sink = pa.BufferOutputStream()
+            with ipc.new_stream(sink, batch.schema) as writer:
+                writer.write_batch(batch)
+            callback(sink.getvalue().to_pybytes())
+            return
 
         if args:
             value = int(args[0])
@@ -59,9 +67,7 @@ def _run_server(port: int):
             else:
                 value = 1
 
-        batch = pa.record_batch([
-            pa.array([value], pa.int64())
-        ], names=["val"])
+        batch = pa.record_batch([pa.array([value], pa.int64())], names=["val"])
         sink = pa.BufferOutputStream()
         with ipc.new_stream(sink, batch.schema) as writer:
             writer.write_batch(batch)
@@ -77,7 +83,9 @@ class ServerTest(unittest.TestCase):
     def setUpClass(cls):
         _ensure_riffq_built()
         cls.port = 55433
-        cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
+        cls.proc = multiprocessing.Process(
+            target=_run_server, args=(cls.port,), daemon=True
+        )
         cls.proc.start()
 
         start = time.time()
@@ -123,4 +131,15 @@ class ServerTest(unittest.TestCase):
 
             names = [desc.name for desc in cur.description]
             self.assertEqual(names, ["a", "b", "c", "d"])
+        conn.close()
+
+    def test_bool_column(self):
+        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
+        with conn.cursor() as cur:
+            cur.execute("SELECT bool")
+            row = cur.fetchone()
+            self.assertEqual(row, (True,))
+            self.assertIsInstance(row[0], bool)
+            names = [desc.name for desc in cur.description]
+            self.assertEqual(names, ["flag"])
         conn.close()

@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::{FromPyObject, PyAny};
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::{Sink, StreamExt};
@@ -58,13 +59,85 @@ impl CallbackWrapper {
     fn __call__(&self, result: PyObject) {
         if let Some(sender) = self.responder.lock().unwrap().take() {
             Python::with_gil(|py| {
-                // First try to treat the result as Arrow IPC bytes. This is a placeholder
-                // implementation. Parsing of the bytes into rows would be done using an
-                // Arrow crate, which is not available in this environment.
+                // First try to treat the result as Arrow IPC bytes. When the
+                // callback returns bytes we assume they contain an Arrow IPC
+                // stream produced by ``pyarrow``.  Use ``pyarrow`` again to
+                // decode the bytes into a schema description and rows so that
+                // the rest of the code can operate on plain Rust types.
                 if let Ok(pybytes) = result.extract::<&pyo3::types::PyBytes>(py) {
-                    let _data = pybytes.as_bytes();
-                    // TODO: parse Arrow IPC into schema and rows
-                    let _ = sender.send((vec![], vec![]));
+                    let locals = PyDict::new(py);
+                    locals.set_item("data", pybytes).unwrap();
+                    // The Python snippet reads the IPC stream and converts it
+                    // to two Python objects: ``schema_desc`` describing the
+                    // columns and ``rows`` containing the record batches as a
+                    // list of rows (lists). The column types are normalised to
+                    // simple strings that map to pgwire types later on.
+                    py.run(
+                        r#"
+import pyarrow as pa
+import pyarrow.ipc as ipc
+import pyarrow.types as pat
+reader = ipc.open_stream(data)
+table = reader.read_all()
+def map_type(field):
+    t = field.type
+    if pat.is_integer(t):
+        return "int"
+    if pat.is_floating(t):
+        return "float"
+    if pat.is_boolean(t):
+        return "bool"
+    if pat.is_string(t) or pat.is_large_string(t):
+        return "str"
+    if pat.is_date(t):
+        return "date"
+    if pat.is_timestamp(t):
+        return "datetime"
+    return "str"
+schema_desc = [{"name": f.name, "type": map_type(f)} for f in table.schema]
+rows = [[row.get(f.name) for f in table.schema] for row in table.to_pylist()]
+result_py = (schema_desc, rows)
+"#,
+                        None,
+                        Some(locals),
+                    )
+                    .unwrap();
+                    let tuple_any = match PyDict::get_item(locals, "result_py")
+                        .unwrap()
+                    {
+                        Some(v) => v,
+                        None => panic!("result_py missing"),
+                    };
+                    let parsed: (
+                        Vec<HashMap<String, String>>,
+                        Vec<Vec<PyObject>>,
+                    ) = <(
+                        Vec<HashMap<String, String>>,
+                        Vec<Vec<PyObject>>,
+                    ) as FromPyObject>::extract(tuple_any).unwrap();
+                    let converted_rows: Vec<Vec<Option<String>>> = parsed
+                        .1
+                        .into_iter()
+                        .map(|row| {
+                            row.into_iter()
+                                .map(|val| {
+                                    Python::with_gil(|py| {
+                                        let v = val.as_ref(py);
+                                        if v.is_none() {
+                                            Ok::<Option<String>, ()>(None)
+                                        } else {
+                                            match v.str() {
+                                                Ok(pystr) => Ok(Some(pystr.to_str().unwrap_or("").to_string())),
+                                                Err(_) => Ok(None),
+                                            }
+                                        }
+                                    })
+                                    .unwrap_or(None)
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    let _ = sender.send((parsed.0, converted_rows));
                     return;
                 }
 

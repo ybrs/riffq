@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
-use futures::{Sink, StreamExt};
+use futures::{Sink, SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::oneshot;
@@ -16,7 +16,9 @@ use bytes::Bytes;
 use std::error::Error;
 use postgres_types::FromSql;
 
-use pgwire::api::auth::noop::NoopStartupHandler;
+use pgwire::api::auth::{self, DefaultServerParameterProvider, LoginInfo, StartupHandler};
+use pgwire::messages::response::ErrorResponse;
+use pgwire::error::ErrorInfo;
 use pgwire::api::copy::NoopCopyHandler;
 use pgwire::api::query::{SimpleQueryHandler, ExtendedQueryHandler};
 use pgwire::api::results::{DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
@@ -213,22 +215,94 @@ impl PythonWorker {
 
 pub struct DummyProcessor {
     py_worker: Arc<PythonWorker>,
+    auth_callback: Arc<Mutex<Option<Py<PyAny>>>>,
 }
 
 #[async_trait]
-impl NoopStartupHandler for DummyProcessor {
-    async fn post_startup<C>(
+impl StartupHandler for DummyProcessor {
+    async fn on_startup<C>(
         &self,
         client: &mut C,
-        _message: PgWireFrontendMessage,
+        message: PgWireFrontendMessage,
     ) -> PgWireResult<()>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send,
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        println!("connected {:?}: {:?}", client.socket_addr(), client.metadata());
-        println!("Received message: {:?}", _message);
+        match message {
+            PgWireFrontendMessage::Startup(ref startup) => {
+                auth::save_startup_parameters_to_metadata(client, startup);
+                if self.auth_callback.lock().unwrap().is_some() {
+                    client.set_state(pgwire::api::PgWireConnectionState::AuthenticationInProgress);
+                    client
+                        .send(PgWireBackendMessage::Authentication(
+                            pgwire::messages::startup::Authentication::CleartextPassword,
+                        ))
+                        .await?;
+                } else {
+                    auth::finish_authentication(
+                        client,
+                        &DefaultServerParameterProvider::default(),
+                    )
+                    .await?;
+                }
+            }
+            PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
+                let cb_opt = { self.auth_callback.lock().unwrap().clone() };
+                if let Some(cb) = cb_opt {
+                    let pwd = pwd.into_password()?;
+                    let login_info = LoginInfo::from_client_info(client);
+                    let username = login_info.user().unwrap_or("");
+                    let database = login_info.database().unwrap_or("");
+                    let host = login_info.host();
+                    let pass_str = &pwd.password;
+
+                    let ok = Python::with_gil(|py| {
+                        let args = PyTuple::new(
+                            py,
+                            &[
+                                username.into_py(py),
+                                pass_str.into_py(py),
+                                database.into_py(py),
+                                host.into_py(py),
+                            ],
+                        );
+                        match cb.call1(py, args) {
+                            Ok(val) => val.extract::<bool>(py).unwrap_or(false),
+                            Err(e) => {
+                                e.print(py);
+                                false
+                            }
+                        }
+                    });
+
+                    if ok {
+                        auth::finish_authentication(
+                            client,
+                            &DefaultServerParameterProvider::default(),
+                        )
+                        .await?;
+                    } else {
+                        let err = ErrorResponse::from(ErrorInfo::new(
+                            "FATAL".to_owned(),
+                            "28P01".to_owned(),
+                            "Password authentication failed".to_owned(),
+                        ));
+                        client.feed(PgWireBackendMessage::ErrorResponse(err)).await?;
+                        client.close().await?;
+                    }
+                } else {
+                    // should not receive password when no auth required
+                    auth::finish_authentication(
+                        client,
+                        &DefaultServerParameterProvider::default(),
+                    )
+                    .await?;
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 }
@@ -516,6 +590,7 @@ async fn detect_gssencmode(mut socket: TcpStream) -> Option<TcpStream> {
 pub struct Server {
     addr: String,
     callback: Arc<Mutex<Option<Py<PyAny>>>>,
+    auth_callback: Arc<Mutex<Option<Py<PyAny>>>>,
 }
 
 #[pymethods]
@@ -525,11 +600,16 @@ impl Server {
         Server {
             addr,
             callback: Arc::new(Mutex::new(None)),
+            auth_callback: Arc::new(Mutex::new(None)),
         }
     }
 
     fn set_callback(&mut self, _py: Python, cb: Py<PyAny>) {
         *self.callback.lock().unwrap() = Some(cb);
+    }
+
+    fn set_auth_callback(&mut self, _py: Python, cb: Py<PyAny>) {
+        *self.auth_callback.lock().unwrap() = Some(cb);
     }
 
 
@@ -542,6 +622,7 @@ impl Server {
     fn run_server(&self) {
         let addr = self.addr.clone();
         let callback = self.callback.clone();
+        let auth_callback = self.auth_callback.clone();
 
         if callback.lock().unwrap().is_none() {
             panic!("No callback set. Use set_callback() before starting the server.");
@@ -556,7 +637,7 @@ impl Server {
             let py_worker = Arc::new(PythonWorker::new(callback));
 
             let factory = Arc::new(DummyProcessorFactory {
-                handler: Arc::new(DummyProcessor { py_worker: py_worker.clone() }),
+                handler: Arc::new(DummyProcessor { py_worker: py_worker.clone(), auth_callback }),
                 extended_handler: Arc::new(MyExtendedQueryHandler { py_worker }),
             });
 

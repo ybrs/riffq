@@ -3,3 +3,4 @@ sqlalchemy
 maturin
 duckdb
 pandas
+pyarrow

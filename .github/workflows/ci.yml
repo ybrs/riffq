@@ -19,7 +19,11 @@ jobs:
           toolchain: stable
           profile: minimal
           override: true
+      - run: cargo test --verbose
       - run: pip install -r requirements.txt
+      - run: pip install maturin
+      - run: maturin build --release -i python3
+      - run: pip install target/wheels/*.whl
       - run: python -m unittest discover -s tests
 
   disabled-tests:
@@ -36,5 +40,7 @@ jobs:
           profile: minimal
           override: true
       - run: pip install -r requirements.txt
-      - run: pip install psycopg2-binary
+      - run: pip install maturin psycopg2-binary
+      - run: maturin build --release -i python3
+      - run: pip install target/wheels/*.whl
       - run: python test_concurrency/test_concurrency_duckdb.py

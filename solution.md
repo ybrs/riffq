@@ -12,3 +12,10 @@ closed.
 
 Tests were extended to exercise the new behaviour and the concurrency test was
 skipped because it requires additional heavy dependencies.
+
+### Asynchronous Authentication
+
+Authentication now uses the same worker-thread mechanism as query handling.
+The Python callback receives an extra argument – a callback object – and must
+invoke it with a boolean result.  This keeps the server non-blocking while
+waiting for credentials to be validated inside Python.

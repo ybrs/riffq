@@ -42,12 +42,24 @@ fn map_python_type_to_pgwire(t: &str) -> Type {
 }
 
 
-pub struct WorkerMessage {
-    pub query: String,
-    pub params: Option<Vec<Option<Bytes>>>,
-    pub param_types: Option<Vec<Type>>,
-    pub do_describe: bool,
-    pub responder: oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>,
+pub enum WorkerMessage {
+    Query {
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        responder: oneshot::Sender<(
+            Vec<HashMap<String, String>>,
+            Vec<Vec<Option<String>>>,
+        )>,
+    },
+    Auth {
+        user: String,
+        password: String,
+        database: String,
+        host: String,
+        responder: oneshot::Sender<bool>,
+    },
 }
 
 #[pyclass]
@@ -89,12 +101,36 @@ impl CallbackWrapper {
     }
 }
 
+#[pyclass]
+struct AuthCallbackWrapper {
+    responder: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+}
+
+#[pymethods]
+impl AuthCallbackWrapper {
+    fn __call__(&self, result: PyObject) {
+        if let Some(sender) = self.responder.lock().unwrap().take() {
+            Python::with_gil(|py| {
+                let val: PyResult<bool> = result.extract(py);
+                if let Ok(v) = val {
+                    let _ = sender.send(v);
+                } else {
+                    let _ = sender.send(false);
+                }
+            });
+        }
+    }
+}
+
 pub struct PythonWorker {
     sender: Sender<WorkerMessage>,
 }
 
 impl PythonWorker {
-    fn new(callback: Arc<Mutex<Option<Py<PyAny>>>>) -> Self {
+    fn new(
+        callback: Arc<Mutex<Option<Py<PyAny>>>>,
+        auth_callback: Arc<Mutex<Option<Py<PyAny>>>>,
+    ) -> Self {
         let (tx, rx) = channel::<WorkerMessage>();
 
         thread::spawn(move || {
@@ -103,15 +139,7 @@ impl PythonWorker {
             loop {
                 println!("[PY_WORKER] waiting to receive on rx...");
                 match rx.recv() {
-                    Ok(msg) => {
-                        let WorkerMessage {
-                            query,
-                            params,
-                            param_types,
-                            do_describe,
-                            responder,
-                        } = msg;
-
+                    Ok(WorkerMessage::Query { query, params, param_types, do_describe, responder }) => {
                         println!("[PY_WORKER] received query: {}", query);
                         let cb_opt = callback.lock().unwrap().clone();
 
@@ -159,6 +187,28 @@ impl PythonWorker {
                             });
                         }
                     }
+                    Ok(WorkerMessage::Auth { user, password, database, host, responder }) => {
+                        println!("[PY_WORKER] received auth request for {}", user);
+                        let cb_opt = auth_callback.lock().unwrap().clone();
+                        if let Some(cb) = cb_opt {
+                            Python::with_gil(|py| {
+                                let wrapper = Py::new(py, AuthCallbackWrapper {
+                                    responder: Arc::new(Mutex::new(Some(responder)))
+                                }).unwrap();
+                                let args = PyTuple::new(
+                                    py,
+                                    &[
+                                        user.into_py(py),
+                                        password.into_py(py),
+                                        database.into_py(py),
+                                        host.into_py(py),
+                                        wrapper.into_py(py),
+                                    ],
+                                );
+                                let _ = cb.call1(py, args);
+                            });
+                        }
+                    }
 
                     // Ok((query, responder)) => {
                     //     println!("[PY_WORKER] received query: {}", query);
@@ -198,18 +248,45 @@ impl PythonWorker {
         let (tx, rx) = oneshot::channel();
         println!("[RUST] Sending query to worker: {}", query);
 
-        self.sender.send(WorkerMessage {
-            query,
-            params,
-            param_types,
-            do_describe,
-            responder: tx,
-        }).expect("Send failed!");
+        self
+            .sender
+            .send(WorkerMessage::Query {
+                query,
+                params,
+                param_types,
+                do_describe,
+                responder: tx,
+            })
+            .expect("Send failed!");
 
         rx.await.unwrap_or_else(|e| {
             println!("[RUST] Worker failed: {:?}", e);
             (vec![], vec![])
         })
+    }
+
+    pub async fn auth(
+        &self,
+        user: String,
+        password: String,
+        database: String,
+        host: String,
+    ) -> bool {
+        let (tx, rx) = oneshot::channel();
+        println!("[RUST] Sending auth to worker for {}", user);
+
+        self
+            .sender
+            .send(WorkerMessage::Auth {
+                user,
+                password,
+                database,
+                host,
+                responder: tx,
+            })
+            .expect("Send failed!");
+
+        rx.await.unwrap_or(false)
     }
 }
 
@@ -249,33 +326,23 @@ impl StartupHandler for DummyProcessor {
                 }
             }
             PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
-                let cb_opt = { self.auth_callback.lock().unwrap().clone() };
-                if let Some(cb) = cb_opt {
+                if self.auth_callback.lock().unwrap().is_some() {
                     let pwd = pwd.into_password()?;
                     let login_info = LoginInfo::from_client_info(client);
                     let username = login_info.user().unwrap_or("");
                     let database = login_info.database().unwrap_or("");
                     let host = login_info.host();
-                    let pass_str = &pwd.password;
+                    let pass_str = pwd.password;
 
-                    let ok = Python::with_gil(|py| {
-                        let args = PyTuple::new(
-                            py,
-                            &[
-                                username.into_py(py),
-                                pass_str.into_py(py),
-                                database.into_py(py),
-                                host.into_py(py),
-                            ],
-                        );
-                        match cb.call1(py, args) {
-                            Ok(val) => val.extract::<bool>(py).unwrap_or(false),
-                            Err(e) => {
-                                e.print(py);
-                                false
-                            }
-                        }
-                    });
+                    let ok = self
+                        .py_worker
+                        .auth(
+                            username.to_string(),
+                            pass_str,
+                            database.to_string(),
+                            host.to_string(),
+                        )
+                        .await;
 
                     if ok {
                         auth::finish_authentication(
@@ -634,7 +701,7 @@ impl Server {
             .unwrap();
 
         rt.block_on(async move {
-            let py_worker = Arc::new(PythonWorker::new(callback));
+            let py_worker = Arc::new(PythonWorker::new(callback, auth_callback.clone()));
 
             let factory = Arc::new(DummyProcessorFactory {
                 handler: Arc::new(DummyProcessor { py_worker: py_worker.clone(), auth_callback }),
@@ -671,5 +738,6 @@ impl Server {
 #[pymodule]
 fn riffq(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Server>()?;
+    m.add("AUTH_WITH_CALLBACK", true)?;
     Ok(())
 }

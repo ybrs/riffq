@@ -12,7 +12,7 @@ import unittest
 def _ensure_riffq_built():
     try:
         import riffq  # noqa: F401
-        if hasattr(riffq.Server, "set_auth_callback"):
+        if getattr(riffq, "AUTH_WITH_CALLBACK", False):
             return
     except ImportError:
         pass
@@ -21,7 +21,17 @@ def _ensure_riffq_built():
     try:
         subprocess.check_call(["maturin", "build", "--release", "-q"])
         wheel = next(Path("target/wheels").glob("riffq-*.whl"))
-        subprocess.check_call([sys.executable, "-m", "pip", "install", str(wheel)])
+        subprocess.check_call([
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--force-reinstall",
+            str(wheel),
+        ])
+        if "riffq" in sys.modules:
+            import importlib
+            importlib.reload(sys.modules["riffq"])
     except Exception as exc:
         raise RuntimeError(f"riffq build failed: {exc}")
 
@@ -55,8 +65,8 @@ def _run_server(port: int):
         result = ([{"name": "val", "type": "int"}], [[value]])
         callback(result)
 
-    def handle_auth(user, password, database, host):
-        return password == "secret"
+    def handle_auth(user, password, database, host, callback):
+        callback(password == "secret")
 
     server = riffq.Server(f"127.0.0.1:{port}")
     server.set_callback(handle_query)

@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+      - name: Run Rust tests
+        run: cargo test --verbose
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+      - name: Install maturin
+        run: pip install maturin
+      - name: Build Python wheel
+        run: maturin build --release -i python3
+      - name: Install wheel
+        run: pip install target/wheels/*.whl
+      - name: Run Python unit tests
+        run: python -m unittest discover -s tests
+
+  concurrency-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Install maturin and Postgres dependencies
+        run: pip install maturin psycopg2-binary
+      - name: Build Python wheel
+        run: maturin build --release -i python3
+      - name: Install wheel
+        run: pip install target/wheels/*.whl
+      - name: Run concurrency tests
+        run: python test_concurrency/test_concurrency_duckdb.py

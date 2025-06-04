@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
-use futures::{Sink, StreamExt};
+use futures::{Sink, SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::oneshot;
@@ -16,7 +16,9 @@ use bytes::Bytes;
 use std::error::Error;
 use postgres_types::FromSql;
 
-use pgwire::api::auth::noop::NoopStartupHandler;
+use pgwire::api::auth::{self, DefaultServerParameterProvider, LoginInfo, StartupHandler};
+use pgwire::messages::response::ErrorResponse;
+use pgwire::error::ErrorInfo;
 use pgwire::api::copy::NoopCopyHandler;
 use pgwire::api::query::{SimpleQueryHandler, ExtendedQueryHandler};
 use pgwire::api::results::{DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
@@ -40,12 +42,24 @@ fn map_python_type_to_pgwire(t: &str) -> Type {
 }
 
 
-pub struct WorkerMessage {
-    pub query: String,
-    pub params: Option<Vec<Option<Bytes>>>,
-    pub param_types: Option<Vec<Type>>,
-    pub do_describe: bool,
-    pub responder: oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>,
+pub enum WorkerMessage {
+    Query {
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        responder: oneshot::Sender<(
+            Vec<HashMap<String, String>>,
+            Vec<Vec<Option<String>>>,
+        )>,
+    },
+    Auth {
+        user: String,
+        password: String,
+        database: String,
+        host: String,
+        responder: oneshot::Sender<bool>,
+    },
 }
 
 #[pyclass]
@@ -87,12 +101,36 @@ impl CallbackWrapper {
     }
 }
 
+#[pyclass]
+struct AuthCallbackWrapper {
+    responder: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+}
+
+#[pymethods]
+impl AuthCallbackWrapper {
+    fn __call__(&self, result: PyObject) {
+        if let Some(sender) = self.responder.lock().unwrap().take() {
+            Python::with_gil(|py| {
+                let val: PyResult<bool> = result.extract(py);
+                if let Ok(v) = val {
+                    let _ = sender.send(v);
+                } else {
+                    let _ = sender.send(false);
+                }
+            });
+        }
+    }
+}
+
 pub struct PythonWorker {
     sender: Sender<WorkerMessage>,
 }
 
 impl PythonWorker {
-    fn new(callback: Arc<Mutex<Option<Py<PyAny>>>>) -> Self {
+    fn new(
+        callback: Arc<Mutex<Option<Py<PyAny>>>>,
+        auth_callback: Arc<Mutex<Option<Py<PyAny>>>>,
+    ) -> Self {
         let (tx, rx) = channel::<WorkerMessage>();
 
         thread::spawn(move || {
@@ -101,15 +139,7 @@ impl PythonWorker {
             loop {
                 println!("[PY_WORKER] waiting to receive on rx...");
                 match rx.recv() {
-                    Ok(msg) => {
-                        let WorkerMessage {
-                            query,
-                            params,
-                            param_types,
-                            do_describe,
-                            responder,
-                        } = msg;
-
+                    Ok(WorkerMessage::Query { query, params, param_types, do_describe, responder }) => {
                         println!("[PY_WORKER] received query: {}", query);
                         let cb_opt = callback.lock().unwrap().clone();
 
@@ -157,6 +187,28 @@ impl PythonWorker {
                             });
                         }
                     }
+                    Ok(WorkerMessage::Auth { user, password, database, host, responder }) => {
+                        println!("[PY_WORKER] received auth request for {}", user);
+                        let cb_opt = auth_callback.lock().unwrap().clone();
+                        if let Some(cb) = cb_opt {
+                            Python::with_gil(|py| {
+                                let wrapper = Py::new(py, AuthCallbackWrapper {
+                                    responder: Arc::new(Mutex::new(Some(responder)))
+                                }).unwrap();
+                                let args = PyTuple::new(
+                                    py,
+                                    &[
+                                        user.into_py(py),
+                                        password.into_py(py),
+                                        database.into_py(py),
+                                        host.into_py(py),
+                                        wrapper.into_py(py),
+                                    ],
+                                );
+                                let _ = cb.call1(py, args);
+                            });
+                        }
+                    }
 
                     // Ok((query, responder)) => {
                     //     println!("[PY_WORKER] received query: {}", query);
@@ -196,39 +248,128 @@ impl PythonWorker {
         let (tx, rx) = oneshot::channel();
         println!("[RUST] Sending query to worker: {}", query);
 
-        self.sender.send(WorkerMessage {
-            query,
-            params,
-            param_types,
-            do_describe,
-            responder: tx,
-        }).expect("Send failed!");
+        self
+            .sender
+            .send(WorkerMessage::Query {
+                query,
+                params,
+                param_types,
+                do_describe,
+                responder: tx,
+            })
+            .expect("Send failed!");
 
         rx.await.unwrap_or_else(|e| {
             println!("[RUST] Worker failed: {:?}", e);
             (vec![], vec![])
         })
     }
+
+    pub async fn auth(
+        &self,
+        user: String,
+        password: String,
+        database: String,
+        host: String,
+    ) -> bool {
+        let (tx, rx) = oneshot::channel();
+        println!("[RUST] Sending auth to worker for {}", user);
+
+        self
+            .sender
+            .send(WorkerMessage::Auth {
+                user,
+                password,
+                database,
+                host,
+                responder: tx,
+            })
+            .expect("Send failed!");
+
+        rx.await.unwrap_or(false)
+    }
 }
 
 pub struct DummyProcessor {
     py_worker: Arc<PythonWorker>,
+    auth_callback: Arc<Mutex<Option<Py<PyAny>>>>,
 }
 
 #[async_trait]
-impl NoopStartupHandler for DummyProcessor {
-    async fn post_startup<C>(
+impl StartupHandler for DummyProcessor {
+    async fn on_startup<C>(
         &self,
         client: &mut C,
-        _message: PgWireFrontendMessage,
+        message: PgWireFrontendMessage,
     ) -> PgWireResult<()>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send,
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        println!("connected {:?}: {:?}", client.socket_addr(), client.metadata());
-        println!("Received message: {:?}", _message);
+        match message {
+            PgWireFrontendMessage::Startup(ref startup) => {
+                auth::save_startup_parameters_to_metadata(client, startup);
+                if self.auth_callback.lock().unwrap().is_some() {
+                    client.set_state(pgwire::api::PgWireConnectionState::AuthenticationInProgress);
+                    client
+                        .send(PgWireBackendMessage::Authentication(
+                            pgwire::messages::startup::Authentication::CleartextPassword,
+                        ))
+                        .await?;
+                } else {
+                    auth::finish_authentication(
+                        client,
+                        &DefaultServerParameterProvider::default(),
+                    )
+                    .await?;
+                }
+            }
+            PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
+                if self.auth_callback.lock().unwrap().is_some() {
+                    let pwd = pwd.into_password()?;
+                    let login_info = LoginInfo::from_client_info(client);
+                    let username = login_info.user().unwrap_or("");
+                    let database = login_info.database().unwrap_or("");
+                    let host = login_info.host();
+                    let pass_str = pwd.password;
+
+                    let ok = self
+                        .py_worker
+                        .auth(
+                            username.to_string(),
+                            pass_str,
+                            database.to_string(),
+                            host.to_string(),
+                        )
+                        .await;
+
+                    if ok {
+                        auth::finish_authentication(
+                            client,
+                            &DefaultServerParameterProvider::default(),
+                        )
+                        .await?;
+                    } else {
+                        let err = ErrorResponse::from(ErrorInfo::new(
+                            "FATAL".to_owned(),
+                            "28P01".to_owned(),
+                            "Password authentication failed".to_owned(),
+                        ));
+                        client.feed(PgWireBackendMessage::ErrorResponse(err)).await?;
+                        client.close().await?;
+                    }
+                } else {
+                    // should not receive password when no auth required
+                    auth::finish_authentication(
+                        client,
+                        &DefaultServerParameterProvider::default(),
+                    )
+                    .await?;
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 }
@@ -516,6 +657,7 @@ async fn detect_gssencmode(mut socket: TcpStream) -> Option<TcpStream> {
 pub struct Server {
     addr: String,
     callback: Arc<Mutex<Option<Py<PyAny>>>>,
+    auth_callback: Arc<Mutex<Option<Py<PyAny>>>>,
 }
 
 #[pymethods]
@@ -525,11 +667,16 @@ impl Server {
         Server {
             addr,
             callback: Arc::new(Mutex::new(None)),
+            auth_callback: Arc::new(Mutex::new(None)),
         }
     }
 
     fn set_callback(&mut self, _py: Python, cb: Py<PyAny>) {
         *self.callback.lock().unwrap() = Some(cb);
+    }
+
+    fn set_auth_callback(&mut self, _py: Python, cb: Py<PyAny>) {
+        *self.auth_callback.lock().unwrap() = Some(cb);
     }
 
 
@@ -542,6 +689,7 @@ impl Server {
     fn run_server(&self) {
         let addr = self.addr.clone();
         let callback = self.callback.clone();
+        let auth_callback = self.auth_callback.clone();
 
         if callback.lock().unwrap().is_none() {
             panic!("No callback set. Use set_callback() before starting the server.");
@@ -553,10 +701,10 @@ impl Server {
             .unwrap();
 
         rt.block_on(async move {
-            let py_worker = Arc::new(PythonWorker::new(callback));
+            let py_worker = Arc::new(PythonWorker::new(callback, auth_callback.clone()));
 
             let factory = Arc::new(DummyProcessorFactory {
-                handler: Arc::new(DummyProcessor { py_worker: py_worker.clone() }),
+                handler: Arc::new(DummyProcessor { py_worker: py_worker.clone(), auth_callback }),
                 extended_handler: Arc::new(MyExtendedQueryHandler { py_worker }),
             });
 
@@ -590,5 +738,6 @@ impl Server {
 #[pymodule]
 fn riffq(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Server>()?;
+    m.add("AUTH_WITH_CALLBACK", true)?;
     Ok(())
 }

@@ -12,7 +12,8 @@ import unittest
 def _ensure_riffq_built():
     try:
         import riffq  # noqa: F401
-        return
+        if getattr(riffq, "AUTH_WITH_CALLBACK", False):
+            return
     except ImportError:
         pass
 
@@ -20,7 +21,17 @@ def _ensure_riffq_built():
     try:
         subprocess.check_call(["maturin", "build", "--release", "-q"])
         wheel = next(Path("target/wheels").glob("riffq-*.whl"))
-        subprocess.check_call([sys.executable, "-m", "pip", "install", str(wheel)])
+        subprocess.check_call([
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--force-reinstall",
+            str(wheel),
+        ])
+        if "riffq" in sys.modules:
+            import importlib
+            importlib.reload(sys.modules["riffq"])
     except Exception as exc:
         raise RuntimeError(f"riffq build failed: {exc}")
 
@@ -54,8 +65,12 @@ def _run_server(port: int):
         result = ([{"name": "val", "type": "int"}], [[value]])
         callback(result)
 
+    def handle_auth(user, password, database, host, callback):
+        callback(password == "secret")
+
     server = riffq.Server(f"127.0.0.1:{port}")
     server.set_callback(handle_query)
+    server.set_auth_callback(handle_auth)
     server.start()
 
 
@@ -84,21 +99,21 @@ class ServerTest(unittest.TestCase):
         cls.proc.join()
 
     def test_simple_query(self):
-        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
+        conn = psycopg.connect(f"postgresql://user:secret@127.0.0.1:{self.port}/db")
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
             self.assertEqual(cur.fetchone()[0], 1)
         conn.close()
 
     def test_extended_query(self):
-        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
+        conn = psycopg.connect(f"postgresql://user:secret@127.0.0.1:{self.port}/db")
         with conn.cursor() as cur:
             cur.execute("SELECT %s", (42,))
             self.assertEqual(cur.fetchone()[0], 42)
         conn.close()
 
     def test_multiple_columns(self):
-        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
+        conn = psycopg.connect(f"postgresql://user:secret@127.0.0.1:{self.port}/db")
         with conn.cursor() as cur:
             cur.execute("SELECT multi")
             row = cur.fetchone()
@@ -111,3 +126,7 @@ class ServerTest(unittest.TestCase):
             names = [desc.name for desc in cur.description]
             self.assertEqual(names, ["a", "b", "c", "d"])
         conn.close()
+
+    def test_auth_failure(self):
+        with self.assertRaises(psycopg.OperationalError):
+            psycopg.connect(f"postgresql://user:bad@127.0.0.1:{self.port}/db")

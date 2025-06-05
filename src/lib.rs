@@ -8,6 +8,12 @@ use tokio::sync::oneshot;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::net::TcpStream;
 use pyo3::types::{PyDict, PyList, PyTuple};
+use std::fs::File;
+use std::io::{BufReader, Error as IOError, ErrorKind};
+use rustls_pemfile::{certs, pkcs8_private_keys};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use tokio_rustls::rustls::ServerConfig;
+use tokio_rustls::TlsAcceptor;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
@@ -512,10 +518,30 @@ async fn detect_gssencmode(mut socket: TcpStream) -> Option<TcpStream> {
     Some(socket)
 }
 
+fn setup_tls(cert_path: &str, key_path: &str) -> Result<Arc<TlsAcceptor>, IOError> {
+    let cert = certs(&mut BufReader::new(File::open(cert_path)?))
+        .collect::<Result<Vec<CertificateDer>, IOError>>()?;
+
+    let key = pkcs8_private_keys(&mut BufReader::new(File::open(key_path)?))
+        .map(|key| key.map(PrivateKeyDer::from))
+        .collect::<Result<Vec<PrivateKeyDer>, IOError>>()?
+        .remove(0);
+
+    let mut config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert, key)
+        .map_err(|err| IOError::new(ErrorKind::InvalidInput, err))?;
+
+    config.alpn_protocols = vec![b"postgresql".to_vec()];
+
+    Ok(Arc::new(TlsAcceptor::from(Arc::new(config))))
+}
+
 #[pyclass]
 pub struct Server {
     addr: String,
     callback: Arc<Mutex<Option<Py<PyAny>>>>,
+    tls_acceptor: Arc<Mutex<Option<Arc<TlsAcceptor>>>>,
 }
 
 #[pymethods]
@@ -525,6 +551,7 @@ impl Server {
         Server {
             addr,
             callback: Arc::new(Mutex::new(None)),
+            tls_acceptor: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -532,14 +559,25 @@ impl Server {
         *self.callback.lock().unwrap() = Some(cb);
     }
 
+    fn set_tls(&mut self, cert_path: String, key_path: String) -> PyResult<()> {
+        match setup_tls(&cert_path, &key_path) {
+            Ok(acceptor) => {
+                *self.tls_acceptor.lock().unwrap() = Some(acceptor);
+                Ok(())
+            }
+            Err(e) => Err(pyo3::exceptions::PyIOError::new_err(e.to_string())),
+        }
+    }
 
-    fn start(&self, py: Python) {
+
+    #[pyo3(signature = (tls=false))]
+    fn start(&self, py: Python, tls: bool) {
         py.allow_threads(|| {
-            self.run_server();
+            self.run_server(tls);
         });
     }
 
-    fn run_server(&self) {
+    fn run_server(&self, tls: bool) {
         let addr = self.addr.clone();
         let callback = self.callback.clone();
 
@@ -565,13 +603,15 @@ impl Server {
 
             let server_task = tokio::spawn({
                 let factory = factory.clone();
+                let tls_acceptor = if tls { self.tls_acceptor.lock().unwrap().clone() } else { None };
                 async move {
                     loop {
                         let (socket, _) = listener.accept().await.unwrap();
                         if let Some(socket) = detect_gssencmode(socket).await {
                             let factory_ref = factory.clone();
+                            let tls_acceptor_ref = tls_acceptor.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = process_socket(socket, None, factory_ref).await {
+                                if let Err(e) = process_socket(socket, tls_acceptor_ref, factory_ref).await {
                                     eprintln!("process_socket error: {:?}", e);
                                 }
                             });

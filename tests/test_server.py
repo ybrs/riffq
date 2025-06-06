@@ -30,10 +30,21 @@ def _ensure_riffq_built():
 def _run_server(port: int):
     import riffq
     import pyarrow as pa
-    import pyarrow.ipc as ipc
 
     def handle_query(sql, callback, **kwargs):
         args = kwargs.get("query_args")
+
+        def send_batch(batch: pa.RecordBatch):
+            reader = pa.RecordBatchReader.from_batches(batch.schema, [batch])
+            if hasattr(reader, "__arrow_c_stream__"):
+                capsule = reader.__arrow_c_stream__()
+                callback(capsule)
+            else:
+                from pyarrow.cffi import ffi
+                c_stream = ffi.new("struct ArrowArrayStream*")
+                reader._export_to_c(c_stream)
+                ptr = int(ffi.cast("uintptr_t", c_stream))
+                callback(ptr)
 
         sql_clean = sql.strip().lower()
         if sql_clean == "select multi":
@@ -46,17 +57,11 @@ def _run_server(port: int):
                 ],
                 names=["a", "b", "c", "d"],
             )
-            sink = pa.BufferOutputStream()
-            with ipc.new_stream(sink, batch.schema) as writer:
-                writer.write_batch(batch)
-            callback(sink.getvalue().to_pybytes())
+            send_batch(batch)
             return
         if sql_clean == "select bool":
             batch = pa.record_batch([pa.array([True], pa.bool_())], names=["flag"])
-            sink = pa.BufferOutputStream()
-            with ipc.new_stream(sink, batch.schema) as writer:
-                writer.write_batch(batch)
-            callback(sink.getvalue().to_pybytes())
+            send_batch(batch)
             return
 
         if args:
@@ -68,10 +73,7 @@ def _run_server(port: int):
                 value = 1
 
         batch = pa.record_batch([pa.array([value], pa.int64())], names=["val"])
-        sink = pa.BufferOutputStream()
-        with ipc.new_stream(sink, batch.schema) as writer:
-            writer.write_batch(batch)
-        callback(sink.getvalue().to_pybytes())
+        send_batch(batch)
 
     server = riffq.Server(f"127.0.0.1:{port}")
     server.set_callback(handle_query)

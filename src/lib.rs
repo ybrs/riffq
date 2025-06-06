@@ -86,20 +86,12 @@ impl CallbackWrapper {
                     let ptr = capsule.pointer() as *mut c_void;
                     if let Ok(res) = arrow_stream_to_rows(ptr) {
                         let _ = sender.send(res);
-                        return;
                     } else {
                         println!("[RUST] arrow_stream_to_rows failed for capsule");
                     }
-                } else if let Ok(ptr_val) = result.extract::<usize>(py) {
-                    println!("[RUST] received usize pointer: {}", ptr_val);
-                    let ptr = ptr_val as *mut c_void;
-                    if let Ok(res) = arrow_stream_to_rows(ptr) {
-                        let _ = sender.send(res);
-                        return;
-                    } else {
-                        println!("[RUST] arrow_stream_to_rows failed for int");
-                    }
-                }
+                    return;
+                } 
+
                 // First try to treat the result as Arrow IPC bytes. When the
                 // callback returns bytes we assume they contain an Arrow IPC
                 // stream produced by ``pyarrow``.  Use ``pyarrow`` again to

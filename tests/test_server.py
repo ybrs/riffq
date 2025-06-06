@@ -31,21 +31,17 @@ def _run_server(port: int):
     import riffq
     import pyarrow as pa
 
+    def send_batch(batch: pa.RecordBatch, callback):
+        rdr = pa.RecordBatchReader.from_batches(batch.schema, [batch])
+        if hasattr(rdr, "__arrow_c_stream__"):
+            capsule = rdr.__arrow_c_stream__()
+        else:
+            from pyarrow.cffi import export_stream
+            capsule = export_stream(rdr)
+        callback(capsule)
+
     def handle_query(sql, callback, **kwargs):
         args = kwargs.get("query_args")
-
-        def send_batch(batch: pa.RecordBatch):
-            reader = pa.RecordBatchReader.from_batches(batch.schema, [batch])
-            if hasattr(reader, "__arrow_c_stream__"):
-                capsule = reader.__arrow_c_stream__()
-                callback(capsule)
-            else:
-                from pyarrow.cffi import ffi
-                c_stream = ffi.new("struct ArrowArrayStream*")
-                reader._export_to_c(c_stream)
-                ptr = int(ffi.cast("uintptr_t", c_stream))
-                callback(ptr)
-
         sql_clean = sql.strip().lower()
         if sql_clean == "select multi":
             batch = pa.record_batch(
@@ -57,12 +53,11 @@ def _run_server(port: int):
                 ],
                 names=["a", "b", "c", "d"],
             )
-            send_batch(batch)
-            return
+            return send_batch(batch, callback)
+                    
         if sql_clean == "select bool":
             batch = pa.record_batch([pa.array([True], pa.bool_())], names=["flag"])
-            send_batch(batch)
-            return
+            return send_batch(batch, callback)
 
         if args:
             value = int(args[0])
@@ -73,12 +68,11 @@ def _run_server(port: int):
                 value = 1
 
         batch = pa.record_batch([pa.array([value], pa.int64())], names=["val"])
-        send_batch(batch)
+        send_batch(batch, callback)
 
     server = riffq.Server(f"127.0.0.1:{port}")
     server.set_callback(handle_query)
     server.start()
-
 
 class ServerTest(unittest.TestCase):
     @classmethod

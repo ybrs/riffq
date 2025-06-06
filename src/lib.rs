@@ -8,13 +8,20 @@ use tokio::signal;
 use tokio::sync::oneshot;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::net::TcpStream;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyList, PyTuple, PyCapsule};
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
 
 use bytes::Bytes;
 use std::error::Error;
+use std::ffi::c_void;
+
+use arrow::ffi_stream::ArrowArrayStreamReader;
+use arrow::array::{Array, RecordBatch};
+use arrow::array::cast::AsArray;
+use arrow::record_batch::RecordBatchReader;
+use arrow::datatypes::DataType;
 use postgres_types::FromSql;
 
 use pgwire::api::auth::noop::NoopStartupHandler;
@@ -40,6 +47,19 @@ fn map_python_type_to_pgwire(t: &str) -> Type {
     }
 }
 
+fn map_arrow_type(dt: &DataType) -> &'static str {
+    use DataType::*;
+    match dt {
+        Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 => "int",
+        Float16 | Float32 | Float64 => "float",
+        Boolean => "bool",
+        Utf8 | LargeUtf8 => "str",
+        Date32 | Date64 => "date",
+        Timestamp(_, _) => "datetime",
+        _ => "str",
+    }
+}
+
 
 pub struct WorkerMessage {
     pub query: String,
@@ -59,6 +79,27 @@ impl CallbackWrapper {
     fn __call__(&self, result: PyObject) {
         if let Some(sender) = self.responder.lock().unwrap().take() {
             Python::with_gil(|py| {
+                // Try Arrow C stream pointer first
+                println!("[RUST] result python type: {}", result.as_ref(py).get_type().name().unwrap_or("<unknown>"));
+                if let Ok(capsule) = result.extract::<&PyCapsule>(py) {
+                    println!("[RUST] received PyCapsule");
+                    let ptr = capsule.pointer() as *mut c_void;
+                    if let Ok(res) = arrow_stream_to_rows(ptr) {
+                        let _ = sender.send(res);
+                        return;
+                    } else {
+                        println!("[RUST] arrow_stream_to_rows failed for capsule");
+                    }
+                } else if let Ok(ptr_val) = result.extract::<usize>(py) {
+                    println!("[RUST] received usize pointer: {}", ptr_val);
+                    let ptr = ptr_val as *mut c_void;
+                    if let Ok(res) = arrow_stream_to_rows(ptr) {
+                        let _ = sender.send(res);
+                        return;
+                    } else {
+                        println!("[RUST] arrow_stream_to_rows failed for int");
+                    }
+                }
                 // First try to treat the result as Arrow IPC bytes. When the
                 // callback returns bytes we assume they contain an Arrow IPC
                 // stream produced by ``pyarrow``.  Use ``pyarrow`` again to
@@ -167,6 +208,56 @@ result_py = (schema_desc, rows)
                 }
             });
         }
+    }
+}
+
+fn arrow_value_to_string(array: &dyn Array, row: usize) -> Option<String> {
+    if array.is_null(row) {
+        return None;
+    }
+    match array.data_type() {
+        DataType::Int8 => Some(array.as_primitive::<arrow::array::types::Int8Type>().value(row).to_string()),
+        DataType::Int16 => Some(array.as_primitive::<arrow::array::types::Int16Type>().value(row).to_string()),
+        DataType::Int32 => Some(array.as_primitive::<arrow::array::types::Int32Type>().value(row).to_string()),
+        DataType::Int64 => Some(array.as_primitive::<arrow::array::types::Int64Type>().value(row).to_string()),
+        DataType::UInt8 => Some(array.as_primitive::<arrow::array::types::UInt8Type>().value(row).to_string()),
+        DataType::UInt16 => Some(array.as_primitive::<arrow::array::types::UInt16Type>().value(row).to_string()),
+        DataType::UInt32 => Some(array.as_primitive::<arrow::array::types::UInt32Type>().value(row).to_string()),
+        DataType::UInt64 => Some(array.as_primitive::<arrow::array::types::UInt64Type>().value(row).to_string()),
+        DataType::Float32 => Some(array.as_primitive::<arrow::array::types::Float32Type>().value(row).to_string()),
+        DataType::Float64 => Some(array.as_primitive::<arrow::array::types::Float64Type>().value(row).to_string()),
+        DataType::Boolean => Some(array.as_boolean().value(row).to_string()),
+        DataType::Utf8 => Some(array.as_string::<i32>().value(row).to_string()),
+        DataType::LargeUtf8 => Some(array.as_string::<i64>().value(row).to_string()),
+        _ => Some("".to_string()),
+    }
+}
+
+fn arrow_stream_to_rows(ptr: *mut c_void) -> Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>), String> {
+    unsafe {
+        println!("[RUST] arrow_stream_to_rows: ptr={:?}", ptr);
+        let mut reader = ArrowArrayStreamReader::from_raw(ptr as *mut _).map_err(|e| e.to_string())?;
+        println!("[RUST] reader constructed");
+        let schema = reader.schema();
+        let mut schema_desc = Vec::new();
+        for field in schema.fields() {
+            let mut map = HashMap::new();
+            map.insert("name".to_string(), field.name().to_string());
+            map.insert("type".to_string(), map_arrow_type(field.data_type()).to_string());
+            schema_desc.push(map);
+        }
+        let mut rows = Vec::new();
+        while let Some(batch) = reader.next().transpose().map_err(|e| e.to_string())? {
+            let num_rows = batch.num_rows();
+            for i in 0..num_rows {
+                let mut row = Vec::new();
+                for col in batch.columns() {
+                    row.push(arrow_value_to_string(col.as_ref(), i));
+                }
+                rows.push(row);
+            }
+        }
+        Ok((schema_desc, rows))
     }
 }
 

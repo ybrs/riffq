@@ -75,6 +75,22 @@ def handle_sql(sql: str):
 riffq.serve(port=5432)
 ```
 
+### Enabling TLS
+
+Generate a temporary certificate and key:
+
+```bash
+openssl req -newkey rsa:2048 -nodes -keyout server.key -x509 -days 1 -out server.crt -subj "/CN=localhost"
+```
+
+Start the server with TLS enabled:
+
+```python
+server = riffq.Server("127.0.0.1:5432")
+server.set_tls("server.crt", "server.key")
+server.start(tls=True)
+```
+
 Then connect using any PostgreSQL client:
 
 ```bash
@@ -89,7 +105,7 @@ psql -h localhost -p 5432
 - ✅ Query dispatching to Python
 - ✅ DuckDB, Pandas, Polars compatibility
 - 🟡 Limited SQL parsing on Rust side (forwarded to Python)
-- ❌ No authentication or TLS (yet)
+- ✅ Optional TLS encryption
 
 ---
 

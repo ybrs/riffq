@@ -4,3 +4,4 @@ maturin
 duckdb
 pandas
 pyarrow
+psycopg2

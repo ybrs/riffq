@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+use pyo3::{FromPyObject, PyAny};
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::{Sink, StreamExt};
@@ -7,14 +8,25 @@ use tokio::signal;
 use tokio::sync::oneshot;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::net::TcpStream;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyList, PyTuple, PyCapsule};
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
 
 use bytes::Bytes;
 use std::error::Error;
+use std::ffi::c_void;
+
+use arrow::ffi_stream::ArrowArrayStreamReader;
+use arrow::array::{Array, RecordBatch};
+use arrow::array::cast::AsArray;
+use arrow::record_batch::RecordBatchReader;
+use arrow::datatypes::{DataType, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
 use postgres_types::FromSql;
+
+use chrono::{NaiveDate, NaiveDateTime, Duration};
+use arrow::datatypes::TimeUnit;
+
 
 use pgwire::api::auth::noop::NoopStartupHandler;
 use pgwire::api::copy::NoopCopyHandler;
@@ -39,6 +51,19 @@ fn map_python_type_to_pgwire(t: &str) -> Type {
     }
 }
 
+fn map_arrow_type(dt: &DataType) -> &'static str {
+    use DataType::*;
+    match dt {
+        Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 => "int",
+        Float16 | Float32 | Float64 => "float",
+        Boolean => "bool",
+        Utf8 | LargeUtf8 => "str",
+        Date32 | Date64 => "date",
+        Timestamp(_, _) => "datetime",
+        _ => "str",
+    }
+}
+
 
 pub struct WorkerMessage {
     pub query: String,
@@ -58,6 +83,101 @@ impl CallbackWrapper {
     fn __call__(&self, result: PyObject) {
         if let Some(sender) = self.responder.lock().unwrap().take() {
             Python::with_gil(|py| {
+                // Try Arrow C stream pointer first
+                println!("[RUST] result python type: {}", result.as_ref(py).get_type().name().unwrap_or("<unknown>"));
+                if let Ok(capsule) = result.extract::<&PyCapsule>(py) {
+                    println!("[RUST] received PyCapsule");
+                    let ptr = capsule.pointer() as *mut c_void;
+                    if let Ok(res) = arrow_stream_to_rows(ptr) {
+                        let _ = sender.send(res);
+                    } else {
+                        println!("[RUST] arrow_stream_to_rows failed for capsule");
+                    }
+                    return;
+                } 
+
+                // First try to treat the result as Arrow IPC bytes. When the
+                // callback returns bytes we assume they contain an Arrow IPC
+                // stream produced by ``pyarrow``.  Use ``pyarrow`` again to
+                // decode the bytes into a schema description and rows so that
+                // the rest of the code can operate on plain Rust types.
+                if let Ok(pybytes) = result.extract::<&pyo3::types::PyBytes>(py) {
+                    let locals = PyDict::new(py);
+                    locals.set_item("data", pybytes).unwrap();
+                    // The Python snippet reads the IPC stream and converts it
+                    // to two Python objects: ``schema_desc`` describing the
+                    // columns and ``rows`` containing the record batches as a
+                    // list of rows (lists). The column types are normalised to
+                    // simple strings that map to pgwire types later on.
+                    py.run(
+                        r#"
+import pyarrow as pa
+import pyarrow.ipc as ipc
+import pyarrow.types as pat
+reader = ipc.open_stream(data)
+table = reader.read_all()
+def map_type(field):
+    t = field.type
+    if pat.is_integer(t):
+        return "int"
+    if pat.is_floating(t):
+        return "float"
+    if pat.is_boolean(t):
+        return "bool"
+    if pat.is_string(t) or pat.is_large_string(t):
+        return "str"
+    if pat.is_date(t):
+        return "date"
+    if pat.is_timestamp(t):
+        return "datetime"
+    return "str"
+schema_desc = [{"name": f.name, "type": map_type(f)} for f in table.schema]
+rows = [[row.get(f.name) for f in table.schema] for row in table.to_pylist()]
+result_py = (schema_desc, rows)
+"#,
+                        None,
+                        Some(locals),
+                    )
+                    .unwrap();
+                    let tuple_any = match PyDict::get_item(locals, "result_py")
+                        .unwrap()
+                    {
+                        Some(v) => v,
+                        None => panic!("result_py missing"),
+                    };
+                    let parsed: (
+                        Vec<HashMap<String, String>>,
+                        Vec<Vec<PyObject>>,
+                    ) = <(
+                        Vec<HashMap<String, String>>,
+                        Vec<Vec<PyObject>>,
+                    ) as FromPyObject>::extract(tuple_any).unwrap();
+                    let converted_rows: Vec<Vec<Option<String>>> = parsed
+                        .1
+                        .into_iter()
+                        .map(|row| {
+                            row.into_iter()
+                                .map(|val| {
+                                    Python::with_gil(|py| {
+                                        let v = val.as_ref(py);
+                                        if v.is_none() {
+                                            Ok::<Option<String>, ()>(None)
+                                        } else {
+                                            match v.str() {
+                                                Ok(pystr) => Ok(Some(pystr.to_str().unwrap_or("").to_string())),
+                                                Err(_) => Ok(None),
+                                            }
+                                        }
+                                    })
+                                    .unwrap_or(None)
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    let _ = sender.send((parsed.0, converted_rows));
+                    return;
+                }
+
                 let parsed: PyResult<(Vec<HashMap<String, String>>, Vec<Vec<PyObject>>)> = result.extract(py);
                 if let Ok((schema_desc, py_rows)) = parsed {
                     let converted_rows: Vec<Vec<Option<String>>> = py_rows
@@ -84,6 +204,89 @@ impl CallbackWrapper {
                 }
             });
         }
+    }
+}
+
+fn arrow_value_to_string(array: &dyn Array, row: usize) -> Option<String> {
+    if array.is_null(row) {
+        return None;
+    }
+    match array.data_type() {
+        DataType::Int8 => Some(array.as_primitive::<arrow::array::types::Int8Type>().value(row).to_string()),
+        DataType::Int16 => Some(array.as_primitive::<arrow::array::types::Int16Type>().value(row).to_string()),
+        DataType::Int32 => Some(array.as_primitive::<arrow::array::types::Int32Type>().value(row).to_string()),
+        DataType::Int64 => Some(array.as_primitive::<arrow::array::types::Int64Type>().value(row).to_string()),
+        DataType::UInt8 => Some(array.as_primitive::<arrow::array::types::UInt8Type>().value(row).to_string()),
+        DataType::UInt16 => Some(array.as_primitive::<arrow::array::types::UInt16Type>().value(row).to_string()),
+        DataType::UInt32 => Some(array.as_primitive::<arrow::array::types::UInt32Type>().value(row).to_string()),
+        DataType::UInt64 => Some(array.as_primitive::<arrow::array::types::UInt64Type>().value(row).to_string()),
+        DataType::Float32 => Some(array.as_primitive::<arrow::array::types::Float32Type>().value(row).to_string()),
+        DataType::Float64 => Some(array.as_primitive::<arrow::array::types::Float64Type>().value(row).to_string()),
+        DataType::Boolean => Some(array.as_boolean().value(row).to_string()),
+        DataType::Utf8 => Some(array.as_string::<i32>().value(row).to_string()),
+        DataType::LargeUtf8 => Some(array.as_string::<i64>().value(row).to_string()),
+        DataType::Date32 => {
+            let days = array.as_primitive::<arrow::array::types::Date32Type>().value(row) as i64;
+            let date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + Duration::days(days);
+            Some(date.format("%Y-%m-%d").to_string())
+        }
+        DataType::Date64 => {
+            let ms = array.as_primitive::<arrow::array::types::Date64Type>().value(row);
+            let dt = NaiveDateTime::from_timestamp_opt(ms / 1000, (ms % 1000 * 1_000_000) as u32).unwrap();
+            Some(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        }
+        DataType::Timestamp(unit, _) => {
+            let nanos: i128 = match unit {
+                TimeUnit::Second => {
+                    array.as_primitive::<TimestampSecondType>().value(row) as i128 * 1_000_000_000
+                }
+                TimeUnit::Millisecond => {
+                    array.as_primitive::<TimestampMillisecondType>().value(row) as i128 * 1_000_000
+                }
+                TimeUnit::Microsecond => {
+                    array.as_primitive::<TimestampMicrosecondType>().value(row) as i128 * 1_000
+                }
+                TimeUnit::Nanosecond => {
+                    array.as_primitive::<TimestampNanosecondType>().value(row) as i128
+                }
+            };
+            let secs = (nanos / 1_000_000_000) as i64;
+            let nsec = (nanos % 1_000_000_000) as u32;
+            let dt = NaiveDateTime::from_timestamp_opt(secs, nsec).unwrap();
+            Some(dt.format("%Y-%m-%d %H:%M:%S%.f").to_string())
+        }
+        _ => {
+            println!("unknown data type");
+            Some("".to_string())
+        },
+    }
+}
+
+fn arrow_stream_to_rows(ptr: *mut c_void) -> Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>), String> {
+    unsafe {
+        println!("[RUST] arrow_stream_to_rows: ptr={:?}", ptr);
+        let mut reader = ArrowArrayStreamReader::from_raw(ptr as *mut _).map_err(|e| e.to_string())?;
+        println!("[RUST] reader constructed");
+        let schema = reader.schema();
+        let mut schema_desc = Vec::new();
+        for field in schema.fields() {
+            let mut map = HashMap::new();
+            map.insert("name".to_string(), field.name().to_string());
+            map.insert("type".to_string(), map_arrow_type(field.data_type()).to_string());
+            schema_desc.push(map);
+        }
+        let mut rows = Vec::new();
+        while let Some(batch) = reader.next().transpose().map_err(|e| e.to_string())? {
+            let num_rows = batch.num_rows();
+            for i in 0..num_rows {
+                let mut row = Vec::new();
+                for col in batch.columns() {
+                    row.push(arrow_value_to_string(col.as_ref(), i));
+                }
+                rows.push(row);
+            }
+        }
+        Ok((schema_desc, rows))
     }
 }
 

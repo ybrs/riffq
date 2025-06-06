@@ -125,4 +125,14 @@ Contributions are welcome! Especially for:
 
 Because you're riffing on SQL. You don’t just store it — you remix it.
 
+## Development Notes
+
+This repository contains tests that exercise the ability to return query results
+as Arrow IPC streams from Python. The initial implementation in `src/lib.rs`
+only accepted raw bytes without decoding them, resulting in empty result sets.
+
+The code now invokes `pyarrow` to parse these IPC bytes back into ordinary
+rows.  The parsing is performed inside the Rust callback while holding the
+Python GIL so no additional Rust Arrow dependencies are required.
+
 ---

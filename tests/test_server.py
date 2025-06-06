@@ -139,3 +139,6 @@ class ServerTest(unittest.TestCase):
             names = [desc.name for desc in cur.description]
             self.assertEqual(names, ["flag"])
         conn.close()
+
+if __name__ == "__main__":
+    unittest.main()

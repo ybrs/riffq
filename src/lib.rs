@@ -21,8 +21,12 @@ use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::array::{Array, RecordBatch};
 use arrow::array::cast::AsArray;
 use arrow::record_batch::RecordBatchReader;
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
 use postgres_types::FromSql;
+
+use chrono::{NaiveDate, NaiveDateTime, Duration};
+use arrow::datatypes::TimeUnit;
+
 
 use pgwire::api::auth::noop::NoopStartupHandler;
 use pgwire::api::copy::NoopCopyHandler;
@@ -221,7 +225,40 @@ fn arrow_value_to_string(array: &dyn Array, row: usize) -> Option<String> {
         DataType::Boolean => Some(array.as_boolean().value(row).to_string()),
         DataType::Utf8 => Some(array.as_string::<i32>().value(row).to_string()),
         DataType::LargeUtf8 => Some(array.as_string::<i64>().value(row).to_string()),
-        _ => Some("".to_string()),
+        DataType::Date32 => {
+            let days = array.as_primitive::<arrow::array::types::Date32Type>().value(row) as i64;
+            let date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + Duration::days(days);
+            Some(date.format("%Y-%m-%d").to_string())
+        }
+        DataType::Date64 => {
+            let ms = array.as_primitive::<arrow::array::types::Date64Type>().value(row);
+            let dt = NaiveDateTime::from_timestamp_opt(ms / 1000, (ms % 1000 * 1_000_000) as u32).unwrap();
+            Some(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        }
+        DataType::Timestamp(unit, _) => {
+            let nanos: i128 = match unit {
+                TimeUnit::Second => {
+                    array.as_primitive::<TimestampSecondType>().value(row) as i128 * 1_000_000_000
+                }
+                TimeUnit::Millisecond => {
+                    array.as_primitive::<TimestampMillisecondType>().value(row) as i128 * 1_000_000
+                }
+                TimeUnit::Microsecond => {
+                    array.as_primitive::<TimestampMicrosecondType>().value(row) as i128 * 1_000
+                }
+                TimeUnit::Nanosecond => {
+                    array.as_primitive::<TimestampNanosecondType>().value(row) as i128
+                }
+            };
+            let secs = (nanos / 1_000_000_000) as i64;
+            let nsec = (nanos % 1_000_000_000) as u32;
+            let dt = NaiveDateTime::from_timestamp_opt(secs, nsec).unwrap();
+            Some(dt.format("%Y-%m-%d %H:%M:%S%.f").to_string())
+        }
+        _ => {
+            println!("unknown data type");
+            Some("".to_string())
+        },
     }
 }
 

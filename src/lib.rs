@@ -15,7 +15,6 @@ use rustls_pemfile::{certs, pkcs8_private_keys};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
-use pyo3::types::{PyDict, PyList, PyTuple, PyCapsule};
 
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};

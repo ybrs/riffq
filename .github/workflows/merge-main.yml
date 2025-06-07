@@ -1,7 +1,10 @@
-name: merge-main
+name: merge-main-3
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   merge:
@@ -23,7 +26,7 @@ jobs:
           current=${GITHUB_REF#refs/heads/}
           tmp=tmp-$ts-$current
           git branch "$tmp"
-          git push origin "$tmp"
+          git push -u origin "$tmp"
 
       - name: merge main with union resolution
         run: |

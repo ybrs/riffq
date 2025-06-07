@@ -39,7 +39,7 @@ def _run_server_tls(port: int, cert: str, key: str):
         callback(([{"name": "val", "type": "int"}], [[value]]))
 
     server = riffq.Server(f"127.0.0.1:{port}")
-    server.set_callback(handle_query)
+    server.on_query(handle_query)
     server.set_tls(cert, key)
     server.start(tls=True)
 

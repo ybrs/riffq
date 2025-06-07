@@ -1,7 +1,10 @@
-name: merge-main
+name: merge-main-2
 
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   merge:
@@ -16,6 +19,14 @@ jobs:
         run: |
           git config --global user.name "${{ github.actor }} via GH-Actions"
           git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+
+      - name: create temp backup branch
+        run: |
+          ts=$(date +%s)
+          current=${GITHUB_REF#refs/heads/}
+          tmp=tmp-$ts-$current
+          git branch "$tmp"
+          git push -u origin "$tmp"
 
       - name: merge main with union resolution
         run: |

@@ -3,7 +3,6 @@ import socket
 import subprocess
 import sys
 import time
-import threading
 from pathlib import Path
 
 import psycopg
@@ -24,22 +23,22 @@ def _run_server(port: int):
     import riffq
 
     def handle_query(sql, callback, **kwargs):
-        conn_id = kwargs.get("connection_id")
-        if sql.strip().lower() == "select conn_id":
-            callback(([{"name": "id", "type": "int"}], [[int(conn_id)]]))
-        else:
-            callback(([{"name": "val", "type": "int"}], [[1]]))
+        callback(([{"name": "val", "type": "int"}], [[1]]))
+
+    def handle_connect(conn_id, ip, port):
+        return False
 
     server = riffq.Server(f"127.0.0.1:{port}")
     server.on_query(handle_query)
+    server.on_connect(handle_connect)
     server.start()
 
 
-class ConnectionIdTest(unittest.TestCase):
+class OnConnectTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _ensure_riffq_built()
-        cls.port = 55435
+        cls.port = 55436
         cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
         cls.proc.start()
         start = time.time()
@@ -58,29 +57,9 @@ class ConnectionIdTest(unittest.TestCase):
         cls.proc.terminate()
         cls.proc.join()
 
-    def _fetch_id(self):
-        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
-        with conn.cursor() as cur:
-            cur.execute("SELECT conn_id")
-            result = cur.fetchone()[0]
-        conn.close()
-        return result
-
-    def test_connection_ids_increment(self):
-        first = self._fetch_id()
-        second = self._fetch_id()
-        self.assertNotEqual(first, second)
-
-    def test_parallel_connections_unique(self):
-        results = []
-        def worker():
-            results.append(self._fetch_id())
-        t1 = threading.Thread(target=worker)
-        t2 = threading.Thread(target=worker)
-        t1.start(); t2.start()
-        t1.join(); t2.join()
-        self.assertEqual(len(results), 2)
-        self.assertEqual(len(set(results)), 2)
+    def test_reject(self):
+        with self.assertRaises(psycopg.OperationalError):
+            psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
 
 
 if __name__ == "__main__":

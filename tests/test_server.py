@@ -64,7 +64,7 @@ def _run_server(port: int):
         send_batch(batch, callback)
 
     server = riffq.Server(f"127.0.0.1:{port}")
-    server.set_callback(handle_query)
+    server.on_query(handle_query)
     server.start()
 
 class ServerTest(unittest.TestCase):

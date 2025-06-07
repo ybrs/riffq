@@ -11,14 +11,7 @@ import pyarrow as pa
 
 
 def _ensure_riffq_built():
-    try:
-        import riffq  # noqa: F401
-
-        return
-    except ImportError:
-        pass
-
-    # Attempt to build the extension from source
+    subprocess.call([sys.executable, "-m", "pip", "uninstall", "-y", "riffq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         subprocess.check_call(["maturin", "build", "--release", "-q"])
         wheel = next(Path("target/wheels").glob("riffq-*.whl"))

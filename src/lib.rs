@@ -19,6 +19,9 @@ use tokio_rustls::TlsAcceptor;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static CONNECTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use bytes::Bytes;
 use std::error::Error;
@@ -77,6 +80,7 @@ pub struct WorkerMessage {
     pub params: Option<Vec<Option<Bytes>>>,
     pub param_types: Option<Vec<Type>>,
     pub do_describe: bool,
+    pub connection_id: u64,
     pub responder: oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>,
 }
 
@@ -317,6 +321,7 @@ impl PythonWorker {
                             params,
                             param_types,
                             do_describe,
+                            connection_id,
                             responder,
                         } = msg;
 
@@ -335,6 +340,9 @@ impl PythonWorker {
 
                                 // Add do_describe flag
                                 kwargs.set_item("do_describe", do_describe).unwrap();
+
+                                // Connection identifier
+                                kwargs.set_item("connection_id", connection_id).unwrap();
 
                                 // Add query_args if present
                                 if let (Some(params), Some(param_types)) = (&params, &param_types) {
@@ -402,6 +410,7 @@ impl PythonWorker {
         params: Option<Vec<Option<Bytes>>>,
         param_types: Option<Vec<Type>>,
         do_describe: bool,
+        connection_id: u64,
     ) -> (Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>) {
         let (tx, rx) = oneshot::channel();
         println!("[RUST] Sending query to worker: {}", query);
@@ -411,6 +420,7 @@ impl PythonWorker {
             params,
             param_types,
             do_describe,
+            connection_id,
             responder: tx,
         }).expect("Send failed!");
 
@@ -437,7 +447,12 @@ impl NoopStartupHandler for DummyProcessor {
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        println!("connected {:?}: {:?}", client.socket_addr(), client.metadata());
+        let id = CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
+        client
+            .metadata_mut()
+            .insert("connection_id".to_string(), id.to_string());
+
+        println!("connected {:?} id {}: {:?}", client.socket_addr(), id, client.metadata());
         println!("Received message: {:?}", _message);
         Ok(())
     }
@@ -468,8 +483,14 @@ impl SimpleQueryHandler for DummyProcessor {
 
         println!("[PGWIRE] do_query called with: {}", query);
         // let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
+        let connection_id = _client
+            .metadata()
+            .get("connection_id")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+
         let (schema_desc, rows_list) = self.py_worker
-            .query(query.to_string(), None, None, false, )
+            .query(query.to_string(), None, None, false, connection_id)
             .await;
         println!("[PGWIRE] Schema and rows received");
 
@@ -574,12 +595,19 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
         println!("[PGWIRE EXTENDED] do_query: {} {}", portal.statement.statement.query, _debug_parameters(&portal.parameters, &portal.statement.parameter_types));
 
 
+        let connection_id = _client
+            .metadata()
+            .get("connection_id")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+
         let (schema_desc, rows_list) = self.py_worker
             .query(
                 query.to_string(),
                 Some(portal.parameters.clone()),
                 Some(portal.statement.parameter_types.clone()),
                 false,
+                connection_id,
             )
             .await;
 
@@ -640,12 +668,19 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
 
 
 
+        let connection_id = _client
+            .metadata()
+            .get("connection_id")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+
         let (schema_desc, rows_list) = self.py_worker
             .query(
                 query.to_string(),
                 Some(portal.parameters.clone()),
                 Some(portal.statement.parameter_types.clone()),
                 true,
+                connection_id,
             )
             .await;
 

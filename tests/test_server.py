@@ -7,11 +7,13 @@ from pathlib import Path
 
 import psycopg
 import unittest
+import pyarrow as pa
 
 
 def _ensure_riffq_built():
     try:
         import riffq  # noqa: F401
+
         return
     except ImportError:
         pass
@@ -27,21 +29,35 @@ def _ensure_riffq_built():
 
 def _run_server(port: int):
     import riffq
+    import pyarrow as pa
+
+    def send_batch(batch: pa.RecordBatch, callback):
+        rdr = pa.RecordBatchReader.from_batches(batch.schema, [batch])
+        if hasattr(rdr, "__arrow_c_stream__"):
+            capsule = rdr.__arrow_c_stream__()
+        else:
+            from pyarrow.cffi import export_stream
+            capsule = export_stream(rdr)
+        callback(capsule)
 
     def handle_query(sql, callback, **kwargs):
         args = kwargs.get("query_args")
-
         sql_clean = sql.strip().lower()
         if sql_clean == "select multi":
-            schema = [
-                {"name": "a", "type": "int"},
-                {"name": "b", "type": "str"},
-                {"name": "c", "type": "float"},
-                {"name": "d", "type": "int"},
-            ]
-            rows = [[1, "foo", 3.14, None]]
-            callback((schema, rows))
-            return
+            batch = pa.record_batch(
+                [
+                    pa.array([1], pa.int64()),
+                    pa.array(["foo"], pa.string()),
+                    pa.array([3.14], pa.float64()),
+                    pa.array([None], pa.int64()),
+                ],
+                names=["a", "b", "c", "d"],
+            )
+            return send_batch(batch, callback)
+                    
+        if sql_clean == "select bool":
+            batch = pa.record_batch([pa.array([True], pa.bool_())], names=["flag"])
+            return send_batch(batch, callback)
 
         if args:
             value = int(args[0])
@@ -51,20 +67,21 @@ def _run_server(port: int):
             else:
                 value = 1
 
-        result = ([{"name": "val", "type": "int"}], [[value]])
-        callback(result)
+        batch = pa.record_batch([pa.array([value], pa.int64())], names=["val"])
+        send_batch(batch, callback)
 
     server = riffq.Server(f"127.0.0.1:{port}")
     server.set_callback(handle_query)
     server.start()
-
 
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         _ensure_riffq_built()
         cls.port = 55433
-        cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
+        cls.proc = multiprocessing.Process(
+            target=_run_server, args=(cls.port,), daemon=True
+        )
         cls.proc.start()
 
         start = time.time()
@@ -111,3 +128,17 @@ class ServerTest(unittest.TestCase):
             names = [desc.name for desc in cur.description]
             self.assertEqual(names, ["a", "b", "c", "d"])
         conn.close()
+
+    def test_bool_column(self):
+        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
+        with conn.cursor() as cur:
+            cur.execute("SELECT bool")
+            row = cur.fetchone()
+            self.assertEqual(row, (True,))
+            self.assertIsInstance(row[0], bool)
+            names = [desc.name for desc in cur.description]
+            self.assertEqual(names, ["flag"])
+        conn.close()
+
+if __name__ == "__main__":
+    unittest.main()

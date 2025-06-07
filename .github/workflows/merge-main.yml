@@ -17,14 +17,6 @@ jobs:
           git config --global user.name "${{ github.actor }} via GH-Actions"
           git config --global user.email "${{ github.actor }}@users.noreply.github.com"
 
-      - name: create temp backup branch
-        run: |
-          ts=$(date +%s)
-          current=${GITHUB_REF#refs/heads/}
-          tmp=tmp-$ts-$current
-          git branch "$tmp"
-          git push origin "$tmp"
-
       - name: merge main with union resolution
         run: |
           git fetch origin main

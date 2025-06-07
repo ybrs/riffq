@@ -1,0 +1,46 @@
+name: merge-main
+
+on:
+  workflow_dispatch:
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: set identity
+        run: |
+          git config --global user.name "${{ github.actor }} via GH-Actions"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+
+      - name: create temp backup branch
+        run: |
+          ts=$(date +%s)
+          current=${GITHUB_REF#refs/heads/}
+          tmp=tmp-$ts-$current
+          git branch "$tmp"
+          git push origin "$tmp"
+
+      - name: merge main with union resolution
+        run: |
+          git fetch origin main
+          git merge --no-ff --no-commit origin/main || true
+          for f in $(git diff --name-only --diff-filter=U); do
+            git show :2:$f > ours.tmp
+            git show :1:$f > base.tmp
+            git show :3:$f > theirs.tmp
+            git merge-file --union ours.tmp base.tmp theirs.tmp > "$f"
+            rm ours.tmp base.tmp theirs.tmp
+            git add "$f"
+          done
+          if ! git diff --cached --quiet; then
+            git commit -am "auto-merge main into ${GITHUB_REF#refs/heads/}"
+          fi
+
+      - name: push if merge committed
+        if: success()
+        run: git push origin HEAD:${GITHUB_REF#refs/heads/}

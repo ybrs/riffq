@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches: ["**"]
-  pull_request:
+  pull_request: 
     branches: ["**"]
 
 jobs:
@@ -34,6 +34,8 @@ jobs:
         run: pip install target/wheels/*.whl
       - name: Run Python unit tests
         run: python -m unittest discover -s tests
+      - name: Run concurrency unit tests
+        run: python -m unittest discover -s test_concurrency
 
   concurrency-tests:
     runs-on: ubuntu-latest

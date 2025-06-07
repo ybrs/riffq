@@ -17,3 +17,6 @@ postgres-types = "0.2"
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
 rustls-pki-types = "1"
+arrow = { version = "55.1.0", features = ["ffi"] }
+chrono = "0.4.41"
+

@@ -112,6 +112,23 @@ struct CallbackWrapper {
     responder: Arc<Mutex<Option<oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>>>>,
 }
 
+#[pyclass]
+struct BoolCallbackWrapper {
+    responder: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+}
+
+#[pymethods]
+impl BoolCallbackWrapper {
+    fn __call__(&self, result: PyObject) {
+        if let Some(sender) = self.responder.lock().unwrap().take() {
+            Python::with_gil(|py| {
+                let val: bool = result.extract(py).unwrap_or(false);
+                let _ = sender.send(val);
+            });
+        }
+    }
+}
+
 #[pymethods]
 impl CallbackWrapper {
     fn __call__(&self, result: PyObject) {
@@ -399,22 +416,21 @@ impl PythonWorker {
                         }
                         WorkerMessage::Connect { connection_id, ip, port, responder } => {
                             let cb_opt = connect_cb.lock().unwrap().clone();
-                            let mut result = true;
                             if let Some(cb) = cb_opt {
                                 Python::with_gil(|py| {
+                                    let wrapper = Py::new(py, BoolCallbackWrapper {
+                                        responder: Arc::new(Mutex::new(Some(responder))),
+                                    }).unwrap();
                                     let args = PyTuple::new(py, &[connection_id.into_py(py), ip.into_py(py), port.into_py(py)]);
-                                    match cb.call1(py, args) {
-                                        Ok(ret) => {
-                                            result = ret.extract::<bool>(py).unwrap_or(true);
-                                        }
-                                        Err(e) => {
-                                            e.print(py);
-                                            result = false;
-                                        }
+                                    let kwargs = PyDict::new(py);
+                                    kwargs.set_item("callback", wrapper.into_py(py)).unwrap();
+                                    if let Err(e) = cb.call(py, args, Some(kwargs)) {
+                                        e.print(py);
                                     }
                                 });
+                            } else {
+                                let _ = responder.send(true);
                             }
-                            let _ = responder.send(result);
                         }
                         WorkerMessage::Disconnect { connection_id, ip, port } => {
                             let cb_opt = disconnect_cb.lock().unwrap().clone();
@@ -428,10 +444,12 @@ impl PythonWorker {
                             }
                         }
                         WorkerMessage::Authentication { connection_id, user, database, host, password, responder } => {
-                            let mut result = true;
                             let cb_opt = auth_cb_thread.lock().unwrap().clone();
                             if let Some(cb) = cb_opt {
                                 Python::with_gil(|py| {
+                                    let wrapper = Py::new(py, BoolCallbackWrapper {
+                                        responder: Arc::new(Mutex::new(Some(responder))),
+                                    }).unwrap();
                                     let args = PyTuple::new(py, &[
                                         connection_id.into_py(py),
                                         user.into_py(py),
@@ -439,21 +457,17 @@ impl PythonWorker {
                                         host.into_py(py),
                                     ]);
                                     let kwargs = PyDict::new(py);
+                                    kwargs.set_item("callback", wrapper.into_py(py)).unwrap();
                                     if let Some(db) = database {
                                         kwargs.set_item("database", db).unwrap();
                                     }
-                                    match cb.call(py, args, Some(kwargs)) {
-                                        Ok(ret) => {
-                                            result = ret.extract::<bool>(py).unwrap_or(false);
-                                        }
-                                        Err(e) => {
-                                            e.print(py);
-                                            result = false;
-                                        }
+                                    if let Err(e) = cb.call(py, args, Some(kwargs)) {
+                                        e.print(py);
                                     }
                                 });
+                            } else {
+                                let _ = responder.send(true);
                             }
-                            let _ = responder.send(result);
                         }
                     },
                     Err(_) => {

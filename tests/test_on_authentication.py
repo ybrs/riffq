@@ -15,8 +15,8 @@ def _run_server(port: int):
     def handle_query(sql, callback, **kwargs):
         callback(([{"name": "val", "type": "int"}], [[1]]))
 
-    def handle_auth(conn_id, user, password, host, database=None):
-        return user == "user" and password == "secret"
+    def handle_auth(conn_id, user, password, host, *, callback, database=None):
+        callback(user == "user" and password == "secret")
 
     server = riffq.Server(f"127.0.0.1:{port}")
     server.on_query(handle_query)

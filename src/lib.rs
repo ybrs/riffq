@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::{FromPyObject, PyAny};
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
-use futures::{Sink, StreamExt};
+use futures::{Sink, SinkExt, StreamExt};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::oneshot;
@@ -24,7 +24,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static CONNECTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use bytes::Bytes;
-use std::error::Error;
 use std::ffi::c_void;
 
 use arrow::ffi_stream::ArrowArrayStreamReader;
@@ -38,7 +37,8 @@ use chrono::{NaiveDate, NaiveDateTime, Duration};
 use arrow::datatypes::TimeUnit;
 
 
-use pgwire::api::auth::noop::NoopStartupHandler;
+use pgwire::api::auth::{LoginInfo, DefaultServerParameterProvider, StartupHandler, finish_authentication};
+use pgwire::api::PgWireConnectionState;
 use pgwire::api::copy::NoopCopyHandler;
 use pgwire::api::query::{SimpleQueryHandler, ExtendedQueryHandler};
 use pgwire::api::results::{DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
@@ -46,6 +46,8 @@ use pgwire::api::{ClientInfo, ClientPortalStore, NoopErrorHandler, PgWireServerH
 use pgwire::api::portal::Portal;
 use pgwire::error::{PgWireError, PgWireResult, ErrorInfo};
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
+use pgwire::messages::startup::Authentication;
+use pgwire::messages::response::ErrorResponse;
 use pgwire::tokio::process_socket;
 use pgwire::api::stmt::{StoredStatement, NoopQueryParser};
 
@@ -94,6 +96,14 @@ pub enum WorkerMessage {
         connection_id: u64,
         ip: String,
         port: u16,
+    },
+    Authentication {
+        connection_id: u64,
+        user: Option<String>,
+        database: Option<String>,
+        host: String,
+        password: String,
+        responder: oneshot::Sender<bool>,
     },
 }
 
@@ -316,6 +326,7 @@ fn arrow_stream_to_rows(ptr: *mut c_void) -> Result<(Vec<HashMap<String, String>
 
 pub struct PythonWorker {
     sender: Sender<WorkerMessage>,
+    auth_cb: Arc<Mutex<Option<Py<PyAny>>>>,
 }
 
 impl PythonWorker {
@@ -323,8 +334,10 @@ impl PythonWorker {
         query_cb: Arc<Mutex<Option<Py<PyAny>>>>,
         connect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
         disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+        auth_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     ) -> Self {
         let (tx, rx) = channel::<WorkerMessage>();
+        let auth_cb_thread = auth_cb.clone();
 
         thread::spawn(move || {
             println!("[PY_WORKER] Thread started");
@@ -414,6 +427,34 @@ impl PythonWorker {
                                 });
                             }
                         }
+                        WorkerMessage::Authentication { connection_id, user, database, host, password, responder } => {
+                            let mut result = true;
+                            let cb_opt = auth_cb_thread.lock().unwrap().clone();
+                            if let Some(cb) = cb_opt {
+                                Python::with_gil(|py| {
+                                    let args = PyTuple::new(py, &[
+                                        connection_id.into_py(py),
+                                        user.into_py(py),
+                                        password.into_py(py),
+                                        host.into_py(py),
+                                    ]);
+                                    let kwargs = PyDict::new(py);
+                                    if let Some(db) = database {
+                                        kwargs.set_item("database", db).unwrap();
+                                    }
+                                    match cb.call(py, args, Some(kwargs)) {
+                                        Ok(ret) => {
+                                            result = ret.extract::<bool>(py).unwrap_or(false);
+                                        }
+                                        Err(e) => {
+                                            e.print(py);
+                                            result = false;
+                                        }
+                                    }
+                                });
+                            }
+                            let _ = responder.send(result);
+                        }
                     },
 
                     // Ok((query, responder)) => {
@@ -440,7 +481,7 @@ impl PythonWorker {
             }
         });
 
-        PythonWorker { sender: tx }
+        PythonWorker { sender: tx, auth_cb }
     }
 
 
@@ -485,6 +526,32 @@ impl PythonWorker {
         rx.await.unwrap_or(false)
     }
 
+    pub fn authentication_enabled(&self) -> bool {
+        self.auth_cb.lock().unwrap().is_some()
+    }
+
+    pub async fn on_authentication(
+        &self,
+        connection_id: u64,
+        user: Option<String>,
+        database: Option<String>,
+        host: String,
+        password: String,
+    ) -> bool {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .sender
+            .send(WorkerMessage::Authentication {
+                connection_id,
+                user,
+                database,
+                host,
+                password,
+                responder: tx,
+            });
+        rx.await.unwrap_or(false)
+    }
+
     pub async fn on_disconnect(&self, connection_id: u64, ip: String, port: u16) {
         let _ = self
             .sender
@@ -502,39 +569,103 @@ pub struct DummyProcessor {
 }
 
 #[async_trait]
-impl NoopStartupHandler for DummyProcessor {
-    async fn post_startup<C>(
+impl StartupHandler for DummyProcessor {
+    async fn on_startup<C>(
         &self,
         client: &mut C,
-        _message: PgWireFrontendMessage,
+        message: PgWireFrontendMessage,
     ) -> PgWireResult<()>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send,
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let id = CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
-        client
-            .metadata_mut()
-            .insert("connection_id".to_string(), id.to_string());
+        match message {
+            PgWireFrontendMessage::Startup(ref startup) => {
+                pgwire::api::auth::save_startup_parameters_to_metadata(client, startup);
+                if self.py_worker.authentication_enabled() {
+                    client.set_state(PgWireConnectionState::AuthenticationInProgress);
+                    client
+                        .send(PgWireBackendMessage::Authentication(Authentication::CleartextPassword))
+                        .await?;
+                } else {
+                    let id = CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
+                    client
+                        .metadata_mut()
+                        .insert("connection_id".to_string(), id.to_string());
+                    if let Some(sender) = self.conn_id_sender.lock().unwrap().take() {
+                        let _ = sender.send(id);
+                    }
+                    let addr = client.socket_addr();
+                    let allowed = self
+                        .py_worker
+                        .on_connect(id, addr.ip().to_string(), addr.port())
+                        .await;
+                    if !allowed {
+                        let error = ErrorResponse::from(ErrorInfo::new(
+                            "FATAL".to_string(),
+                            "28000".to_string(),
+                            "Connection rejected".to_string(),
+                        ));
+                        client.feed(PgWireBackendMessage::ErrorResponse(error)).await?;
+                        client.close().await?;
+                        return Ok(());
+                    }
+                    finish_authentication(client, &DefaultServerParameterProvider::default()).await?;
+                }
+            }
+            PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
+                let pwd = pwd.into_password()?;
+                let id = CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
+                client
+                    .metadata_mut()
+                    .insert("connection_id".to_string(), id.to_string());
+                if let Some(sender) = self.conn_id_sender.lock().unwrap().take() {
+                    let _ = sender.send(id);
+                }
 
-        if let Some(sender) = self.conn_id_sender.lock().unwrap().take() {
-            let _ = sender.send(id);
-        }
+                let login_info = pgwire::api::auth::LoginInfo::from_client_info(client);
+                let allowed = self
+                    .py_worker
+                    .on_authentication(
+                        id,
+                        login_info.user().map(|s| s.to_string()),
+                        login_info.database().map(|s| s.to_string()),
+                        login_info.host().to_string(),
+                        pwd.password,
+                    )
+                    .await;
+                if !allowed {
+                    let error_info = ErrorInfo::new(
+                        "FATAL".to_string(),
+                        "28P01".to_string(),
+                        "Authentication failed".to_string(),
+                    );
+                    let error = ErrorResponse::from(error_info);
+                    client.feed(PgWireBackendMessage::ErrorResponse(error)).await?;
+                    client.close().await?;
+                    return Ok(());
+                }
 
-        let addr = client.socket_addr();
-        let allowed = self
-            .py_worker
-            .on_connect(id, addr.ip().to_string(), addr.port())
-            .await;
-        println!("connected {:?} id {} allowed {}: {:?}", addr, id, allowed, client.metadata());
-        println!("Received message: {:?}", _message);
-        if !allowed {
-            return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                "FATAL".to_string(),
-                "28000".to_string(),
-                "Connection rejected".to_string(),
-            ))));
+                let addr = client.socket_addr();
+                let allowed = self
+                    .py_worker
+                    .on_connect(id, addr.ip().to_string(), addr.port())
+                    .await;
+                if !allowed {
+                    let error = ErrorResponse::from(ErrorInfo::new(
+                        "FATAL".to_string(),
+                        "28000".to_string(),
+                        "Connection rejected".to_string(),
+                    ));
+                    client.feed(PgWireBackendMessage::ErrorResponse(error)).await?;
+                    client.close().await?;
+                    return Ok(());
+                }
+
+                finish_authentication(client, &DefaultServerParameterProvider::default()).await?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -867,6 +998,7 @@ pub struct Server {
     on_query_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_connect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+    on_authentication_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     tls_acceptor: Arc<Mutex<Option<Arc<TlsAcceptor>>>>,
 }
 
@@ -879,6 +1011,7 @@ impl Server {
             on_query_cb: Arc::new(Mutex::new(None)),
             on_connect_cb: Arc::new(Mutex::new(None)),
             on_disconnect_cb: Arc::new(Mutex::new(None)),
+            on_authentication_cb: Arc::new(Mutex::new(None)),
             tls_acceptor: Arc::new(Mutex::new(None)),
         }
     }
@@ -893,6 +1026,10 @@ impl Server {
 
     fn on_disconnect(&mut self, _py: Python, cb: Py<PyAny>) {
         *self.on_disconnect_cb.lock().unwrap() = Some(cb);
+    }
+
+    fn on_authentication(&mut self, _py: Python, cb: Py<PyAny>) {
+        *self.on_authentication_cb.lock().unwrap() = Some(cb);
     }
 
     fn set_tls(&mut self, cert_path: String, key_path: String) -> PyResult<()> {
@@ -918,6 +1055,7 @@ impl Server {
         let query_cb = self.on_query_cb.clone();
         let connect_cb = self.on_connect_cb.clone();
         let disconnect_cb = self.on_disconnect_cb.clone();
+        let auth_cb = self.on_authentication_cb.clone();
 
         if query_cb.lock().unwrap().is_none() {
             panic!("No callback set. Use on_query() before starting the server.");
@@ -929,7 +1067,7 @@ impl Server {
             .unwrap();
 
         rt.block_on(async move {
-            let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb));
+            let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
 
             let listener = TcpListener::bind(&addr).await.unwrap();
             println!("Listening on {}", addr);

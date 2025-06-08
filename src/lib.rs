@@ -90,6 +90,11 @@ pub enum WorkerMessage {
         port: u16,
         responder: oneshot::Sender<bool>,
     },
+    Disconnect {
+        connection_id: u64,
+        ip: String,
+        port: u16,
+    },
 }
 
 #[pyclass]
@@ -317,6 +322,7 @@ impl PythonWorker {
     fn new(
         query_cb: Arc<Mutex<Option<Py<PyAny>>>>,
         connect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+        disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     ) -> Self {
         let (tx, rx) = channel::<WorkerMessage>();
 
@@ -397,6 +403,17 @@ impl PythonWorker {
                             }
                             let _ = responder.send(result);
                         }
+                        WorkerMessage::Disconnect { connection_id, ip, port } => {
+                            let cb_opt = disconnect_cb.lock().unwrap().clone();
+                            if let Some(cb) = cb_opt {
+                                Python::with_gil(|py| {
+                                    let args = PyTuple::new(py, &[connection_id.into_py(py), ip.into_py(py), port.into_py(py)]);
+                                    if let Err(e) = cb.call1(py, args) {
+                                        e.print(py);
+                                    }
+                                });
+                            }
+                        }
                     },
 
                     // Ok((query, responder)) => {
@@ -467,10 +484,21 @@ impl PythonWorker {
             .expect("Send failed!");
         rx.await.unwrap_or(false)
     }
+
+    pub async fn on_disconnect(&self, connection_id: u64, ip: String, port: u16) {
+        let _ = self
+            .sender
+            .send(WorkerMessage::Disconnect {
+                connection_id,
+                ip,
+                port,
+            });
+    }
 }
 
 pub struct DummyProcessor {
     py_worker: Arc<PythonWorker>,
+    conn_id_sender: Arc<Mutex<Option<oneshot::Sender<u64>>>>,
 }
 
 #[async_trait]
@@ -489,6 +517,10 @@ impl NoopStartupHandler for DummyProcessor {
         client
             .metadata_mut()
             .insert("connection_id".to_string(), id.to_string());
+
+        if let Some(sender) = self.conn_id_sender.lock().unwrap().take() {
+            let _ = sender.send(id);
+        }
 
         let addr = client.socket_addr();
         let allowed = self
@@ -834,6 +866,7 @@ pub struct Server {
     addr: String,
     on_query_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_connect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+    on_disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     tls_acceptor: Arc<Mutex<Option<Arc<TlsAcceptor>>>>,
 }
 
@@ -845,6 +878,7 @@ impl Server {
             addr,
             on_query_cb: Arc::new(Mutex::new(None)),
             on_connect_cb: Arc::new(Mutex::new(None)),
+            on_disconnect_cb: Arc::new(Mutex::new(None)),
             tls_acceptor: Arc::new(Mutex::new(None)),
         }
     }
@@ -855,6 +889,10 @@ impl Server {
 
     fn on_connect(&mut self, _py: Python, cb: Py<PyAny>) {
         *self.on_connect_cb.lock().unwrap() = Some(cb);
+    }
+
+    fn on_disconnect(&mut self, _py: Python, cb: Py<PyAny>) {
+        *self.on_disconnect_cb.lock().unwrap() = Some(cb);
     }
 
     fn set_tls(&mut self, cert_path: String, key_path: String) -> PyResult<()> {
@@ -879,6 +917,7 @@ impl Server {
         let addr = self.addr.clone();
         let query_cb = self.on_query_cb.clone();
         let connect_cb = self.on_connect_cb.clone();
+        let disconnect_cb = self.on_disconnect_cb.clone();
 
         if query_cb.lock().unwrap().is_none() {
             panic!("No callback set. Use on_query() before starting the server.");
@@ -890,29 +929,37 @@ impl Server {
             .unwrap();
 
         rt.block_on(async move {
-            let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb));
-
-            let factory = Arc::new(DummyProcessorFactory {
-                handler: Arc::new(DummyProcessor { py_worker: py_worker.clone() }),
-                extended_handler: Arc::new(MyExtendedQueryHandler { py_worker }),
-            });
+            let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb));
 
             let listener = TcpListener::bind(&addr).await.unwrap();
             println!("Listening on {}", addr);
 
             let server_task = tokio::spawn({
-                let factory = factory.clone();
                 let tls_acceptor = if tls { self.tls_acceptor.lock().unwrap().clone() } else { None };
+                let py_worker = py_worker.clone();
                 async move {
                     loop {
-                        let (socket, _) = listener.accept().await.unwrap();
+                        let (socket, addr) = listener.accept().await.unwrap();
                         if let Some(socket) = detect_gssencmode(socket).await {
-                            let factory_ref = factory.clone();
                             let tls_acceptor_ref = tls_acceptor.clone();
+                            let (id_tx, id_rx) = oneshot::channel();
+                            let handler = Arc::new(DummyProcessor {
+                                py_worker: py_worker.clone(),
+                                conn_id_sender: Arc::new(Mutex::new(Some(id_tx))),
+                            });
+                            let factory = Arc::new(DummyProcessorFactory {
+                                handler: handler.clone(),
+                                extended_handler: Arc::new(MyExtendedQueryHandler { py_worker: py_worker.clone() }),
+                            });
+                            let py_worker_clone = py_worker.clone();
+                            let ip = addr.ip().to_string();
+                            let port = addr.port();
                             tokio::spawn(async move {
-                                if let Err(e) = process_socket(socket, tls_acceptor_ref, factory_ref).await {
+                                if let Err(e) = process_socket(socket, tls_acceptor_ref, factory).await {
                                     eprintln!("process_socket error: {:?}", e);
                                 }
+                                let connection_id = id_rx.await.unwrap_or(0);
+                                py_worker_clone.on_disconnect(connection_id, ip, port).await;
                             });
                         }
                     }

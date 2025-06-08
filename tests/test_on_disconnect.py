@@ -1,0 +1,75 @@
+import multiprocessing
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import psycopg
+import unittest
+
+
+def _ensure_riffq_built():
+    subprocess.call([sys.executable, "-m", "pip", "uninstall", "-y", "riffq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.check_call(["maturin", "build", "--release", "-q"])
+        wheel = next(Path("target/wheels").glob("riffq-*.whl"))
+        subprocess.check_call([sys.executable, "-m", "pip", "install", str(wheel)])
+    except Exception as exc:
+        raise RuntimeError(f"riffq build failed: {exc}")
+
+
+def _run_server(port: int, q):
+    _ensure_riffq_built()
+    import riffq
+
+    def handle_query(sql, callback, **kwargs):
+        callback(([{"name": "val", "type": "int"}], [[1]]))
+
+    def handle_disconnect(conn_id):
+        q.put(conn_id)
+
+    server = riffq.Server(f"127.0.0.1:{port}")
+    server.set_callback(handle_query)
+    server.on_disconnect(handle_disconnect)
+    server.start()
+
+
+class DisconnectTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        _ensure_riffq_built()
+        cls.port = 55437
+        cls.q = multiprocessing.Queue()
+        cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port, cls.q), daemon=True)
+        cls.proc.start()
+        start = time.time()
+        while time.time() - start < 10:
+            with socket.socket() as sock:
+                if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
+                    break
+            time.sleep(0.1)
+        else:
+            cls.proc.terminate()
+            cls.proc.join()
+            raise RuntimeError("Server did not start")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proc.terminate()
+        cls.proc.join()
+
+    def test_disconnect_called(self):
+        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            cur.fetchone()
+        conn.close()
+        time.sleep(0.5)
+        self.assertFalse(self.q.empty())
+        conn_id = self.q.get()
+        self.assertIsInstance(conn_id, int)
+
+
+if __name__ == "__main__":
+    unittest.main()

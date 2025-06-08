@@ -16,6 +16,8 @@ use std::thread;
 use bytes::Bytes;
 use std::error::Error;
 use std::ffi::c_void;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::array::{Array, RecordBatch};
@@ -30,10 +32,12 @@ use pgwire::api::query::{SimpleQueryHandler, ExtendedQueryHandler};
 use pgwire::api::results::{DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
 use pgwire::api::{ClientInfo, ClientPortalStore, NoopErrorHandler, PgWireServerHandlers, Type};
 use pgwire::api::portal::Portal;
-use pgwire::error::{PgWireError, PgWireResult};
+use pgwire::error::{PgWireError, PgWireResult, ErrorInfo};
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use pgwire::tokio::process_socket;
 use pgwire::api::stmt::{StoredStatement, NoopQueryParser};
+
+static CONNECTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn map_python_type_to_pgwire(t: &str) -> Type {
     match t {
@@ -61,12 +65,24 @@ fn map_arrow_type(dt: &DataType) -> &'static str {
 }
 
 
-pub struct WorkerMessage {
-    pub query: String,
-    pub params: Option<Vec<Option<Bytes>>>,
-    pub param_types: Option<Vec<Type>>,
-    pub do_describe: bool,
-    pub responder: oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>,
+pub enum WorkerMessage {
+    Query {
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+        responder: oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>,
+    },
+    Connect {
+        connection_id: u64,
+        ip: String,
+        port: u16,
+        responder: oneshot::Sender<bool>,
+    },
+    Disconnect {
+        connection_id: u64,
+    },
 }
 
 #[pyclass]
@@ -266,7 +282,11 @@ pub struct PythonWorker {
 }
 
 impl PythonWorker {
-    fn new(callback: Arc<Mutex<Option<Py<PyAny>>>>) -> Self {
+    fn new(
+        query_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+        connect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+        disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+    ) -> Self {
         let (tx, rx) = channel::<WorkerMessage>();
 
         thread::spawn(move || {
@@ -275,62 +295,76 @@ impl PythonWorker {
             loop {
                 println!("[PY_WORKER] waiting to receive on rx...");
                 match rx.recv() {
-                    Ok(msg) => {
-                        let WorkerMessage {
-                            query,
-                            params,
-                            param_types,
-                            do_describe,
-                            responder,
-                        } = msg;
-
-                        println!("[PY_WORKER] received query: {}", query);
-                        let cb_opt = callback.lock().unwrap().clone();
-
-                        if let Some(cb) = cb_opt {
-                            Python::with_gil(|py| {
-                                println!("[PY_WORKER] GIL acquired, invoking callback");
-                                let wrapper = Py::new(py, CallbackWrapper {
-                                    responder: Arc::new(Mutex::new(Some(responder))),
-                                }).unwrap();
-
-                                let args = PyTuple::new(py, &[query.into_py(py), wrapper.into_py(py)]);
-                                let kwargs = PyDict::new(py);
-
-                                // Add do_describe flag
-                                kwargs.set_item("do_describe", do_describe).unwrap();
-
-                                // Add query_args if present
-                                if let (Some(params), Some(param_types)) = (&params, &param_types) {
-                                    let py_args = PyList::empty(py);
-                                    for (val, ty) in params.iter().zip(param_types.iter()) {
-                                        let py_obj = match val {
-                                            None => py.None(),
-                                            Some(bytes) => {
-                                                let mut buf = &bytes[..];
-                                                match ty {
-                                                    &Type::INT2 => i16::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
-                                                    &Type::INT4 => i32::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
-                                                    &Type::INT8 => i64::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
-                                                    &Type::FLOAT4 => f32::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
-                                                    &Type::FLOAT8 => f64::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
-                                                    &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR => {
-                                                        String::from_sql(ty, &mut buf).map(|v| v.into_py(py))
-                                                    }
-                                                    _ => Ok(py.None()),
-                                                }.unwrap_or_else(|_| py.None())
-                                            }
-                                        };
-                                        py_args.append(py_obj).unwrap();
+                    Ok(msg) => match msg {
+                        WorkerMessage::Query { query, params, param_types, do_describe, connection_id, responder } => {
+                            println!("[PY_WORKER] received query: {}", query);
+                            let cb_opt = query_cb.lock().unwrap().clone();
+                            if let Some(cb) = cb_opt {
+                                Python::with_gil(|py| {
+                                    println!("[PY_WORKER] GIL acquired, invoking callback");
+                                    let wrapper = Py::new(py, CallbackWrapper {
+                                        responder: Arc::new(Mutex::new(Some(responder))),
+                                    }).unwrap();
+                                    let args = PyTuple::new(py, &[query.into_py(py), wrapper.into_py(py)]);
+                                    let kwargs = PyDict::new(py);
+                                    kwargs.set_item("do_describe", do_describe).unwrap();
+                                    kwargs.set_item("connection_id", connection_id).unwrap();
+                                    if let (Some(params), Some(param_types)) = (&params, &param_types) {
+                                        let py_args = PyList::empty(py);
+                                        for (val, ty) in params.iter().zip(param_types.iter()) {
+                                            let py_obj = match val {
+                                                None => py.None(),
+                                                Some(bytes) => {
+                                                    let mut buf = &bytes[..];
+                                                    match ty {
+                                                        &Type::INT2 => i16::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
+                                                        &Type::INT4 => i32::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
+                                                        &Type::INT8 => i64::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
+                                                        &Type::FLOAT4 => f32::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
+                                                        &Type::FLOAT8 => f64::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
+                                                        &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR => {
+                                                            String::from_sql(ty, &mut buf).map(|v| v.into_py(py))
+                                                        }
+                                                        _ => Ok(py.None()),
+                                                    }.unwrap_or_else(|_| py.None())
+                                                }
+                                            };
+                                            py_args.append(py_obj).unwrap();
+                                        }
+                                        kwargs.set_item("query_args", py_args).unwrap();
                                     }
-
-                                    kwargs.set_item("query_args", py_args).unwrap();
-                                }
-
-                                let _ = cb.call(py, args, Some(kwargs));
-                            });
+                                    let _ = cb.call(py, args, Some(kwargs));
+                                });
+                            }
                         }
-                    }
+                        WorkerMessage::Connect { connection_id, ip, port, responder } => {
+                            let cb_opt = connect_cb.lock().unwrap().clone();
+                            let mut result = true;
+                            if let Some(cb) = cb_opt {
+                                Python::with_gil(|py| {
+                                    let args = PyTuple::new(py, &[connection_id.into_py(py), ip.into_py(py), port.into_py(py)]);
+                                    match cb.call1(py, args) {
+                                        Ok(ret) => {
+                                            result = ret.extract::<bool>(py).unwrap_or(true);
+                                        }
+                                        Err(e) => {
+                                            e.print(py);
+                                            result = false;
+                                        }
+                                    }
+                                });
+                            }
+                            let _ = responder.send(result);
+                        }
+                        WorkerMessage::Disconnect { connection_id } => {
+                            if let Some(cb) = disconnect_cb.lock().unwrap().clone() {
+                                Python::with_gil(|py| {
+                                    let args = PyTuple::new(py, &[connection_id.into_py(py)]);
+                                    let _ = cb.call1(py, args);
+                                });
+                            }
+                        }
+                    },
 
                     // Ok((query, responder)) => {
                     //     println!("[PY_WORKER] received query: {}", query);
@@ -360,33 +394,57 @@ impl PythonWorker {
     }
 
 
-    pub async fn query(
+    pub async fn on_query(
         &self,
         query: String,
         params: Option<Vec<Option<Bytes>>>,
         param_types: Option<Vec<Type>>,
         do_describe: bool,
+        connection_id: u64,
     ) -> (Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>) {
         let (tx, rx) = oneshot::channel();
         println!("[RUST] Sending query to worker: {}", query);
 
-        self.sender.send(WorkerMessage {
-            query,
-            params,
-            param_types,
-            do_describe,
-            responder: tx,
-        }).expect("Send failed!");
+        self.sender
+            .send(WorkerMessage::Query {
+                query,
+                params,
+                param_types,
+                do_describe,
+                connection_id,
+                responder: tx,
+            })
+            .expect("Send failed!");
 
         rx.await.unwrap_or_else(|e| {
             println!("[RUST] Worker failed: {:?}", e);
             (vec![], vec![])
         })
     }
+
+    pub async fn on_connect(&self, connection_id: u64, ip: String, port: u16) -> bool {
+        let (tx, rx) = oneshot::channel();
+        self.sender
+            .send(WorkerMessage::Connect {
+                connection_id,
+                ip,
+                port,
+                responder: tx,
+            })
+            .expect("Send failed!");
+        rx.await.unwrap_or(false)
+    }
+
+    pub async fn on_disconnect(&self, connection_id: u64) {
+        let _ = self
+            .sender
+            .send(WorkerMessage::Disconnect { connection_id });
+    }
 }
 
 pub struct DummyProcessor {
     py_worker: Arc<PythonWorker>,
+    connections: Arc<Mutex<HashMap<SocketAddr, u64>>>,
 }
 
 #[async_trait]
@@ -401,8 +459,26 @@ impl NoopStartupHandler for DummyProcessor {
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        println!("connected {:?}: {:?}", client.socket_addr(), client.metadata());
+        let id = CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
+        client
+            .metadata_mut()
+            .insert("connection_id".to_string(), id.to_string());
+
+        let addr = client.socket_addr();
+        self.connections.lock().unwrap().insert(addr, id);
+        let allowed = self
+            .py_worker
+            .on_connect(id, addr.ip().to_string(), addr.port())
+            .await;
+        println!("connected {:?} id {} allowed {}: {:?}", addr, id, allowed, client.metadata());
         println!("Received message: {:?}", _message);
+        if !allowed {
+            return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                "FATAL".to_string(),
+                "28000".to_string(),
+                "Connection rejected".to_string(),
+            ))));
+        }
         Ok(())
     }
 }
@@ -431,9 +507,14 @@ impl SimpleQueryHandler for DummyProcessor {
 
 
         println!("[PGWIRE] do_query called with: {}", query);
-        // let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
-        let (schema_desc, rows_list) = self.py_worker
-            .query(query.to_string(), None, None, false, )
+        let connection_id = _client
+            .metadata()
+            .get("connection_id")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let (schema_desc, rows_list) = self
+            .py_worker
+            .on_query(query.to_string(), None, None, false, connection_id)
             .await;
         println!("[PGWIRE] Schema and rows received");
 
@@ -470,6 +551,7 @@ impl SimpleQueryHandler for DummyProcessor {
 
 pub struct MyExtendedQueryHandler {
     pub py_worker: Arc<PythonWorker>,
+    pub connections: Arc<Mutex<HashMap<SocketAddr, u64>>>,
 }
 #[derive(Clone)]
 pub struct MyStatement {
@@ -538,12 +620,19 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
         println!("[PGWIRE EXTENDED] do_query: {} {}", portal.statement.statement.query, _debug_parameters(&portal.parameters, &portal.statement.parameter_types));
 
 
-        let (schema_desc, rows_list) = self.py_worker
-            .query(
+        let connection_id = _client
+            .metadata()
+            .get("connection_id")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let (schema_desc, rows_list) = self
+            .py_worker
+            .on_query(
                 query.to_string(),
                 Some(portal.parameters.clone()),
                 Some(portal.statement.parameter_types.clone()),
                 false,
+                connection_id,
             )
             .await;
 
@@ -604,12 +693,19 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
 
 
 
-        let (schema_desc, rows_list) = self.py_worker
-            .query(
+        let connection_id = _client
+            .metadata()
+            .get("connection_id")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+        let (schema_desc, rows_list) = self
+            .py_worker
+            .on_query(
                 query.to_string(),
                 Some(portal.parameters.clone()),
                 Some(portal.statement.parameter_types.clone()),
                 true,
+                connection_id,
             )
             .await;
 
@@ -689,7 +785,10 @@ async fn detect_gssencmode(mut socket: TcpStream) -> Option<TcpStream> {
 #[pyclass]
 pub struct Server {
     addr: String,
-    callback: Arc<Mutex<Option<Py<PyAny>>>>,
+    on_query_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+    on_connect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+    on_disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+    connections: Arc<Mutex<HashMap<SocketAddr, u64>>>,
 }
 
 #[pymethods]
@@ -698,12 +797,23 @@ impl Server {
     fn new(addr: String) -> Self {
         Server {
             addr,
-            callback: Arc::new(Mutex::new(None)),
+            on_query_cb: Arc::new(Mutex::new(None)),
+            on_connect_cb: Arc::new(Mutex::new(None)),
+            on_disconnect_cb: Arc::new(Mutex::new(None)),
+            connections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     fn set_callback(&mut self, _py: Python, cb: Py<PyAny>) {
-        *self.callback.lock().unwrap() = Some(cb);
+        *self.on_query_cb.lock().unwrap() = Some(cb);
+    }
+
+    fn on_connect(&mut self, _py: Python, cb: Py<PyAny>) {
+        *self.on_connect_cb.lock().unwrap() = Some(cb);
+    }
+
+    fn on_disconnect(&mut self, _py: Python, cb: Py<PyAny>) {
+        *self.on_disconnect_cb.lock().unwrap() = Some(cb);
     }
 
 
@@ -715,9 +825,12 @@ impl Server {
 
     fn run_server(&self) {
         let addr = self.addr.clone();
-        let callback = self.callback.clone();
+        let on_query_cb = self.on_query_cb.clone();
+        let on_connect_cb = self.on_connect_cb.clone();
+        let on_disconnect_cb = self.on_disconnect_cb.clone();
+        let connections = self.connections.clone();
 
-        if callback.lock().unwrap().is_none() {
+        if on_query_cb.lock().unwrap().is_none() {
             panic!("No callback set. Use set_callback() before starting the server.");
         }
 
@@ -727,11 +840,11 @@ impl Server {
             .unwrap();
 
         rt.block_on(async move {
-            let py_worker = Arc::new(PythonWorker::new(callback));
+            let py_worker = Arc::new(PythonWorker::new(on_query_cb, on_connect_cb, on_disconnect_cb));
 
             let factory = Arc::new(DummyProcessorFactory {
-                handler: Arc::new(DummyProcessor { py_worker: py_worker.clone() }),
-                extended_handler: Arc::new(MyExtendedQueryHandler { py_worker }),
+                handler: Arc::new(DummyProcessor { py_worker: py_worker.clone(), connections: connections.clone() }),
+                extended_handler: Arc::new(MyExtendedQueryHandler { py_worker: py_worker.clone(), connections: connections.clone() }),
             });
 
             let listener = TcpListener::bind(&addr).await.unwrap();
@@ -739,14 +852,25 @@ impl Server {
 
             let server_task = tokio::spawn({
                 let factory = factory.clone();
+                let py_worker = py_worker.clone();
+                let connections = connections.clone();
                 async move {
                     loop {
-                        let (socket, _) = listener.accept().await.unwrap();
-                        if let Some(socket) = detect_gssencmode(socket).await {
+                        let (mut socket, _) = listener.accept().await.unwrap();
+                        if let Some(mut socket) = detect_gssencmode(socket).await {
+                            let addr = socket.peer_addr().unwrap();
                             let factory_ref = factory.clone();
+                            let py_worker_cloned = py_worker.clone();
+                            let connections_cloned = connections.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = process_socket(socket, None, factory_ref).await {
                                     eprintln!("process_socket error: {:?}", e);
+                                }
+                                let id_opt = {
+                                    connections_cloned.lock().unwrap().remove(&addr)
+                                };
+                                if let Some(id) = id_opt {
+                                    py_worker_cloned.on_disconnect(id).await;
                                 }
                             });
                         }

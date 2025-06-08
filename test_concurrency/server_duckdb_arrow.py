@@ -94,7 +94,7 @@ def main():
     executor = ThreadPoolExecutor(max_workers=4)
 
     server = riffq.Server("127.0.0.1:5433")
-    server.set_callback(handle_query)
+    server.on_query(handle_query)
     server.start()
 
 if __name__ == "__main__":

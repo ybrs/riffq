@@ -137,10 +137,6 @@ Contributions are welcome! Especially for:
 
 ---
 
-## Why "riffq"?
-
-Because you're riffing on SQL. You don’t just store it — you remix it.
-
 ## Development Notes
 
 This repository contains tests that exercise the ability to return query results

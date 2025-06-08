@@ -7,3 +7,4 @@ target/
 examples/
 __pycache__/
 venv/
+duckdata.*

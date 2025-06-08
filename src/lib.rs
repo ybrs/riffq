@@ -456,23 +456,6 @@ impl PythonWorker {
                             let _ = responder.send(result);
                         }
                     },
-
-                    // Ok((query, responder)) => {
-                    //     println!("[PY_WORKER] received query: {}", query);
-                    //     let cb_opt = callback.lock().unwrap().clone();
-                    //     if let Some(cb) = cb_opt {
-                    //         Python::with_gil(|py| {
-                    //             println!("[PY_WORKER] GIL acquired, invoking callback");
-                    //             let wrapper = Py::new(py, CallbackWrapper {
-                    //                 responder: Arc::new(Mutex::new(Some(responder))),
-                    //             }).unwrap();
-                    //             // TODO: for extended query we need to pass another keyword argument "query_args"
-                    //             // TODO: for extended query we need to pass another keyword argument "do_describe"
-                    //             //   so user can decide what to do
-                    //             let _ = cb.call1(py, PyTuple::new(py, &[query.into_py(py), wrapper.into_py(py)]));
-                    //         });
-                    //     }
-                    // }
                     Err(_) => {
                         println!("[PY_WORKER] Channel closed");
                         break;
@@ -563,13 +546,13 @@ impl PythonWorker {
     }
 }
 
-pub struct DummyProcessor {
+pub struct RiffqProcessor {
     py_worker: Arc<PythonWorker>,
     conn_id_sender: Arc<Mutex<Option<oneshot::Sender<u64>>>>,
 }
 
 #[async_trait]
-impl StartupHandler for DummyProcessor {
+impl StartupHandler for RiffqProcessor {
     async fn on_startup<C>(
         &self,
         client: &mut C,
@@ -672,7 +655,7 @@ impl StartupHandler for DummyProcessor {
 }
 
 #[async_trait]
-impl SimpleQueryHandler for DummyProcessor {
+impl SimpleQueryHandler for RiffqProcessor {
     async fn do_query<'a, C>(
         &self,
         _client: &mut C,
@@ -880,9 +863,6 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
         let query = &portal.statement.statement.query;
         let params = &portal.parameters;
 
-
-
-
         let connection_id = _client
             .metadata()
             .get("connection_id")
@@ -920,14 +900,14 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
 
 }
 
-struct DummyProcessorFactory {
-    handler: Arc<DummyProcessor>,
+struct RiffqProcessorFactory {
+    handler: Arc<RiffqProcessor>,
     extended_handler: Arc<MyExtendedQueryHandler>,
 }
 
-impl PgWireServerHandlers for DummyProcessorFactory {
-    type StartupHandler = DummyProcessor;
-    type SimpleQueryHandler = DummyProcessor;
+impl PgWireServerHandlers for RiffqProcessorFactory {
+    type StartupHandler = RiffqProcessor;
+    type SimpleQueryHandler = RiffqProcessor;
     type ExtendedQueryHandler = MyExtendedQueryHandler;
     type CopyHandler = NoopCopyHandler;
     type ErrorHandler = NoopErrorHandler;
@@ -1081,11 +1061,11 @@ impl Server {
                         if let Some(socket) = detect_gssencmode(socket).await {
                             let tls_acceptor_ref = tls_acceptor.clone();
                             let (id_tx, id_rx) = oneshot::channel();
-                            let handler = Arc::new(DummyProcessor {
+                            let handler = Arc::new(RiffqProcessor {
                                 py_worker: py_worker.clone(),
                                 conn_id_sender: Arc::new(Mutex::new(Some(id_tx))),
                             });
-                            let factory = Arc::new(DummyProcessorFactory {
+                            let factory = Arc::new(RiffqProcessorFactory {
                                 handler: handler.clone(),
                                 extended_handler: Arc::new(MyExtendedQueryHandler { py_worker: py_worker.clone() }),
                             });

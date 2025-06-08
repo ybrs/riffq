@@ -8,17 +8,7 @@ from pathlib import Path
 import psycopg
 import unittest
 import pyarrow as pa
-
-
-def _ensure_riffq_built():
-    subprocess.call([sys.executable, "-m", "pip", "uninstall", "-y", "riffq"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        subprocess.check_call(["maturin", "build", "--release", "-q"])
-        wheel = next(Path("target/wheels").glob("riffq-*.whl"))
-        subprocess.check_call([sys.executable, "-m", "pip", "install", str(wheel)])
-    except Exception as exc:
-        raise RuntimeError(f"riffq build failed: {exc}")
-
+from helpers import _ensure_riffq_built
 
 def _run_server(port: int):
     import riffq
@@ -26,10 +16,11 @@ def _run_server(port: int):
 
     def send_batch(batch: pa.RecordBatch, callback):
         rdr = pa.RecordBatchReader.from_batches(batch.schema, [batch])
+        # modern pyarrow
         if hasattr(rdr, "__arrow_c_stream__"):
             capsule = rdr.__arrow_c_stream__()
-        else:
-            from pyarrow.cffi import export_stream
+        else:            
+            from pyarrow.cffi import export_stream  # type: ignore
             capsule = export_stream(rdr)
         callback(capsule)
 

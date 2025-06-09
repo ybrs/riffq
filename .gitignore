@@ -9,4 +9,4 @@ __pycache__/
 venv/
 duckdata.*
 example/data/*
-riffq/_riffq.cpython-312-darwin.so
++riffq/_riffq*.so

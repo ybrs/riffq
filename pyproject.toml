@@ -7,7 +7,9 @@ name = "riffq"
 version = "0.1.0"
 requires-python = ">=3.8"
 classifiers = ["Programming Language :: Rust"]
+packages = [{ include = "riffq", from = "pysrc" }] 
 
 [tool.maturin]
-module-name = "riffq._riffq"   # compiled extension
-# python-source = "riffq"        # bundle *.py files inside riffq/
+module-name = "riffq._riffq"
+python-source = "pysrc"
+

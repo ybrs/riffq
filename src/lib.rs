@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::{FromPyObject, PyAny};
+use log::{debug, error, info};
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::{Sink, SinkExt, StreamExt};
@@ -135,14 +136,14 @@ impl CallbackWrapper {
         if let Some(sender) = self.responder.lock().unwrap().take() {
             Python::with_gil(|py| {
                 // Try Arrow C stream pointer first
-                println!("[RUST] result python type: {}", result.as_ref(py).get_type().name().unwrap_or("<unknown>"));
+                debug!("[RUST] result python type: {}", result.as_ref(py).get_type().name().unwrap_or("<unknown>"));
                 if let Ok(capsule) = result.extract::<&PyCapsule>(py) {
-                    println!("[RUST] received PyCapsule");
+                    debug!("[RUST] received PyCapsule");
                     let ptr = capsule.pointer() as *mut c_void;
                     if let Ok(res) = arrow_stream_to_rows(ptr) {
                         let _ = sender.send(res);
                     } else {
-                        println!("[RUST] arrow_stream_to_rows failed for capsule");
+                        error!("[RUST] arrow_stream_to_rows failed for capsule");
                     }
                     return;
                 } 
@@ -307,7 +308,7 @@ fn arrow_value_to_string(array: &dyn Array, row: usize) -> Option<String> {
             Some(dt.format("%Y-%m-%d %H:%M:%S%.f").to_string())
         }
         _ => {
-            println!("unknown data type");
+            error!("unknown data type");
             Some("".to_string())
         },
     }
@@ -315,9 +316,9 @@ fn arrow_value_to_string(array: &dyn Array, row: usize) -> Option<String> {
 
 fn arrow_stream_to_rows(ptr: *mut c_void) -> Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>), String> {
     unsafe {
-        println!("[RUST] arrow_stream_to_rows: ptr={:?}", ptr);
+        debug!("[RUST] arrow_stream_to_rows: ptr={:?}", ptr);
         let mut reader = ArrowArrayStreamReader::from_raw(ptr as *mut _).map_err(|e| e.to_string())?;
-        println!("[RUST] reader constructed");
+        debug!("[RUST] reader constructed");
         let schema = reader.schema();
         let mut schema_desc = Vec::new();
         for field in schema.fields() {
@@ -357,19 +358,19 @@ impl PythonWorker {
         let auth_cb_thread = auth_cb.clone();
 
         thread::spawn(move || {
-            println!("[PY_WORKER] Thread started");
+            debug!("[PY_WORKER] Thread started");
             pyo3::prepare_freethreaded_python();
             loop {
-                println!("[PY_WORKER] waiting to receive on rx...");
+                debug!("[PY_WORKER] waiting to receive on rx...");
                 match rx.recv() {
                     Ok(msg) => match msg {
                         WorkerMessage::Query { query, params, param_types, do_describe, connection_id, responder } => {
-                            println!("[PY_WORKER] received query: {}", query);
+                            debug!("[PY_WORKER] received query: {}", query);
                             let cb_opt = query_cb.lock().unwrap().clone();
 
                             if let Some(cb) = cb_opt {
                                 Python::with_gil(|py| {
-                                    println!("[PY_WORKER] GIL acquired, invoking callback");
+                                    debug!("[PY_WORKER] GIL acquired, invoking callback");
                                     let wrapper = Py::new(py, CallbackWrapper {
                                         responder: Arc::new(Mutex::new(Some(responder))),
                                     }).unwrap();
@@ -471,7 +472,7 @@ impl PythonWorker {
                         }
                     },
                     Err(_) => {
-                        println!("[PY_WORKER] Channel closed");
+                        debug!("[PY_WORKER] Channel closed");
                         break;
                     }
                 }
@@ -491,7 +492,7 @@ impl PythonWorker {
         connection_id: u64,
     ) -> (Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>) {
         let (tx, rx) = oneshot::channel();
-        println!("[RUST] Sending query to worker: {}", query);
+        debug!("[RUST] Sending query to worker: {}", query);
 
         self.sender
             .send(WorkerMessage::Query {
@@ -505,7 +506,7 @@ impl PythonWorker {
             .expect("Send failed!");
 
         rx.await.unwrap_or_else(|e| {
-            println!("[RUST] Worker failed: {:?}", e);
+            error!("[RUST] Worker failed: {:?}", e);
             (vec![], vec![])
         })
     }
@@ -691,7 +692,7 @@ impl SimpleQueryHandler for RiffqProcessor {
         }
 
 
-        println!("[PGWIRE] do_query called with: {}", query);
+        debug!("[PGWIRE] do_query called with: {}", query);
         // let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
         let connection_id = _client
             .metadata()
@@ -703,7 +704,7 @@ impl SimpleQueryHandler for RiffqProcessor {
             .py_worker
             .on_query(query.to_string(), None, None, false, connection_id)
             .await;
-        println!("[PGWIRE] Schema and rows received");
+        debug!("[PGWIRE] Schema and rows received");
 
 
         let mut fields = Vec::new();
@@ -803,7 +804,7 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let query = &portal.statement.statement.query;
-        println!("[PGWIRE EXTENDED] do_query: {} {}", portal.statement.statement.query, _debug_parameters(&portal.parameters, &portal.statement.parameter_types));
+        debug!("[PGWIRE EXTENDED] do_query: {} {}", portal.statement.statement.query, _debug_parameters(&portal.parameters, &portal.statement.parameter_types));
 
 
         let connection_id = _client
@@ -955,10 +956,10 @@ async fn detect_gssencmode(mut socket: TcpStream) -> Option<TcpStream> {
             let request_code = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
             if request_code == 80877104 {
                 if let Err(e) = socket.read_exact(&mut buf).await {
-                    println!("Failed to consume GSSAPI request: {:?}", e);
+                    error!("Failed to consume GSSAPI request: {:?}", e);
                 }
                 if let Err(e) = socket.write_all(b"N").await {
-                    println!("Failed to send rejection message: {:?}", e);
+                    error!("Failed to send rejection message: {:?}", e);
                 }
             }
         }
@@ -1064,7 +1065,7 @@ impl Server {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
 
             let listener = TcpListener::bind(&addr).await.unwrap();
-            println!("Listening on {}", addr);
+            info!("Listening on {}", addr);
 
             let server_task = tokio::spawn({
                 let tls_acceptor = if tls { self.tls_acceptor.lock().unwrap().clone() } else { None };
@@ -1088,7 +1089,7 @@ impl Server {
                             let port = addr.port();
                             tokio::spawn(async move {
                                 if let Err(e) = process_socket(socket, tls_acceptor_ref, factory).await {
-                                    eprintln!("process_socket error: {:?}", e);
+                                    error!("process_socket error: {:?}", e);
                                 }
                                 let connection_id = id_rx.await.unwrap_or(0);
                                 py_worker_clone.on_disconnect(connection_id, ip, port).await;
@@ -1099,7 +1100,7 @@ impl Server {
             });
 
             signal::ctrl_c().await.expect("Failed to listen for shutdown signal");
-            println!("Shutting down server");
+            info!("Shutting down server");
             server_task.abort();
         });
     }

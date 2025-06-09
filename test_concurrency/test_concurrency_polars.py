@@ -26,7 +26,7 @@ def run_heavy_query():
     logging.info("finished long running query")
 
 
-class TestDuckDBConcurrency(unittest.TestCase):
+class TestPolarsConcurrency(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.server_proc = Process(target=start_polars_server)

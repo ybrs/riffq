@@ -4,7 +4,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import pandas
 import polars as pl
-from riffq import riffq
+import riffq
 
 executor = ThreadPoolExecutor(max_workers=4)
 
@@ -51,7 +51,7 @@ def _handle_query(sql, callback, **kwargs):
 
     if sql_lc == "select pg_catalog.version()":
         return callback(([{"name": "version", "type": "string"}],
-                         [["Polars fake PostgreSQL"]]))
+                         [["PostgreSQL 14.13"]]))
 
     if sql_lc == "show transaction isolation level":
         return callback(([{"name": "transaction_isolation", "type": "string"}],
@@ -94,7 +94,9 @@ def main():
     global test_concurrency_df, heavy_df
 
     heavy_df = pl.DataFrame({
-        "x": list(range(155_000_000))
+        # reduced range to keep memory usage reasonable while
+        # still providing a noticeably heavy query
+        "x": list(range(10_000_000))
     })
 
     test_concurrency_df = pl.DataFrame({
@@ -103,7 +105,7 @@ def main():
         "key": ["alpha", "beta", "gamma"],
         "value": ["value1", "value2", "value3"]
     })
-    server = riffq.Server("127.0.0.1:5433")
+    server = riffq.Server("127.0.0.1:5434")
     server.on_query(handle_query)
     server.start()
 

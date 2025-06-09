@@ -6,3 +6,4 @@ duckdb
 pandas
 pyarrow
 psycopg2
+polars

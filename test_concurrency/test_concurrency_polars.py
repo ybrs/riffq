@@ -1,8 +1,5 @@
 import unittest
 import time
-import signal
-import threading
-import duckdb
 import logging
 from datetime import datetime
 from sqlalchemy import create_engine, text
@@ -13,26 +10,23 @@ import logging
 from utils import wait_for_server
 logging.basicConfig(level=logging.DEBUG)
 
-def start_duckdb_server():
-    from server import main
+def start_polars_server():
+    from server_polars import main
     main()
 
 def run_heavy_query():
     logging.info("sending long running query")
-    engine = create_engine("postgresql://myuser:mypassword@127.0.0.1:5433/mydb")
+    engine = create_engine("postgresql://myuser:mypassword@127.0.0.1:5434/mydb")
     with engine.connect() as conn:
-        conn.execute(text("""
-            SELECT SUM(a.id * b.id)
-            FROM range(0, 100000) AS a(id),
-                 range(0, 10000) AS b(id)
-        """))
+        # trigger the heavy Polars computation
+        conn.execute(text("SELECT heavy_query"))
     logging.info("finished long running query")
 
 
-class TestDuckDBConcurrency(unittest.TestCase):
+class TestPolarsConcurrency(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.server_proc = Process(target=start_duckdb_server)
+        cls.server_proc = Process(target=start_polars_server)
         cls.server_proc.start()
         time.sleep(1.5)  # wait for server
 
@@ -42,7 +36,8 @@ class TestDuckDBConcurrency(unittest.TestCase):
         cls.server_proc.join()
 
     def test_concurrent_queries(self):
-        engine = wait_for_server()
+        engine = wait_for_server(port=5434)
+        
         fast_query_times = []
 
         heavy_proc = Process(target=run_heavy_query)

@@ -58,7 +58,7 @@ class RiffqServer:
 
     def handle_auth(self, conn_id, user, password, host, database=None, callback=callable):
         conn = self.get_connection(conn_id=conn_id)
-        conn.handle_auth(user, password, host, database=None, callback=callback)
+        conn.handle_auth(user, password, host, database=database, callback=callback)
 
     def handle_connect(self, conn_id, ip, port, callback=callable):
         conn = self.get_connection(conn_id=conn_id)

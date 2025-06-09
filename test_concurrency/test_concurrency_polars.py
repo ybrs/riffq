@@ -1,8 +1,5 @@
 import unittest
 import time
-import signal
-import threading
-import duckdb
 import logging
 from datetime import datetime
 from sqlalchemy import create_engine, text
@@ -13,8 +10,8 @@ import logging
 from test_concurrency.utils import wait_for_server
 logging.basicConfig(level=logging.DEBUG)
 
-def start_duckdb_server():
-    from server import main
+def start_polars_server():
+    from server_polars import main
     main()
 
 def run_heavy_query():
@@ -32,7 +29,7 @@ def run_heavy_query():
 class TestDuckDBConcurrency(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.server_proc = Process(target=start_duckdb_server)
+        cls.server_proc = Process(target=start_polars_server)
         cls.server_proc.start()
         time.sleep(1.5)  # wait for server
 
@@ -43,6 +40,7 @@ class TestDuckDBConcurrency(unittest.TestCase):
 
     def test_concurrent_queries(self):
         engine = wait_for_server()
+        
         fast_query_times = []
 
         heavy_proc = Process(target=run_heavy_query)

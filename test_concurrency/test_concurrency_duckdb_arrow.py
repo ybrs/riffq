@@ -7,8 +7,11 @@ import logging
 from datetime import datetime
 from sqlalchemy import create_engine, text
 from multiprocessing import Process
-from riffq import riffq
+import riffq
 import logging
+
+from test_concurrency.utils import wait_for_server
+
 logging.basicConfig(level=logging.DEBUG)
 
 def start_duckdb_server():
@@ -40,21 +43,7 @@ class TestDuckDBConcurrency(unittest.TestCase):
         cls.server_proc.join()
 
     def test_concurrent_queries(self):
-        engine = create_engine("postgresql://myuser:mypassword@127.0.0.1:5433/mydb")
-        import sqlalchemy.exc
-        cnt = 0
-        while True:
-            try:
-                with engine.connect() as conn:
-                    result = conn.execute(text("SELECT * FROM test_concurrency;"))
-                    print("connected")
-                    break
-            except sqlalchemy.exc.OperationalError:
-                print("waiting for server to be online")
-                time.sleep(1)
-                cnt += 1
-            if cnt > 10:
-                raise Exception("couldnt spawn the server")
+        engine = wait_for_server()
 
         fast_query_times = []
 

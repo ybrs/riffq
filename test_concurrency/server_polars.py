@@ -4,7 +4,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import pandas
 import polars as pl
-from riffq import riffq
+import riffq
 
 executor = ThreadPoolExecutor(max_workers=4)
 
@@ -51,7 +51,7 @@ def _handle_query(sql, callback, **kwargs):
 
     if sql_lc == "select pg_catalog.version()":
         return callback(([{"name": "version", "type": "string"}],
-                         [["Polars fake PostgreSQL"]]))
+                         [["PostgreSQL 14.13"]]))
 
     if sql_lc == "show transaction isolation level":
         return callback(([{"name": "transaction_isolation", "type": "string"}],

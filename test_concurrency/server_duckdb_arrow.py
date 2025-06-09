@@ -4,7 +4,7 @@ from datetime import datetime
 
 import duckdb
 import pyarrow as pa
-from riffq import riffq
+import riffq
 
 def send_reader(reader, callback):
     if hasattr(reader, "__arrow_c_stream__"):

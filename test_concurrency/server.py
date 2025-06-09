@@ -1,7 +1,7 @@
 import logging
 import threading
 
-from riffq import riffq
+import riffq
 import duckdb
 import pandas
 from concurrent.futures import ThreadPoolExecutor

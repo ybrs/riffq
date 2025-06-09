@@ -8,3 +8,4 @@ examples/
 __pycache__/
 venv/
 duckdata.*
+example/data/*

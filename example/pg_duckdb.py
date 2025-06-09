@@ -55,10 +55,10 @@ def _handle_query(sql, callback, **kwargs):
     try:
         reader = cur.execute(sql).fetch_record_batch()
         send_reader(reader, callback)
-    except Exception:
+    except Exception as exc:
         logging.exception("error on executing query")
         batch = arrow_batch(
-            [pa.array(["ERROR"]), pa.array(["unknown query"])],
+            [pa.array(["ERROR"]), pa.array([str(exc)])],
             ["error", "message"],
         )
         send_reader(batch, callback)
@@ -67,42 +67,26 @@ def handle_query(sql, callback, conn_id=None, **kwargs):
     print("conn_id", conn_id)
     executor.submit(_handle_query, sql, callback, **kwargs)
 
-def handle_auth(conn_id, user, password, host, database=None):
-    print("conn_id onauth:", conn_id)
-    return user == "user" and password == "secret"
+def handle_auth(conn_id, user, password, host, database=None, callback=None):
+    print("conn_id onauth:", conn_id, user, password, database)
+    return callback(user == "user" and password == "secret")
 
-def handle_connect(conn_id, ip, port):
-    print("conn_id onconnect:", conn_id)
-    return True
+def handle_connect(conn_id, ip, port, callback=None):
+    print("conn_id onconnect:", conn_id, ip, port)
+    return callback(True)
 
 
 def main():
     global duckdb_con, executor
-    duckdb_con = duckdb.connect("duckdata.db")
+    duckdb_con = duckdb.connect()
     duckdb_con.execute(
         """
-        CREATE TABLE IF NOT EXISTS test_concurrency (
-            id INTEGER,
-            created_at TIMESTAMP,
-            key TEXT,
-            value TEXT
-        )
-    """
-    )
-    duckdb_con.execute("truncate table test_concurrency;")
-    duckdb_con.execute(
+        CREATE VIEW klines AS 
+        SELECT * 
+        FROM 'data/klines.parquet'
         """
-        INSERT INTO test_concurrency (id, created_at, key, value)
-        VALUES
-            (1, ?, 'alpha', 'value1'),
-            (2, ?, 'beta', 'value2'),
-            (3, ?, 'gamma', 'value3')
-    """,
-        [datetime.now(), datetime.now(), datetime.now()],
     )
-
     executor = ThreadPoolExecutor(max_workers=4)
-
     server = riffq.Server("127.0.0.1:5433")
     server.set_tls("certs/server.crt", "certs/server.key")
     server.on_authentication(handle_auth)

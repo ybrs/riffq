@@ -1106,7 +1106,7 @@ impl Server {
 }
 
 #[pymodule]
-fn riffq(_py: Python, m: &PyModule) -> PyResult<()> {
+fn _riffq(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Server>()?;
     Ok(())
 }

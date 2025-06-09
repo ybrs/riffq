@@ -3,6 +3,11 @@ name = "riffq"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "_riffq"
+crate-type = ["cdylib"]
+
+
 [dependencies]
 pyo3 = { version = "0.20", features = ["extension-module"] }
 pyo3-asyncio = { version = "0.20", features = ["tokio-runtime"] }

@@ -1626,6 +1626,7 @@ dependencies = [
  "chrono",
  "futures",
  "hex",
+ "log",
  "pgwire",
  "postgres-types",
  "pyo3",

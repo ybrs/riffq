@@ -16,13 +16,10 @@ def start_polars_server():
 
 def run_heavy_query():
     logging.info("sending long running query")
-    engine = create_engine("postgresql://myuser:mypassword@127.0.0.1:5433/mydb")
+    engine = create_engine("postgresql://myuser:mypassword@127.0.0.1:5434/mydb")
     with engine.connect() as conn:
-        conn.execute(text("""
-            SELECT SUM(a.id * b.id)
-            FROM range(0, 100000) AS a(id),
-                 range(0, 10000) AS b(id)
-        """))
+        # trigger the heavy Polars computation
+        conn.execute(text("SELECT heavy_query"))
     logging.info("finished long running query")
 
 
@@ -39,7 +36,7 @@ class TestPolarsConcurrency(unittest.TestCase):
         cls.server_proc.join()
 
     def test_concurrent_queries(self):
-        engine = wait_for_server()
+        engine = wait_for_server(port=5434)
         
         fast_query_times = []
 

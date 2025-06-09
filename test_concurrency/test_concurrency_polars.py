@@ -7,7 +7,7 @@ from multiprocessing import Process
 import riffq
 import logging
 
-from test_concurrency.utils import wait_for_server
+from utils import wait_for_server
 logging.basicConfig(level=logging.DEBUG)
 
 def start_polars_server():

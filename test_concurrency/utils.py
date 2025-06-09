@@ -1,8 +1,8 @@
 from sqlalchemy import create_engine, text
 import time
 
-def wait_for_server():
-    engine = create_engine("postgresql://myuser:mypassword@127.0.0.1:5433/mydb")
+def wait_for_server(port: int = 5433):
+    engine = create_engine(f"postgresql://myuser:mypassword@127.0.0.1:{port}/mydb")
     import sqlalchemy.exc
     cnt = 0
     while True:

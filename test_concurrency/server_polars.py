@@ -94,7 +94,9 @@ def main():
     global test_concurrency_df, heavy_df
 
     heavy_df = pl.DataFrame({
-        "x": list(range(155_000_000))
+        # reduced range to keep memory usage reasonable while
+        # still providing a noticeably heavy query
+        "x": list(range(10_000_000))
     })
 
     test_concurrency_df = pl.DataFrame({
@@ -103,7 +105,7 @@ def main():
         "key": ["alpha", "beta", "gamma"],
         "value": ["value1", "value2", "value3"]
     })
-    server = riffq.Server("127.0.0.1:5433")
+    server = riffq.Server("127.0.0.1:5434")
     server.on_query(handle_query)
     server.start()
 

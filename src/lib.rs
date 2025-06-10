@@ -1111,3 +1111,189 @@ fn _riffq(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<Server>()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::types::{PyDict, PyList};
+    use std::sync::{Arc, Mutex};
+    use tokio::time::{sleep, Duration};
+
+    fn init() {
+        pyo3::prepare_freethreaded_python();
+    }
+
+    #[tokio::test]
+    async fn test_on_query_handler_triggered() {
+        init();
+        let (calls, query_cb): (Py<PyAny>, Py<PyAny>) = Python::with_gil(|py| {
+            let calls = PyList::empty(py);
+            let locals = PyDict::new(py);
+            locals.set_item("calls", calls).unwrap();
+            py.run(
+                "def handle_query(sql, callback, **kwargs):\n    calls.append(sql)\n    callback(([{'name':'val','type':'int'}], [[1]]))",
+                None,
+                Some(locals),
+            )
+            .unwrap();
+            (
+                calls.into_py(py),
+                locals.get_item("handle_query").unwrap().into_py(py),
+            )
+        });
+
+        let worker = Arc::new(PythonWorker::new(
+            Arc::new(Mutex::new(Some(query_cb))),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+        ));
+
+        let (schema, rows) =
+            worker.on_query("SELECT 1".to_string(), None, None, false, 1).await;
+
+        assert_eq!(schema.len(), 1);
+        assert_eq!(rows, vec![vec![Some("1".to_string())]]);
+
+        Python::with_gil(|py| {
+            let calls = calls.as_ref(py).downcast::<PyList>().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls.get_item(0).unwrap().extract::<String>().unwrap(), "SELECT 1");
+        });
+
+        drop(worker);
+    }
+
+    #[tokio::test]
+    async fn test_on_connect_handler_triggered() {
+        init();
+        let (calls, connect_cb): (Py<PyAny>, Py<PyAny>) = Python::with_gil(|py| {
+            let calls = PyList::empty(py);
+            let locals = PyDict::new(py);
+            locals.set_item("calls", calls).unwrap();
+            py.run(
+                "def handle_connect(conn_id, ip, port, *, callback):\n    calls.append((conn_id, ip, port))\n    callback(True)",
+                None,
+                Some(locals),
+            )
+            .unwrap();
+            (
+                calls.into_py(py),
+                locals.get_item("handle_connect").unwrap().into_py(py),
+            )
+        });
+
+        let worker = Arc::new(PythonWorker::new(
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(Some(connect_cb))),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+        ));
+
+        let allowed = worker
+            .on_connect(42, "127.0.0.1".to_string(), 5555)
+            .await;
+        assert!(allowed);
+
+        Python::with_gil(|py| {
+            let calls = calls.as_ref(py).downcast::<PyList>().unwrap();
+            assert_eq!(calls.len(), 1);
+            let tup: (u64, String, u16) = calls.get_item(0).unwrap().extract().unwrap();
+            assert_eq!(tup.0, 42);
+        });
+
+        drop(worker);
+    }
+
+    #[tokio::test]
+    async fn test_on_disconnect_handler_triggered() {
+        init();
+        let (calls, disconnect_cb): (Py<PyAny>, Py<PyAny>) = Python::with_gil(|py| {
+            let calls = PyList::empty(py);
+            let locals = PyDict::new(py);
+            locals.set_item("calls", calls).unwrap();
+            py.run(
+                "def handle_disconnect(conn_id, ip, port):\n    calls.append((conn_id, ip, port))",
+                None,
+                Some(locals),
+            )
+            .unwrap();
+            (
+                calls.into_py(py),
+                locals.get_item("handle_disconnect").unwrap().into_py(py),
+            )
+        });
+
+        let worker = Arc::new(PythonWorker::new(
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(Some(disconnect_cb))),
+            Arc::new(Mutex::new(None)),
+        ));
+
+        worker
+            .on_disconnect(7, "1.2.3.4".to_string(), 1234)
+            .await;
+        sleep(Duration::from_millis(50)).await;
+
+        Python::with_gil(|py| {
+            let calls = calls.as_ref(py).downcast::<PyList>().unwrap();
+            assert_eq!(calls.len(), 1);
+            let tup: (u64, String, u16) = calls.get_item(0).unwrap().extract().unwrap();
+            assert_eq!(tup.0, 7);
+        });
+
+        drop(worker);
+    }
+
+    #[tokio::test]
+    async fn test_on_authentication_handler_triggered() {
+        init();
+        let (calls, auth_cb): (Py<PyAny>, Py<PyAny>) = Python::with_gil(|py| {
+            let calls = PyList::empty(py);
+            let locals = PyDict::new(py);
+            locals.set_item("calls", calls).unwrap();
+            py.run(
+                "def handle_auth(conn_id, user, password, host, *, callback, database=None):\n    calls.append((conn_id, user, password, host, database))\n    callback(True)",
+                None,
+                Some(locals),
+            )
+            .unwrap();
+            (
+                calls.into_py(py),
+                locals.get_item("handle_auth").unwrap().into_py(py),
+            )
+        });
+
+        let worker = Arc::new(PythonWorker::new(
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(None)),
+            Arc::new(Mutex::new(Some(auth_cb))),
+        ));
+
+        assert!(worker.authentication_enabled());
+
+        let allowed = worker
+            .on_authentication(
+                9,
+                Some("user".to_string()),
+                Some("db".to_string()),
+                "host".to_string(),
+                "pwd".to_string(),
+            )
+            .await;
+        assert!(allowed);
+
+        Python::with_gil(|py| {
+            let calls = calls.as_ref(py).downcast::<PyList>().unwrap();
+            assert_eq!(calls.len(), 1);
+            let tup: (u64, String, String, String, Option<String>) =
+                calls.get_item(0).unwrap().extract().unwrap();
+            assert_eq!(tup.0, 9);
+            assert_eq!(tup.1, "user");
+        });
+
+        drop(worker);
+    }
+}

@@ -68,6 +68,11 @@ def _handle_query(sql, callback, **kwargs):
                              {"name": "current_schema", "type": "string"},
                          ], [ ["public"] ] ))
 
+    if "pg_class" in sql.strip().lower():
+        return callback(([
+            {"name": "relname", "type": "string"},
+        ], [["users"]]))
+
 
     try:
         res = local_con.sql(sql)
@@ -110,6 +115,19 @@ def main():
         (2, ?, 'beta', 'value2'),
         (3, ?, 'gamma', 'value3')
     """, [datetime.now(), datetime.now(), datetime.now()])
+
+    duckdb_con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER,
+            name TEXT
+        )
+        """
+    )
+    duckdb_con.execute("DELETE FROM users")
+    duckdb_con.execute(
+        "INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob')"
+    )
 
     executor = ThreadPoolExecutor(max_workers=4)
 

@@ -31,7 +31,10 @@ use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::array::{Array, RecordBatch};
 use arrow::array::cast::AsArray;
 use arrow::record_batch::RecordBatchReader;
-use arrow::datatypes::{DataType, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
+use arrow::datatypes::{DataType, Field, Schema, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
+use arrow::array::{ArrayRef, StringBuilder};
+use datafusion::execution::context::SessionContext;
+use datafusion_pg_catalog::{dispatch_query, get_base_session_context};
 use postgres_types::FromSql;
 
 use chrono::{NaiveDate, NaiveDateTime, Duration};
@@ -342,6 +345,51 @@ fn arrow_stream_to_rows(ptr: *mut c_void) -> Result<(Vec<HashMap<String, String>
     }
 }
 
+fn record_batches_to_rows(batches: Vec<RecordBatch>, schema: Arc<Schema>) -> (Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>) {
+    let mut schema_desc = Vec::new();
+    for field in schema.fields() {
+        let mut map = HashMap::new();
+        map.insert("name".to_string(), field.name().to_string());
+        map.insert("type".to_string(), map_arrow_type(field.data_type()).to_string());
+        schema_desc.push(map);
+    }
+    let mut rows = Vec::new();
+    for batch in batches {
+        let num_rows = batch.num_rows();
+        for i in 0..num_rows {
+            let mut row = Vec::new();
+            for col in batch.columns() {
+                row.push(arrow_value_to_string(col.as_ref(), i));
+            }
+            rows.push(row);
+        }
+    }
+    (schema_desc, rows)
+}
+
+fn rows_to_record_batch(schema_desc: &[HashMap<String, String>], rows: &[Vec<Option<String>>]) -> (Vec<RecordBatch>, Arc<Schema>) {
+    let fields: Vec<Field> = schema_desc
+        .iter()
+        .map(|c| Field::new(c.get("name").unwrap(), DataType::Utf8, true))
+        .collect();
+
+    let mut builders: Vec<StringBuilder> = fields.iter().map(|_| StringBuilder::new(rows.len())).collect();
+
+    for row in rows {
+        for (i, val) in row.iter().enumerate() {
+            match val {
+                Some(v) => builders[i].append_value(v).unwrap(),
+                None => builders[i].append_null().unwrap(),
+            }
+        }
+    }
+
+    let arrays: Vec<ArrayRef> = builders.into_iter().map(|b| Arc::new(b.finish()) as ArrayRef).collect();
+    let schema = Arc::new(Schema::new(fields));
+    let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+    (vec![batch], schema)
+}
+
 pub struct PythonWorker {
     sender: Sender<WorkerMessage>,
     auth_cb: Arc<Mutex<Option<Py<PyAny>>>>,
@@ -564,6 +612,34 @@ impl PythonWorker {
 pub struct RiffqProcessor {
     py_worker: Arc<PythonWorker>,
     conn_id_sender: Arc<Mutex<Option<oneshot::Sender<u64>>>>,
+    catalog_ctx: Arc<SessionContext>,
+}
+
+impl RiffqProcessor {
+    async fn run_via_router(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> datafusion::error::Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)> {
+        let ctx = self.catalog_ctx.clone();
+        let py_worker = self.py_worker.clone();
+        let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
+            let py_worker = py_worker.clone();
+            async move {
+                let (schema_desc, rows) = py_worker
+                    .on_query(sql.to_string(), p, t, do_describe, connection_id)
+                    .await;
+                let (batches, schema) = rows_to_record_batch(&schema_desc, &rows);
+                Ok((batches, schema))
+            }
+        };
+
+        let (batches, schema) = dispatch_query(&ctx, &query, params, param_types, handler).await?;
+        Ok(record_batches_to_rows(batches, schema))
+    }
 }
 
 #[async_trait]
@@ -701,9 +777,9 @@ impl SimpleQueryHandler for RiffqProcessor {
             .unwrap_or(0);
 
         let (schema_desc, rows_list) = self
-            .py_worker
-            .on_query(query.to_string(), None, None, false, connection_id)
-            .await;
+            .run_via_router(query.to_string(), None, None, false, connection_id)
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         debug!("[PGWIRE] Schema and rows received");
 
 
@@ -739,6 +815,7 @@ impl SimpleQueryHandler for RiffqProcessor {
 
 pub struct MyExtendedQueryHandler {
     pub py_worker: Arc<PythonWorker>,
+    pub catalog_ctx: Arc<SessionContext>,
 }
 #[derive(Clone)]
 pub struct MyStatement {
@@ -814,15 +891,15 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .unwrap_or(0);
 
         let (schema_desc, rows_list) = self
-            .py_worker
-            .on_query(
+            .run_via_router(
                 query.to_string(),
                 Some(portal.parameters.clone()),
                 Some(portal.statement.parameter_types.clone()),
                 false,
                 connection_id,
             )
-            .await;
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
         let mut fields = Vec::new();
         for col in &schema_desc {
@@ -884,16 +961,16 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (schema_desc, rows_list) = self
-            .py_worker
-            .on_query(
+        let (schema_desc, _rows_list) = self
+            .run_via_router(
                 query.to_string(),
                 Some(portal.parameters.clone()),
                 Some(portal.statement.parameter_types.clone()),
                 true,
                 connection_id,
             )
-            .await;
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
         let mut fields = Vec::new();
         for col in &schema_desc {
@@ -1064,6 +1141,9 @@ impl Server {
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
 
+            let (ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
+            let catalog_ctx = Arc::new(ctx);
+
             let listener = TcpListener::bind(&addr).await.unwrap();
             info!("Listening on {}", addr);
 
@@ -1079,10 +1159,11 @@ impl Server {
                             let handler = Arc::new(RiffqProcessor {
                                 py_worker: py_worker.clone(),
                                 conn_id_sender: Arc::new(Mutex::new(Some(id_tx))),
+                                catalog_ctx: catalog_ctx.clone(),
                             });
                             let factory = Arc::new(RiffqProcessorFactory {
                                 handler: handler.clone(),
-                                extended_handler: Arc::new(MyExtendedQueryHandler { py_worker: py_worker.clone() }),
+                                extended_handler: Arc::new(MyExtendedQueryHandler { py_worker: py_worker.clone(), catalog_ctx: catalog_ctx.clone() }),
                             });
                             let py_worker_clone = py_worker.clone();
                             let ip = addr.ip().to_string();

@@ -10,7 +10,7 @@ import unittest
 import pyarrow as pa
 from helpers import _ensure_riffq_built
 
-def _run_server(port: int):
+def _run_server(port: int, catalog_emulation: bool = False):
     import riffq
     import pyarrow as pa
 
@@ -56,7 +56,7 @@ def _run_server(port: int):
 
     server = riffq.Server(f"127.0.0.1:{port}")
     server.on_query(handle_query)
-    server.start()
+    server.start(catalog_emulation=catalog_emulation)
 
 class ServerTest(unittest.TestCase):
     @classmethod

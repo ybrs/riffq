@@ -3083,6 +3083,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "datafusion",
  "datafusion_pg_catalog",
  "futures",
  "hex",

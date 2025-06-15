@@ -373,18 +373,21 @@ fn rows_to_record_batch(schema_desc: &[HashMap<String, String>], rows: &[Vec<Opt
         .map(|c| Field::new(c.get("name").unwrap(), DataType::Utf8, true))
         .collect();
 
-    let mut builders: Vec<StringBuilder> = fields.iter().map(|_| StringBuilder::new(rows.len())).collect();
+    let mut builders: Vec<StringBuilder> = fields.iter().map(|_| StringBuilder::new()).collect();
 
     for row in rows {
         for (i, val) in row.iter().enumerate() {
             match val {
-                Some(v) => builders[i].append_value(v).unwrap(),
-                None => builders[i].append_null().unwrap(),
+                Some(v) => builders[i].append_value(v),
+                None => builders[i].append_null(),
             }
         }
     }
 
-    let arrays: Vec<ArrayRef> = builders.into_iter().map(|b| Arc::new(b.finish()) as ArrayRef).collect();
+    let arrays: Vec<ArrayRef> = builders
+        .into_iter()
+        .map(|mut b| Arc::new(b.finish()) as ArrayRef)
+        .collect();
     let schema = Arc::new(Schema::new(fields));
     let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
     (vec![batch], schema)
@@ -628,9 +631,10 @@ impl RiffqProcessor {
         let py_worker = self.py_worker.clone();
         let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
             let py_worker = py_worker.clone();
+            let sql_owned = sql.to_string();
             async move {
                 let (schema_desc, rows) = py_worker
-                    .on_query(sql.to_string(), p, t, do_describe, connection_id)
+                    .on_query(sql_owned, p, t, do_describe, connection_id)
                     .await;
                 let (batches, schema) = rows_to_record_batch(&schema_desc, &rows);
                 Ok((batches, schema))
@@ -816,6 +820,34 @@ impl SimpleQueryHandler for RiffqProcessor {
 pub struct MyExtendedQueryHandler {
     pub py_worker: Arc<PythonWorker>,
     pub catalog_ctx: Arc<SessionContext>,
+}
+
+impl MyExtendedQueryHandler {
+    async fn run_via_router(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> datafusion::error::Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)> {
+        let ctx = self.catalog_ctx.clone();
+        let py_worker = self.py_worker.clone();
+        let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
+            let py_worker = py_worker.clone();
+            let sql_owned = sql.to_string();
+            async move {
+                let (schema_desc, rows) = py_worker
+                    .on_query(sql_owned, p, t, do_describe, connection_id)
+                    .await;
+                let (batches, schema) = rows_to_record_batch(&schema_desc, &rows);
+                Ok((batches, schema))
+            }
+        };
+
+        let (batches, schema) = dispatch_query(&ctx, &query, params, param_types, handler).await?;
+        Ok(record_batches_to_rows(batches, schema))
+    }
 }
 #[derive(Clone)]
 pub struct MyStatement {

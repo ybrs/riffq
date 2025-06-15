@@ -325,6 +325,7 @@ fn arrow_stream_to_rows(ptr: *mut c_void) -> Result<(Vec<HashMap<String, String>
         let schema = reader.schema();
         let mut schema_desc = Vec::new();
         for field in schema.fields() {
+            debug!("[RUST] field {} datatype {:?}", field.name(), field.data_type());
             let mut map = HashMap::new();
             map.insert("name".to_string(), field.name().to_string());
             map.insert("type".to_string(), map_arrow_type(field.data_type()).to_string());
@@ -391,6 +392,54 @@ fn rows_to_record_batch(schema_desc: &[HashMap<String, String>], rows: &[Vec<Opt
     let schema = Arc::new(Schema::new(fields));
     let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
     (vec![batch], schema)
+}
+
+fn encode_value(
+    encoder: &mut DataRowEncoder,
+    value: &Option<String>,
+    col_type: &str,
+) -> PgWireResult<()> {
+    match col_type {
+        "int" => {
+            let v: Option<i64> = match value {
+                Some(v) => v.parse().ok(),
+                None => None,
+            };
+            encoder.encode_field(&v)
+        }
+        "float" => {
+            let v: Option<f64> = match value {
+                Some(v) => v.parse().ok(),
+                None => None,
+            };
+            encoder.encode_field(&v)
+        }
+        "bool" => {
+            let v: Option<bool> = value.as_ref().map(|v| match v.as_str() {
+                "t" | "true" | "1" => true,
+                _ => false,
+            });
+            encoder.encode_field(&v)
+        }
+        "date" => {
+            let v: Option<NaiveDate> = match value {
+                Some(v) => NaiveDate::parse_from_str(v, "%Y-%m-%d").ok(),
+                None => None,
+            };
+            encoder.encode_field(&v)
+        }
+        "datetime" => {
+            let v: Option<NaiveDateTime> = match value {
+                Some(v) => NaiveDateTime::parse_from_str(v, "%Y-%m-%d %H:%M:%S%.f").ok(),
+                None => None,
+            };
+            encoder.encode_field(&v)
+        }
+        _ => {
+            let v: Option<&str> = value.as_deref();
+            encoder.encode_field(&v)
+        }
+    }
 }
 
 pub struct PythonWorker {
@@ -787,8 +836,29 @@ impl SimpleQueryHandler for RiffqProcessor {
         debug!("[PGWIRE] Schema and rows received");
 
 
+        // adjust column types based on values when type is reported as str
+        let mut adjusted_desc = schema_desc.clone();
+        for (idx, col) in adjusted_desc.iter_mut().enumerate() {
+            if col.get("type").map(|t| t.as_str()) == Some("str") {
+                for row in &rows_list {
+                    if let Some(Some(val)) = row.get(idx) {
+                        if val.parse::<i64>().is_ok() {
+                            col.insert("type".to_string(), "int".to_string());
+                            break;
+                        } else if val.parse::<f64>().is_ok() {
+                            col.insert("type".to_string(), "float".to_string());
+                            break;
+                        } else if val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false") {
+                            col.insert("type".to_string(), "bool".to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         let mut fields = Vec::new();
-        for col in &schema_desc {
+        for col in &adjusted_desc {
             let col_name = col.get("name").unwrap();
             let col_type = col.get("type").unwrap();
 
@@ -803,15 +873,17 @@ impl SimpleQueryHandler for RiffqProcessor {
 
         let schema = Arc::new(fields);
         let schema_ref = schema.clone();
+        let desc_clone = adjusted_desc.clone();
 
-        let data_row_stream =
-            futures::stream::iter(rows_list.into_iter()).map(move |row| {
-                let mut encoder = DataRowEncoder::new(schema_ref.clone());
-                for val in row {
-                    encoder.encode_field(&val)?;
-                }
-                encoder.finish()
-            });
+        let data_row_stream = futures::stream::iter(rows_list.into_iter()).map(move |row| {
+            let schema_desc = desc_clone.clone();
+            let mut encoder = DataRowEncoder::new(schema_ref.clone());
+            for (idx, val) in row.iter().enumerate() {
+                let col_type = schema_desc[idx].get("type").unwrap();
+                encode_value(&mut encoder, val, col_type)?;
+            }
+            encoder.finish()
+        });
 
         Ok(vec![Response::Query(QueryResponse::new(schema, data_row_stream))])
     }
@@ -933,8 +1005,28 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
+        let mut adjusted_desc = schema_desc.clone();
+        for (idx, col) in adjusted_desc.iter_mut().enumerate() {
+            if col.get("type").map(|t| t.as_str()) == Some("str") {
+                for row in &rows_list {
+                    if let Some(Some(val)) = row.get(idx) {
+                        if val.parse::<i64>().is_ok() {
+                            col.insert("type".to_string(), "int".to_string());
+                            break;
+                        } else if val.parse::<f64>().is_ok() {
+                            col.insert("type".to_string(), "float".to_string());
+                            break;
+                        } else if val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false") {
+                            col.insert("type".to_string(), "bool".to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         let mut fields = Vec::new();
-        for col in &schema_desc {
+        for col in &adjusted_desc {
             let col_name = col.get("name").unwrap();
             let col_type = col.get("type").unwrap();
             fields.push(FieldInfo::new(
@@ -948,11 +1040,14 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
 
         let schema = Arc::new(fields);
         let schema_ref = schema.clone();
+        let desc_clone = adjusted_desc.clone();
 
         let data_row_stream = futures::stream::iter(rows_list.into_iter()).map(move |row| {
+            let schema_desc = desc_clone.clone();
             let mut encoder = DataRowEncoder::new(schema_ref.clone());
-            for val in row {
-                encoder.encode_field(&val)?;
+            for (idx, val) in row.iter().enumerate() {
+                let col_type = schema_desc[idx].get("type").unwrap();
+                encode_value(&mut encoder, val, col_type)?;
             }
             encoder.finish()
         });
@@ -993,7 +1088,7 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (schema_desc, _rows_list) = self
+        let (schema_desc, rows_list) = self
             .run_via_router(
                 query.to_string(),
                 Some(portal.parameters.clone()),
@@ -1003,9 +1098,28 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             )
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        let mut adjusted_desc = schema_desc.clone();
+        for (idx, col) in adjusted_desc.iter_mut().enumerate() {
+            if col.get("type").map(|t| t.as_str()) == Some("str") {
+                for row in &rows_list {
+                    if let Some(Some(val)) = row.get(idx) {
+                        if val.parse::<i64>().is_ok() {
+                            col.insert("type".to_string(), "int".to_string());
+                            break;
+                        } else if val.parse::<f64>().is_ok() {
+                            col.insert("type".to_string(), "float".to_string());
+                            break;
+                        } else if val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false") {
+                            col.insert("type".to_string(), "bool".to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
         let mut fields = Vec::new();
-        for col in &schema_desc {
+        for col in &adjusted_desc {
             let col_name = col.get("name").unwrap();
             let col_type = col.get("type").unwrap();
             fields.push(FieldInfo::new(

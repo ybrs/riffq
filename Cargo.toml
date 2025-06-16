@@ -36,7 +36,5 @@ datafusion = "47.0.0"
 datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", branch = "main", package = "datafusion_pg_catalog" }
 env_logger = "0.11.8"
 
-[features]
-default = []
-zero_copy = []
+
 

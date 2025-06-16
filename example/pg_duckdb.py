@@ -2,6 +2,7 @@ import logging
 import duckdb
 import pyarrow as pa
 import riffq
+logging.basicConfig(level=logging.DEBUG)
 
 class Connection(riffq.BaseConnection):
     def _handle_query(self, sql, callback, **kwargs):

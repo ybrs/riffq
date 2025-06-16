@@ -115,7 +115,9 @@ Install the development requirements and run the test suite:
 
 ```bash
 pip install -r requirements.txt
-python -m unittest
+maturin build --profile=fast -i python3
+pip install target/wheels/*.whl
+python -m unittest discover -s tests
 ```
 
 The tests require the Rust extension to build successfully; any build failure will cause the suite to fail.

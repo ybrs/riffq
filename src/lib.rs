@@ -456,7 +456,6 @@ impl PythonWorker {
     ) -> Self {
         let (tx, rx) = channel::<WorkerMessage>();
         let auth_cb_thread = auth_cb.clone();
-
         thread::spawn(move || {
             info!("[PY_WORKER] Thread started");
             pyo3::prepare_freethreaded_python();
@@ -1302,10 +1301,8 @@ impl Server {
 
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
-
             let (ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
             let catalog_ctx = Arc::new(ctx);
-
             let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
                 Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: catalog_ctx.clone() })
             } else {
@@ -1357,6 +1354,8 @@ impl Server {
 
 #[pymodule]
 fn _riffq(_py: Python, m: &PyModule) -> PyResult<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).try_init();
+
     m.add_class::<Server>()?;
     Ok(())
 }

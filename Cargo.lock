@@ -3085,6 +3085,7 @@ dependencies = [
  "chrono",
  "datafusion",
  "datafusion_pg_catalog",
+ "env_logger",
  "futures",
  "hex",
  "log",

@@ -703,25 +703,10 @@ trait QueryRunner: Send + Sync {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-    ) -> datafusion::error::Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>;
-}
-
-type ArrowQueryResult = (Vec<RecordBatch>, Arc<Schema>);
-
-#[async_trait]
-trait QueryRunnerArrow: Send + Sync {
-    async fn execute_arrow(
-        &self,
-        query: String,
-        params: Option<Vec<Option<Bytes>>>,
-        param_types: Option<Vec<Type>>,
-        do_describe: bool,
-        connection_id: u64,
     ) -> datafusion::error::Result<ArrowQueryResult>;
 }
 
-trait QueryRunnerCombined: QueryRunner + QueryRunnerArrow {}
-impl<T: QueryRunner + QueryRunnerArrow + ?Sized> QueryRunnerCombined for T {}
+type ArrowQueryResult = (Vec<RecordBatch>, Arc<Schema>);
 
 struct RouterQueryRunner {
     py_worker: Arc<PythonWorker>,
@@ -731,35 +716,6 @@ struct RouterQueryRunner {
 #[async_trait]
 impl QueryRunner for RouterQueryRunner {
     async fn execute(
-        &self,
-        query: String,
-        params: Option<Vec<Option<Bytes>>>,
-        param_types: Option<Vec<Type>>,
-        do_describe: bool,
-        connection_id: u64,
-    ) -> datafusion::error::Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)> {
-        let ctx = self.catalog_ctx.clone();
-        let py_worker = self.py_worker.clone();
-        let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
-            let py_worker = py_worker.clone();
-            let sql_owned = sql.to_string();
-            async move {
-                let (schema_desc, rows) = py_worker
-                    .on_query(sql_owned, p, t, do_describe, connection_id)
-                    .await;
-                let (batches, schema) = rows_to_record_batch(&schema_desc, &rows);
-                Ok((batches, schema))
-            }
-        };
-
-        let (batches, schema) = dispatch_query(&ctx, &query, params, param_types, handler).await?;
-        Ok(record_batches_to_rows(batches, schema))
-    }
-}
-
-#[async_trait]
-impl QueryRunnerArrow for RouterQueryRunner {
-    async fn execute_arrow(
         &self,
         query: String,
         params: Option<Vec<Option<Bytes>>>,
@@ -798,24 +754,6 @@ impl QueryRunner for DirectQueryRunner {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-    ) -> datafusion::error::Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)> {
-        let (desc, rows) = self
-            .py_worker
-            .on_query(query, params, param_types, do_describe, connection_id)
-            .await;
-        Ok((desc, rows))
-    }
-}
-
-#[async_trait]
-impl QueryRunnerArrow for DirectQueryRunner {
-    async fn execute_arrow(
-        &self,
-        query: String,
-        params: Option<Vec<Option<Bytes>>>,
-        param_types: Option<Vec<Type>>,
-        do_describe: bool,
-        connection_id: u64,
     ) -> datafusion::error::Result<ArrowQueryResult> {
         let (desc, rows) = self
             .py_worker
@@ -828,7 +766,7 @@ impl QueryRunnerArrow for DirectQueryRunner {
 pub struct RiffqProcessor {
     py_worker: Arc<PythonWorker>,
     conn_id_sender: Arc<Mutex<Option<oneshot::Sender<u64>>>>,
-    query_runner: Arc<dyn QueryRunnerCombined>,
+    query_runner: Arc<dyn QueryRunner>,
 }
 
 
@@ -967,74 +905,13 @@ impl SimpleQueryHandler for RiffqProcessor {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        #[cfg(feature = "zero_copy")]
         let (schema, data_row_stream) = {
             let (batches, schema) = self
-                .query_runner
-                .execute_arrow(query.to_string(), None, None, false, connection_id)
-                .await
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            arrow_to_pg_rows(batches, schema)
-        };
-
-        #[cfg(not(feature = "zero_copy"))]
-        let (schema, data_row_stream) = {
-            let (schema_desc, rows_list) = self
                 .query_runner
                 .execute(query.to_string(), None, None, false, connection_id)
                 .await
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            debug!("[PGWIRE] Schema and rows received");
-
-            // adjust column types based on values when type is reported as str
-            let mut adjusted_desc = schema_desc.clone();
-            for (idx, col) in adjusted_desc.iter_mut().enumerate() {
-                if col.get("type").map(|t| t.as_str()) == Some("str") {
-                    for row in &rows_list {
-                        if let Some(Some(val)) = row.get(idx) {
-                            if val.parse::<i64>().is_ok() {
-                                col.insert("type".to_string(), "int".to_string());
-                                break;
-                            } else if val.parse::<f64>().is_ok() {
-                                col.insert("type".to_string(), "float".to_string());
-                                break;
-                            } else if val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false") {
-                                col.insert("type".to_string(), "bool".to_string());
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut fields = Vec::new();
-            for col in &adjusted_desc {
-                let col_name = col.get("name").unwrap();
-                let col_type = col.get("type").unwrap();
-
-                fields.push(FieldInfo::new(
-                    col_name.clone().into(),
-                    None,
-                    None,
-                    map_python_type_to_pgwire(col_type),
-                    FieldFormat::Text,
-                ));
-            }
-
-            let schema_arc = Arc::new(fields);
-            let schema_ref = schema_arc.clone();
-            let desc_clone = adjusted_desc.clone();
-
-            let data_row_stream = futures::stream::iter(rows_list.into_iter()).map(move |row| {
-                let schema_desc = desc_clone.clone();
-                let mut encoder = DataRowEncoder::new(schema_ref.clone());
-                for (idx, val) in row.iter().enumerate() {
-                    let col_type = schema_desc[idx].get("type").unwrap();
-                    encode_value(&mut encoder, val, col_type)?;
-                }
-                encoder.finish()
-            });
-            (schema_arc, data_row_stream)
+            arrow_to_pg_rows(batches, schema)
         };
 
         Ok(vec![Response::Query(QueryResponse::new(schema, data_row_stream))])
@@ -1042,7 +919,7 @@ impl SimpleQueryHandler for RiffqProcessor {
 }
 
 pub struct MyExtendedQueryHandler {
-    query_runner: Arc<dyn QueryRunnerCombined>,
+    query_runner: Arc<dyn QueryRunner>,
 }
 #[derive(Clone)]
 pub struct MyStatement {
@@ -1117,25 +994,8 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        #[cfg(feature = "zero_copy")]
         let (schema, data_row_stream) = {
             let (batches, schema) = self
-                .query_runner
-                .execute_arrow(
-                    query.to_string(),
-                    Some(portal.parameters.clone()),
-                    Some(portal.statement.parameter_types.clone()),
-                    false,
-                    connection_id,
-                )
-                .await
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            arrow_to_pg_rows(batches, schema)
-        };
-
-        #[cfg(not(feature = "zero_copy"))]
-        let (schema, data_row_stream) = {
-            let (schema_desc, rows_list) = self
                 .query_runner
                 .execute(
                     query.to_string(),
@@ -1146,54 +1006,7 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
                 )
                 .await
                 .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-
-            let mut adjusted_desc = schema_desc.clone();
-            for (idx, col) in adjusted_desc.iter_mut().enumerate() {
-                if col.get("type").map(|t| t.as_str()) == Some("str") {
-                    for row in &rows_list {
-                        if let Some(Some(val)) = row.get(idx) {
-                            if val.parse::<i64>().is_ok() {
-                                col.insert("type".to_string(), "int".to_string());
-                                break;
-                            } else if val.parse::<f64>().is_ok() {
-                                col.insert("type".to_string(), "float".to_string());
-                                break;
-                            } else if val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false") {
-                                col.insert("type".to_string(), "bool".to_string());
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut fields = Vec::new();
-            for col in &adjusted_desc {
-                let col_name = col.get("name").unwrap();
-                let col_type = col.get("type").unwrap();
-                fields.push(FieldInfo::new(
-                    col_name.clone().into(),
-                    None,
-                    None,
-                    map_python_type_to_pgwire(col_type),
-                    FieldFormat::Text,
-                ));
-            }
-
-            let schema_arc = Arc::new(fields);
-            let schema_ref = schema_arc.clone();
-            let desc_clone = adjusted_desc.clone();
-
-            let stream = futures::stream::iter(rows_list.into_iter()).map(move |row| {
-                let schema_desc = desc_clone.clone();
-                let mut encoder = DataRowEncoder::new(schema_ref.clone());
-                for (idx, val) in row.iter().enumerate() {
-                    let col_type = schema_desc[idx].get("type").unwrap();
-                    encode_value(&mut encoder, val, col_type)?;
-                }
-                encoder.finish()
-            });
-            (schema_arc, stream)
+            arrow_to_pg_rows(batches, schema)
         };
 
         Ok(Response::Query(QueryResponse::new(schema, data_row_stream)))
@@ -1232,11 +1045,10 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        #[cfg(feature = "zero_copy")]
         {
             let (batches, schema) = self
                 .query_runner
-                .execute_arrow(
+                .execute(
                     query.to_string(),
                     Some(portal.parameters.clone()),
                     Some(portal.statement.parameter_types.clone()),
@@ -1258,55 +1070,6 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
                     )
                 })
                 .collect();
-            Ok(DescribePortalResponse::new(fields))
-        }
-
-        #[cfg(not(feature = "zero_copy"))]
-        {
-            let (schema_desc, rows_list) = self
-                .query_runner
-                .execute(
-                    query.to_string(),
-                    Some(portal.parameters.clone()),
-                    Some(portal.statement.parameter_types.clone()),
-                    true,
-                    connection_id,
-                )
-                .await
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            let mut adjusted_desc = schema_desc.clone();
-            for (idx, col) in adjusted_desc.iter_mut().enumerate() {
-                if col.get("type").map(|t| t.as_str()) == Some("str") {
-                    for row in &rows_list {
-                        if let Some(Some(val)) = row.get(idx) {
-                            if val.parse::<i64>().is_ok() {
-                                col.insert("type".to_string(), "int".to_string());
-                                break;
-                            } else if val.parse::<f64>().is_ok() {
-                                col.insert("type".to_string(), "float".to_string());
-                                break;
-                            } else if val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false") {
-                                col.insert("type".to_string(), "bool".to_string());
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut fields = Vec::new();
-            for col in &adjusted_desc {
-                let col_name = col.get("name").unwrap();
-                let col_type = col.get("type").unwrap();
-                fields.push(FieldInfo::new(
-                    col_name.clone().into(),
-                    None,
-                    None,
-                    map_python_type_to_pgwire(col_type),
-                    FieldFormat::Text,
-                ));
-            }
-
             Ok(DescribePortalResponse::new(fields))
         }
     }
@@ -1465,7 +1228,7 @@ impl Server {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
             let (ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
             let catalog_ctx = Arc::new(ctx);
-            let query_runner: Arc<dyn QueryRunnerCombined> = if catalog_emulation {
+            let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
                 Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: catalog_ctx.clone() })
             } else {
                 Arc::new(DirectQueryRunner { py_worker: py_worker.clone() })

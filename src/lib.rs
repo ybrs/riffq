@@ -37,6 +37,8 @@ use postgres_types::FromSql;
 use chrono::{NaiveDate, NaiveDateTime, Duration};
 use arrow::datatypes::TimeUnit;
 
+mod catalog_emulation;
+
 
 use pgwire::api::auth::{LoginInfo, DefaultServerParameterProvider, StartupHandler, finish_authentication};
 use pgwire::api::PgWireConnectionState;
@@ -342,6 +344,18 @@ fn arrow_stream_to_rows(ptr: *mut c_void) -> Result<(Vec<HashMap<String, String>
     }
 }
 
+#[async_trait]
+pub trait QueryExecutor: Send + Sync {
+    async fn execute_query(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> (Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>);
+}
+
 pub struct PythonWorker {
     sender: Sender<WorkerMessage>,
     auth_cb: Arc<Mutex<Option<Py<PyAny>>>>,
@@ -561,8 +575,55 @@ impl PythonWorker {
     }
 }
 
+#[async_trait]
+impl QueryExecutor for PythonWorker {
+    async fn execute_query(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> (Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>) {
+        self
+            .on_query(query, params, param_types, do_describe, connection_id)
+            .await
+    }
+}
+
+pub struct CatalogRouter {
+    py_worker: Arc<PythonWorker>,
+}
+
+impl CatalogRouter {
+    pub fn new(py_worker: Arc<PythonWorker>) -> Self {
+        Self { py_worker }
+    }
+}
+
+#[async_trait]
+impl QueryExecutor for CatalogRouter {
+    async fn execute_query(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> (Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>) {
+        if let Some(res) = crate::catalog_emulation::dispatch(&query).await {
+            return res;
+        }
+        self
+            .py_worker
+            .on_query(query, params, param_types, do_describe, connection_id)
+            .await
+    }
+}
+
 pub struct RiffqProcessor {
     py_worker: Arc<PythonWorker>,
+    query_executor: Arc<dyn QueryExecutor>,
     conn_id_sender: Arc<Mutex<Option<oneshot::Sender<u64>>>>,
 }
 
@@ -701,8 +762,8 @@ impl SimpleQueryHandler for RiffqProcessor {
             .unwrap_or(0);
 
         let (schema_desc, rows_list) = self
-            .py_worker
-            .on_query(query.to_string(), None, None, false, connection_id)
+            .query_executor
+            .execute_query(query.to_string(), None, None, false, connection_id)
             .await;
         debug!("[PGWIRE] Schema and rows received");
 
@@ -738,6 +799,7 @@ impl SimpleQueryHandler for RiffqProcessor {
 }
 
 pub struct MyExtendedQueryHandler {
+    pub query_executor: Arc<dyn QueryExecutor>,
     pub py_worker: Arc<PythonWorker>,
 }
 #[derive(Clone)]
@@ -814,8 +876,8 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .unwrap_or(0);
 
         let (schema_desc, rows_list) = self
-            .py_worker
-            .on_query(
+            .query_executor
+            .execute_query(
                 query.to_string(),
                 Some(portal.parameters.clone()),
                 Some(portal.statement.parameter_types.clone()),
@@ -885,8 +947,8 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .unwrap_or(0);
 
         let (schema_desc, rows_list) = self
-            .py_worker
-            .on_query(
+            .query_executor
+            .execute_query(
                 query.to_string(),
                 Some(portal.parameters.clone()),
                 Some(portal.statement.parameter_types.clone()),
@@ -1038,14 +1100,14 @@ impl Server {
     }
 
 
-    #[pyo3(signature = (tls=false))]
-    fn start(&self, py: Python, tls: bool) {
+    #[pyo3(signature = (tls=false, catalog_emulation=false))]
+    fn start(&self, py: Python, tls: bool, catalog_emulation: bool) {
         py.allow_threads(|| {
-            self.run_server(tls);
+            self.run_server(tls, catalog_emulation);
         });
     }
 
-    fn run_server(&self, tls: bool) {
+    fn run_server(&self, tls: bool, catalog_emulation: bool) {
         let addr = self.addr.clone();
         let query_cb = self.on_query_cb.clone();
         let connect_cb = self.on_connect_cb.clone();
@@ -1064,6 +1126,12 @@ impl Server {
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
 
+            let query_executor: Arc<dyn QueryExecutor> = if catalog_emulation {
+                Arc::new(CatalogRouter::new(py_worker.clone()))
+            } else {
+                py_worker.clone()
+            };
+
             let listener = TcpListener::bind(&addr).await.unwrap();
             info!("Listening on {}", addr);
 
@@ -1078,11 +1146,15 @@ impl Server {
                             let (id_tx, id_rx) = oneshot::channel();
                             let handler = Arc::new(RiffqProcessor {
                                 py_worker: py_worker.clone(),
+                                query_executor: query_executor.clone(),
                                 conn_id_sender: Arc::new(Mutex::new(Some(id_tx))),
                             });
                             let factory = Arc::new(RiffqProcessorFactory {
                                 handler: handler.clone(),
-                                extended_handler: Arc::new(MyExtendedQueryHandler { py_worker: py_worker.clone() }),
+                                extended_handler: Arc::new(MyExtendedQueryHandler {
+                                    query_executor: query_executor.clone(),
+                                    py_worker: py_worker.clone(),
+                                }),
                             });
                             let py_worker_clone = py_worker.clone();
                             let ip = addr.ip().to_string();

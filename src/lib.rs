@@ -661,14 +661,26 @@ impl PythonWorker {
     }
 }
 
-pub struct RiffqProcessor {
+#[async_trait]
+trait QueryRunner: Send + Sync {
+    async fn execute(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> datafusion::error::Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>;
+}
+
+struct RouterQueryRunner {
     py_worker: Arc<PythonWorker>,
-    conn_id_sender: Arc<Mutex<Option<oneshot::Sender<u64>>>>,
     catalog_ctx: Arc<SessionContext>,
 }
 
-impl RiffqProcessor {
-    async fn run_via_router(
+#[async_trait]
+impl QueryRunner for RouterQueryRunner {
+    async fn execute(
         &self,
         query: String,
         params: Option<Vec<Option<Bytes>>>,
@@ -694,6 +706,36 @@ impl RiffqProcessor {
         Ok(record_batches_to_rows(batches, schema))
     }
 }
+
+struct DirectQueryRunner {
+    py_worker: Arc<PythonWorker>,
+}
+
+#[async_trait]
+impl QueryRunner for DirectQueryRunner {
+    async fn execute(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> datafusion::error::Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)> {
+        let (desc, rows) = self
+            .py_worker
+            .on_query(query, params, param_types, do_describe, connection_id)
+            .await;
+        Ok((desc, rows))
+    }
+}
+
+pub struct RiffqProcessor {
+    py_worker: Arc<PythonWorker>,
+    conn_id_sender: Arc<Mutex<Option<oneshot::Sender<u64>>>>,
+    query_runner: Arc<dyn QueryRunner>,
+}
+
+
 
 #[async_trait]
 impl StartupHandler for RiffqProcessor {
@@ -830,7 +872,8 @@ impl SimpleQueryHandler for RiffqProcessor {
             .unwrap_or(0);
 
         let (schema_desc, rows_list) = self
-            .run_via_router(query.to_string(), None, None, false, connection_id)
+            .query_runner
+            .execute(query.to_string(), None, None, false, connection_id)
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         debug!("[PGWIRE] Schema and rows received");
@@ -890,36 +933,7 @@ impl SimpleQueryHandler for RiffqProcessor {
 }
 
 pub struct MyExtendedQueryHandler {
-    pub py_worker: Arc<PythonWorker>,
-    pub catalog_ctx: Arc<SessionContext>,
-}
-
-impl MyExtendedQueryHandler {
-    async fn run_via_router(
-        &self,
-        query: String,
-        params: Option<Vec<Option<Bytes>>>,
-        param_types: Option<Vec<Type>>,
-        do_describe: bool,
-        connection_id: u64,
-    ) -> datafusion::error::Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)> {
-        let ctx = self.catalog_ctx.clone();
-        let py_worker = self.py_worker.clone();
-        let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
-            let py_worker = py_worker.clone();
-            let sql_owned = sql.to_string();
-            async move {
-                let (schema_desc, rows) = py_worker
-                    .on_query(sql_owned, p, t, do_describe, connection_id)
-                    .await;
-                let (batches, schema) = rows_to_record_batch(&schema_desc, &rows);
-                Ok((batches, schema))
-            }
-        };
-
-        let (batches, schema) = dispatch_query(&ctx, &query, params, param_types, handler).await?;
-        Ok(record_batches_to_rows(batches, schema))
-    }
+    query_runner: Arc<dyn QueryRunner>,
 }
 #[derive(Clone)]
 pub struct MyStatement {
@@ -995,7 +1009,8 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .unwrap_or(0);
 
         let (schema_desc, rows_list) = self
-            .run_via_router(
+            .query_runner
+            .execute(
                 query.to_string(),
                 Some(portal.parameters.clone()),
                 Some(portal.statement.parameter_types.clone()),
@@ -1089,7 +1104,8 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .unwrap_or(0);
 
         let (schema_desc, rows_list) = self
-            .run_via_router(
+            .query_runner
+            .execute(
                 query.to_string(),
                 Some(portal.parameters.clone()),
                 Some(portal.statement.parameter_types.clone()),
@@ -1261,14 +1277,14 @@ impl Server {
     }
 
 
-    #[pyo3(signature = (tls=false))]
-    fn start(&self, py: Python, tls: bool) {
+    #[pyo3(signature = (tls=false, catalog_emulation=false))]
+    fn start(&self, py: Python, tls: bool, catalog_emulation: bool) {
         py.allow_threads(|| {
-            self.run_server(tls);
+            self.run_server(tls, catalog_emulation);
         });
     }
 
-    fn run_server(&self, tls: bool) {
+    fn run_server(&self, tls: bool, catalog_emulation: bool) {
         let addr = self.addr.clone();
         let query_cb = self.on_query_cb.clone();
         let connect_cb = self.on_connect_cb.clone();
@@ -1290,6 +1306,12 @@ impl Server {
             let (ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
             let catalog_ctx = Arc::new(ctx);
 
+            let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
+                Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: catalog_ctx.clone() })
+            } else {
+                Arc::new(DirectQueryRunner { py_worker: py_worker.clone() })
+            };
+
             let listener = TcpListener::bind(&addr).await.unwrap();
             info!("Listening on {}", addr);
 
@@ -1305,11 +1327,11 @@ impl Server {
                             let handler = Arc::new(RiffqProcessor {
                                 py_worker: py_worker.clone(),
                                 conn_id_sender: Arc::new(Mutex::new(Some(id_tx))),
-                                catalog_ctx: catalog_ctx.clone(),
+                                query_runner: query_runner.clone(),
                             });
                             let factory = Arc::new(RiffqProcessorFactory {
                                 handler: handler.clone(),
-                                extended_handler: Arc::new(MyExtendedQueryHandler { py_worker: py_worker.clone(), catalog_ctx: catalog_ctx.clone() }),
+                                extended_handler: Arc::new(MyExtendedQueryHandler { query_runner: query_runner.clone() }),
                             });
                             let py_worker_clone = py_worker.clone();
                             let ip = addr.ip().to_string();

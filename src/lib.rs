@@ -55,6 +55,8 @@ use pgwire::messages::response::ErrorResponse;
 use pgwire::tokio::process_socket;
 use pgwire::api::stmt::{StoredStatement, NoopQueryParser};
 
+pub mod pg;
+
 fn map_python_type_to_pgwire(t: &str) -> Type {
     match t {
         "int" => Type::INT8,

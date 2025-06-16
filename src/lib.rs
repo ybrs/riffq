@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::{FromPyObject, PyAny};
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
-use futures::{Sink, SinkExt, StreamExt};
+use futures::{Sink, SinkExt, StreamExt, Stream};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::oneshot;
@@ -46,6 +46,7 @@ use pgwire::api::PgWireConnectionState;
 use pgwire::api::copy::NoopCopyHandler;
 use pgwire::api::query::{SimpleQueryHandler, ExtendedQueryHandler};
 use pgwire::api::results::{DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
+use pgwire::messages::data::DataRow;
 use pgwire::api::{ClientInfo, ClientPortalStore, NoopErrorHandler, PgWireServerHandlers, Type};
 use pgwire::api::portal::Portal;
 use pgwire::error::{PgWireError, PgWireResult, ErrorInfo};
@@ -56,6 +57,7 @@ use pgwire::tokio::process_socket;
 use pgwire::api::stmt::{StoredStatement, NoopQueryParser};
 
 pub mod pg;
+use pg::arrow_type_to_pgwire;
 
 fn map_python_type_to_pgwire(t: &str) -> Type {
     match t {
@@ -396,6 +398,36 @@ fn rows_to_record_batch(schema_desc: &[HashMap<String, String>], rows: &[Vec<Opt
     (vec![batch], schema)
 }
 
+fn arrow_to_pg_rows(
+    batches: Vec<RecordBatch>,
+    schema: Arc<Schema>,
+) -> (Arc<Vec<FieldInfo>>, impl Stream<Item = PgWireResult<DataRow>>) {
+    let (schema_desc, rows_list) = record_batches_to_rows(batches, schema.clone());
+    let mut fields = Vec::new();
+    for field in schema.fields() {
+        fields.push(FieldInfo::new(
+            field.name().clone().into(),
+            None,
+            None,
+            arrow_type_to_pgwire(field.data_type()),
+            FieldFormat::Text,
+        ));
+    }
+    let schema_arc = Arc::new(fields);
+    let schema_ref = schema_arc.clone();
+    let desc_clone = schema_desc.clone();
+    let data_row_stream = futures::stream::iter(rows_list.into_iter()).map(move |row| {
+        let schema_desc = desc_clone.clone();
+        let mut encoder = DataRowEncoder::new(schema_ref.clone());
+        for (idx, val) in row.iter().enumerate() {
+            let col_type = schema_desc[idx].get("type").unwrap();
+            encode_value(&mut encoder, val, col_type)?;
+        }
+        encoder.finish()
+    });
+    (schema_arc, data_row_stream)
+}
+
 fn encode_value(
     encoder: &mut DataRowEncoder,
     value: &Option<String>,
@@ -674,6 +706,23 @@ trait QueryRunner: Send + Sync {
     ) -> datafusion::error::Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>;
 }
 
+type ArrowQueryResult = (Vec<RecordBatch>, Arc<Schema>);
+
+#[async_trait]
+trait QueryRunnerArrow: Send + Sync {
+    async fn execute_arrow(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> datafusion::error::Result<ArrowQueryResult>;
+}
+
+trait QueryRunnerCombined: QueryRunner + QueryRunnerArrow {}
+impl<T: QueryRunner + QueryRunnerArrow + ?Sized> QueryRunnerCombined for T {}
+
 struct RouterQueryRunner {
     py_worker: Arc<PythonWorker>,
     catalog_ctx: Arc<SessionContext>,
@@ -708,6 +757,34 @@ impl QueryRunner for RouterQueryRunner {
     }
 }
 
+#[async_trait]
+impl QueryRunnerArrow for RouterQueryRunner {
+    async fn execute_arrow(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> datafusion::error::Result<ArrowQueryResult> {
+        let ctx = self.catalog_ctx.clone();
+        let py_worker = self.py_worker.clone();
+        let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
+            let py_worker = py_worker.clone();
+            let sql_owned = sql.to_string();
+            async move {
+                let (schema_desc, rows) = py_worker
+                    .on_query(sql_owned, p, t, do_describe, connection_id)
+                    .await;
+                let (batches, schema) = rows_to_record_batch(&schema_desc, &rows);
+                Ok((batches, schema))
+            }
+        };
+
+        dispatch_query(&ctx, &query, params, param_types, handler).await
+    }
+}
+
 struct DirectQueryRunner {
     py_worker: Arc<PythonWorker>,
 }
@@ -730,10 +807,28 @@ impl QueryRunner for DirectQueryRunner {
     }
 }
 
+#[async_trait]
+impl QueryRunnerArrow for DirectQueryRunner {
+    async fn execute_arrow(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> datafusion::error::Result<ArrowQueryResult> {
+        let (desc, rows) = self
+            .py_worker
+            .on_query(query, params, param_types, do_describe, connection_id)
+            .await;
+        Ok(rows_to_record_batch(&desc, &rows))
+    }
+}
+
 pub struct RiffqProcessor {
     py_worker: Arc<PythonWorker>,
     conn_id_sender: Arc<Mutex<Option<oneshot::Sender<u64>>>>,
-    query_runner: Arc<dyn QueryRunner>,
+    query_runner: Arc<dyn QueryRunnerCombined>,
 }
 
 
@@ -872,69 +967,82 @@ impl SimpleQueryHandler for RiffqProcessor {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (schema_desc, rows_list) = self
-            .query_runner
-            .execute(query.to_string(), None, None, false, connection_id)
-            .await
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        debug!("[PGWIRE] Schema and rows received");
+        #[cfg(feature = "zero_copy")]
+        let (schema, data_row_stream) = {
+            let (batches, schema) = self
+                .query_runner
+                .execute_arrow(query.to_string(), None, None, false, connection_id)
+                .await
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            arrow_to_pg_rows(batches, schema)
+        };
 
+        #[cfg(not(feature = "zero_copy"))]
+        let (schema, data_row_stream) = {
+            let (schema_desc, rows_list) = self
+                .query_runner
+                .execute(query.to_string(), None, None, false, connection_id)
+                .await
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            debug!("[PGWIRE] Schema and rows received");
 
-        // adjust column types based on values when type is reported as str
-        let mut adjusted_desc = schema_desc.clone();
-        for (idx, col) in adjusted_desc.iter_mut().enumerate() {
-            if col.get("type").map(|t| t.as_str()) == Some("str") {
-                for row in &rows_list {
-                    if let Some(Some(val)) = row.get(idx) {
-                        if val.parse::<i64>().is_ok() {
-                            col.insert("type".to_string(), "int".to_string());
-                            break;
-                        } else if val.parse::<f64>().is_ok() {
-                            col.insert("type".to_string(), "float".to_string());
-                            break;
-                        } else if val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false") {
-                            col.insert("type".to_string(), "bool".to_string());
-                            break;
+            // adjust column types based on values when type is reported as str
+            let mut adjusted_desc = schema_desc.clone();
+            for (idx, col) in adjusted_desc.iter_mut().enumerate() {
+                if col.get("type").map(|t| t.as_str()) == Some("str") {
+                    for row in &rows_list {
+                        if let Some(Some(val)) = row.get(idx) {
+                            if val.parse::<i64>().is_ok() {
+                                col.insert("type".to_string(), "int".to_string());
+                                break;
+                            } else if val.parse::<f64>().is_ok() {
+                                col.insert("type".to_string(), "float".to_string());
+                                break;
+                            } else if val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false") {
+                                col.insert("type".to_string(), "bool".to_string());
+                                break;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        let mut fields = Vec::new();
-        for col in &adjusted_desc {
-            let col_name = col.get("name").unwrap();
-            let col_type = col.get("type").unwrap();
+            let mut fields = Vec::new();
+            for col in &adjusted_desc {
+                let col_name = col.get("name").unwrap();
+                let col_type = col.get("type").unwrap();
 
-            fields.push(FieldInfo::new(
-                col_name.clone().into(),
-                None,
-                None,
-                map_python_type_to_pgwire(col_type),
-                FieldFormat::Text,
-            ));
-        }
-
-        let schema = Arc::new(fields);
-        let schema_ref = schema.clone();
-        let desc_clone = adjusted_desc.clone();
-
-        let data_row_stream = futures::stream::iter(rows_list.into_iter()).map(move |row| {
-            let schema_desc = desc_clone.clone();
-            let mut encoder = DataRowEncoder::new(schema_ref.clone());
-            for (idx, val) in row.iter().enumerate() {
-                let col_type = schema_desc[idx].get("type").unwrap();
-                encode_value(&mut encoder, val, col_type)?;
+                fields.push(FieldInfo::new(
+                    col_name.clone().into(),
+                    None,
+                    None,
+                    map_python_type_to_pgwire(col_type),
+                    FieldFormat::Text,
+                ));
             }
-            encoder.finish()
-        });
+
+            let schema_arc = Arc::new(fields);
+            let schema_ref = schema_arc.clone();
+            let desc_clone = adjusted_desc.clone();
+
+            let data_row_stream = futures::stream::iter(rows_list.into_iter()).map(move |row| {
+                let schema_desc = desc_clone.clone();
+                let mut encoder = DataRowEncoder::new(schema_ref.clone());
+                for (idx, val) in row.iter().enumerate() {
+                    let col_type = schema_desc[idx].get("type").unwrap();
+                    encode_value(&mut encoder, val, col_type)?;
+                }
+                encoder.finish()
+            });
+            (schema_arc, data_row_stream)
+        };
 
         Ok(vec![Response::Query(QueryResponse::new(schema, data_row_stream))])
     }
 }
 
 pub struct MyExtendedQueryHandler {
-    query_runner: Arc<dyn QueryRunner>,
+    query_runner: Arc<dyn QueryRunnerCombined>,
 }
 #[derive(Clone)]
 pub struct MyStatement {
@@ -1009,64 +1117,84 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (schema_desc, rows_list) = self
-            .query_runner
-            .execute(
-                query.to_string(),
-                Some(portal.parameters.clone()),
-                Some(portal.statement.parameter_types.clone()),
-                false,
-                connection_id,
-            )
-            .await
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        #[cfg(feature = "zero_copy")]
+        let (schema, data_row_stream) = {
+            let (batches, schema) = self
+                .query_runner
+                .execute_arrow(
+                    query.to_string(),
+                    Some(portal.parameters.clone()),
+                    Some(portal.statement.parameter_types.clone()),
+                    false,
+                    connection_id,
+                )
+                .await
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            arrow_to_pg_rows(batches, schema)
+        };
 
-        let mut adjusted_desc = schema_desc.clone();
-        for (idx, col) in adjusted_desc.iter_mut().enumerate() {
-            if col.get("type").map(|t| t.as_str()) == Some("str") {
-                for row in &rows_list {
-                    if let Some(Some(val)) = row.get(idx) {
-                        if val.parse::<i64>().is_ok() {
-                            col.insert("type".to_string(), "int".to_string());
-                            break;
-                        } else if val.parse::<f64>().is_ok() {
-                            col.insert("type".to_string(), "float".to_string());
-                            break;
-                        } else if val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false") {
-                            col.insert("type".to_string(), "bool".to_string());
-                            break;
+        #[cfg(not(feature = "zero_copy"))]
+        let (schema, data_row_stream) = {
+            let (schema_desc, rows_list) = self
+                .query_runner
+                .execute(
+                    query.to_string(),
+                    Some(portal.parameters.clone()),
+                    Some(portal.statement.parameter_types.clone()),
+                    false,
+                    connection_id,
+                )
+                .await
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+            let mut adjusted_desc = schema_desc.clone();
+            for (idx, col) in adjusted_desc.iter_mut().enumerate() {
+                if col.get("type").map(|t| t.as_str()) == Some("str") {
+                    for row in &rows_list {
+                        if let Some(Some(val)) = row.get(idx) {
+                            if val.parse::<i64>().is_ok() {
+                                col.insert("type".to_string(), "int".to_string());
+                                break;
+                            } else if val.parse::<f64>().is_ok() {
+                                col.insert("type".to_string(), "float".to_string());
+                                break;
+                            } else if val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false") {
+                                col.insert("type".to_string(), "bool".to_string());
+                                break;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        let mut fields = Vec::new();
-        for col in &adjusted_desc {
-            let col_name = col.get("name").unwrap();
-            let col_type = col.get("type").unwrap();
-            fields.push(FieldInfo::new(
-                col_name.clone().into(),
-                None,
-                None,
-                map_python_type_to_pgwire(col_type),
-                FieldFormat::Text,
-            ));
-        }
-
-        let schema = Arc::new(fields);
-        let schema_ref = schema.clone();
-        let desc_clone = adjusted_desc.clone();
-
-        let data_row_stream = futures::stream::iter(rows_list.into_iter()).map(move |row| {
-            let schema_desc = desc_clone.clone();
-            let mut encoder = DataRowEncoder::new(schema_ref.clone());
-            for (idx, val) in row.iter().enumerate() {
-                let col_type = schema_desc[idx].get("type").unwrap();
-                encode_value(&mut encoder, val, col_type)?;
+            let mut fields = Vec::new();
+            for col in &adjusted_desc {
+                let col_name = col.get("name").unwrap();
+                let col_type = col.get("type").unwrap();
+                fields.push(FieldInfo::new(
+                    col_name.clone().into(),
+                    None,
+                    None,
+                    map_python_type_to_pgwire(col_type),
+                    FieldFormat::Text,
+                ));
             }
-            encoder.finish()
-        });
+
+            let schema_arc = Arc::new(fields);
+            let schema_ref = schema_arc.clone();
+            let desc_clone = adjusted_desc.clone();
+
+            let stream = futures::stream::iter(rows_list.into_iter()).map(move |row| {
+                let schema_desc = desc_clone.clone();
+                let mut encoder = DataRowEncoder::new(schema_ref.clone());
+                for (idx, val) in row.iter().enumerate() {
+                    let col_type = schema_desc[idx].get("type").unwrap();
+                    encode_value(&mut encoder, val, col_type)?;
+                }
+                encoder.finish()
+            });
+            (schema_arc, stream)
+        };
 
         Ok(Response::Query(QueryResponse::new(schema, data_row_stream)))
     }
@@ -1104,51 +1232,83 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (schema_desc, rows_list) = self
-            .query_runner
-            .execute(
-                query.to_string(),
-                Some(portal.parameters.clone()),
-                Some(portal.statement.parameter_types.clone()),
-                true,
-                connection_id,
-            )
-            .await
-            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        let mut adjusted_desc = schema_desc.clone();
-        for (idx, col) in adjusted_desc.iter_mut().enumerate() {
-            if col.get("type").map(|t| t.as_str()) == Some("str") {
-                for row in &rows_list {
-                    if let Some(Some(val)) = row.get(idx) {
-                        if val.parse::<i64>().is_ok() {
-                            col.insert("type".to_string(), "int".to_string());
-                            break;
-                        } else if val.parse::<f64>().is_ok() {
-                            col.insert("type".to_string(), "float".to_string());
-                            break;
-                        } else if val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false") {
-                            col.insert("type".to_string(), "bool".to_string());
-                            break;
+        #[cfg(feature = "zero_copy")]
+        {
+            let (batches, schema) = self
+                .query_runner
+                .execute_arrow(
+                    query.to_string(),
+                    Some(portal.parameters.clone()),
+                    Some(portal.statement.parameter_types.clone()),
+                    true,
+                    connection_id,
+                )
+                .await
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            let fields: Vec<FieldInfo> = schema
+                .fields()
+                .iter()
+                .map(|f| {
+                    FieldInfo::new(
+                        f.name().clone().into(),
+                        None,
+                        None,
+                        arrow_type_to_pgwire(f.data_type()),
+                        FieldFormat::Text,
+                    )
+                })
+                .collect();
+            Ok(DescribePortalResponse::new(fields))
+        }
+
+        #[cfg(not(feature = "zero_copy"))]
+        {
+            let (schema_desc, rows_list) = self
+                .query_runner
+                .execute(
+                    query.to_string(),
+                    Some(portal.parameters.clone()),
+                    Some(portal.statement.parameter_types.clone()),
+                    true,
+                    connection_id,
+                )
+                .await
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            let mut adjusted_desc = schema_desc.clone();
+            for (idx, col) in adjusted_desc.iter_mut().enumerate() {
+                if col.get("type").map(|t| t.as_str()) == Some("str") {
+                    for row in &rows_list {
+                        if let Some(Some(val)) = row.get(idx) {
+                            if val.parse::<i64>().is_ok() {
+                                col.insert("type".to_string(), "int".to_string());
+                                break;
+                            } else if val.parse::<f64>().is_ok() {
+                                col.insert("type".to_string(), "float".to_string());
+                                break;
+                            } else if val.eq_ignore_ascii_case("true") || val.eq_ignore_ascii_case("false") {
+                                col.insert("type".to_string(), "bool".to_string());
+                                break;
+                            }
                         }
                     }
                 }
             }
-        }
 
-        let mut fields = Vec::new();
-        for col in &adjusted_desc {
-            let col_name = col.get("name").unwrap();
-            let col_type = col.get("type").unwrap();
-            fields.push(FieldInfo::new(
-                col_name.clone().into(),
-                None,
-                None,
-                map_python_type_to_pgwire(col_type),
-                FieldFormat::Text,
-            ));
-        }
+            let mut fields = Vec::new();
+            for col in &adjusted_desc {
+                let col_name = col.get("name").unwrap();
+                let col_type = col.get("type").unwrap();
+                fields.push(FieldInfo::new(
+                    col_name.clone().into(),
+                    None,
+                    None,
+                    map_python_type_to_pgwire(col_type),
+                    FieldFormat::Text,
+                ));
+            }
 
-        Ok(DescribePortalResponse::new(fields))
+            Ok(DescribePortalResponse::new(fields))
+        }
     }
 
 
@@ -1305,7 +1465,7 @@ impl Server {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
             let (ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
             let catalog_ctx = Arc::new(ctx);
-            let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
+            let query_runner: Arc<dyn QueryRunnerCombined> = if catalog_emulation {
                 Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: catalog_ctx.clone() })
             } else {
                 Arc::new(DirectQueryRunner { py_worker: py_worker.clone() })

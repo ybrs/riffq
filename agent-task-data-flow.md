@@ -7,7 +7,9 @@ current issues:
 Keep RecordBatches until the wire step
 Return Vec<RecordBatch> (plus the Schema) from the worker and teach pgwire encoding to consume Arrow arrays directly:
 
+```
 async fn execute(...) -> Result<(Vec<RecordBatch>, Arc<Schema>)>;
+```
 
 At encoding time, use Arrow’s typed array getters (as_primitive(), as_string(), …) directly inside the DataRowEncoder without first converting to String.
 

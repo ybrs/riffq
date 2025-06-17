@@ -59,21 +59,6 @@ use pgwire::api::stmt::{StoredStatement, NoopQueryParser};
 pub mod pg;
 use pg::arrow_type_to_pgwire;
 
-
-fn map_arrow_type(dt: &DataType) -> &'static str {
-    use DataType::*;
-    match dt {
-        Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 => "int",
-        Float16 | Float32 | Float64 => "float",
-        Boolean => "bool",
-        Utf8 | LargeUtf8 => "str",
-        Date32 | Date64 => "date",
-        Timestamp(_, _) => "datetime",
-        _ => "str",
-    }
-}
-
-
 pub enum WorkerMessage {
     Query {
         query: String,
@@ -81,7 +66,7 @@ pub enum WorkerMessage {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-        responder: oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>,
+        responder: oneshot::Sender<ArrowQueryResult>,
     },
     Connect {
         connection_id: u64,
@@ -106,7 +91,7 @@ pub enum WorkerMessage {
 
 #[pyclass]
 struct CallbackWrapper {
-    responder: Arc<Mutex<Option<oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>>>>,
+    responder: Arc<Mutex<Option<oneshot::Sender<ArrowQueryResult>>>>,  
 }
 
 #[pyclass]
@@ -136,226 +121,83 @@ impl CallbackWrapper {
                 if let Ok(capsule) = result.extract::<&PyCapsule>(py) {
                     debug!("[RUST] received PyCapsule");
                     let ptr = capsule.pointer() as *mut c_void;
-                    if let Ok(res) = arrow_stream_to_rows(ptr) {
-                        let _ = sender.send(res);
-                    } else {
-                        error!("[RUST] arrow_stream_to_rows failed for capsule");
+                    unsafe {
+                        let mut reader = ArrowArrayStreamReader::from_raw(ptr as *mut _).unwrap();
+                        let mut batches = Vec::new();
+                        while let Some(batch) = reader.next().transpose().unwrap() {
+                            batches.push(batch);
+                        }
+                        let schema = reader.schema();
+                        let _ = sender.send((batches, schema));
                     }
                     return;
-                } 
+                }
 
                 // First try to treat the result as Arrow IPC bytes. When the
                 // callback returns bytes we assume they contain an Arrow IPC
-                // stream produced by ``pyarrow``.  Use ``pyarrow`` again to
-                // decode the bytes into a schema description and rows so that
-                // the rest of the code can operate on plain Rust types.
+                // stream produced by ``pyarrow``.
                 if let Ok(pybytes) = result.extract::<&pyo3::types::PyBytes>(py) {
-                    let locals = PyDict::new(py);
-                    locals.set_item("data", pybytes).unwrap();
-                    // The Python snippet reads the IPC stream and converts it
-                    // to two Python objects: ``schema_desc`` describing the
-                    // columns and ``rows`` containing the record batches as a
-                    // list of rows (lists). The column types are normalised to
-                    // simple strings that map to pgwire types later on.
-                    py.run(
-                        r#"
-import pyarrow as pa
-import pyarrow.ipc as ipc
-import pyarrow.types as pat
-reader = ipc.open_stream(data)
-table = reader.read_all()
-def map_type(field):
-    t = field.type
-    if pat.is_integer(t):
-        return "int"
-    if pat.is_floating(t):
-        return "float"
-    if pat.is_boolean(t):
-        return "bool"
-    if pat.is_string(t) or pat.is_large_string(t):
-        return "str"
-    if pat.is_date(t):
-        return "date"
-    if pat.is_timestamp(t):
-        return "datetime"
-    return "str"
-schema_desc = [{"name": f.name, "type": map_type(f)} for f in table.schema]
-rows = [[row.get(f.name) for f in table.schema] for row in table.to_pylist()]
-result_py = (schema_desc, rows)
-"#,
-                        None,
-                        Some(locals),
-                    )
-                    .unwrap();
-                    let tuple_any = match PyDict::get_item(locals, "result_py")
-                        .unwrap()
-                    {
-                        Some(v) => v,
-                        None => panic!("result_py missing"),
-                    };
-                    let parsed: (
-                        Vec<HashMap<String, String>>,
-                        Vec<Vec<PyObject>>,
-                    ) = <(
-                        Vec<HashMap<String, String>>,
-                        Vec<Vec<PyObject>>,
-                    ) as FromPyObject>::extract(tuple_any).unwrap();
-                    let converted_rows: Vec<Vec<Option<String>>> = parsed
-                        .1
-                        .into_iter()
-                        .map(|row| {
-                            row.into_iter()
-                                .map(|val| {
-                                    Python::with_gil(|py| {
-                                        let v = val.as_ref(py);
-                                        if v.is_none() {
-                                            Ok::<Option<String>, ()>(None)
-                                        } else {
-                                            match v.str() {
-                                                Ok(pystr) => Ok(Some(pystr.to_str().unwrap_or("").to_string())),
-                                                Err(_) => Ok(None),
-                                            }
-                                        }
-                                    })
-                                    .unwrap_or(None)
-                                })
-                                .collect()
-                        })
-                        .collect();
-                    let _ = sender.send((parsed.0, converted_rows));
+                    let data = pybytes.as_bytes();
+                    let cursor = std::io::Cursor::new(data);
+                    let mut reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).unwrap();
+                    let schema = reader.schema().clone();
+                    let batches: Vec<RecordBatch> = reader.collect::<Result<_, _>>().unwrap();
+                    let _ = sender.send((batches, schema));
                     return;
                 }
 
+                // Fallback: assume (schema_desc, rows) tuple, build batches
                 let parsed: PyResult<(Vec<HashMap<String, String>>, Vec<Vec<PyObject>>)> = result.extract(py);
                 if let Ok((schema_desc, py_rows)) = parsed {
-                    let converted_rows: Vec<Vec<Option<String>>> = py_rows
-                        .into_iter()
+                    // turn PyObjects into Rust Option<String>
+                    let rows: Vec<Vec<Option<String>>> = py_rows.into_iter()
                         .map(|row| {
                             row.into_iter()
                                 .map(|val| {
                                     Python::with_gil(|py| {
-                                        let v = val.as_ref(py);
-                                        if v.is_none() {
-                                            Ok::<Option<String>, ()>(None)
+                                        if val.as_ref(py).is_none() {
+                                            None
                                         } else {
-                                            match v.str() {
-                                                Ok(pystr) => Ok(Some(pystr.to_str().unwrap_or("").to_string())),
-                                                Err(_) => Ok(None),
-                                            }
+                                            val.extract::<String>(py).ok()
                                         }
-                                    }).unwrap_or(None)
+                                    })
                                 })
                                 .collect()
                         })
                         .collect();
-                    let _ = sender.send((schema_desc, converted_rows));
+
+                    // build arrow arrays column-wise
+                    let fields: Vec<Field> = schema_desc.iter()
+                        .map(|c| Field::new(c.get("name").unwrap(), DataType::Utf8, true))
+                        .collect();
+
+                    let mut builders: Vec<StringBuilder> =
+                        fields.iter().map(|_| StringBuilder::new()).collect();
+
+                    for row in &rows {
+                        for (i, cell) in row.iter().enumerate() {
+                            match cell {
+                                Some(s) => builders[i].append_value(s),
+                                None    => builders[i].append_null(),
+                            }
+                        }
+                    }
+
+                    let arrays: Vec<ArrayRef> = builders
+                        .into_iter()
+                        .map(|mut b| Arc::new(b.finish()) as ArrayRef)
+                        .collect();
+
+                    let schema = Arc::new(Schema::new(fields));
+                    let batch  = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+                    let _      = sender.send((vec![batch], schema));
                 }
+
+
             });
         }
     }
 }
-
-
-fn arrow_stream_to_rows(ptr: *mut c_void) -> Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>), String> {
-    unsafe {
-        debug!("[RUST] arrow_stream_to_rows: ptr={:?}", ptr);
-        let mut reader = ArrowArrayStreamReader::from_raw(ptr as *mut _).map_err(|e| e.to_string())?;
-        debug!("[RUST] reader constructed");
-        let schema = reader.schema();
-        let mut schema_desc = Vec::new();
-        for field in schema.fields() {
-            debug!("[RUST] field {} datatype {:?}", field.name(), field.data_type());
-            let mut map = HashMap::new();
-            map.insert("name".to_string(), field.name().to_string());
-            map.insert("type".to_string(), map_arrow_type(field.data_type()).to_string());
-            schema_desc.push(map);
-        }
-        let mut rows = Vec::new();
-        while let Some(batch) = reader.next().transpose().map_err(|e| e.to_string())? {
-            let num_rows = batch.num_rows();
-            for i in 0..num_rows {
-                let mut row = Vec::new();
-                for col in batch.columns() {
-                    let val = if col.is_null(i) {
-                        None
-                    } else {
-                        match col.data_type() {
-                            DataType::Int8 => Some(col.as_primitive::<arrow::array::types::Int8Type>().value(i).to_string()),
-                            DataType::Int16 => Some(col.as_primitive::<arrow::array::types::Int16Type>().value(i).to_string()),
-                            DataType::Int32 => Some(col.as_primitive::<arrow::array::types::Int32Type>().value(i).to_string()),
-                            DataType::Int64 => Some(col.as_primitive::<arrow::array::types::Int64Type>().value(i).to_string()),
-                            DataType::UInt8 => Some(col.as_primitive::<arrow::array::types::UInt8Type>().value(i).to_string()),
-                            DataType::UInt16 => Some(col.as_primitive::<arrow::array::types::UInt16Type>().value(i).to_string()),
-                            DataType::UInt32 => Some(col.as_primitive::<arrow::array::types::UInt32Type>().value(i).to_string()),
-                            DataType::UInt64 => Some(col.as_primitive::<arrow::array::types::UInt64Type>().value(i).to_string()),
-                            DataType::Float32 => Some(col.as_primitive::<arrow::array::types::Float32Type>().value(i).to_string()),
-                            DataType::Float64 => Some(col.as_primitive::<arrow::array::types::Float64Type>().value(i).to_string()),
-                            DataType::Boolean => Some(col.as_boolean().value(i).to_string()),
-                            DataType::Utf8 => Some(col.as_string::<i32>().value(i).to_string()),
-                            DataType::LargeUtf8 => Some(col.as_string::<i64>().value(i).to_string()),
-                            DataType::Date32 => {
-                                let days = col.as_primitive::<arrow::array::types::Date32Type>().value(i) as i64;
-                                let date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + Duration::days(days);
-                                Some(date.format("%Y-%m-%d").to_string())
-                            }
-                            DataType::Date64 => {
-                                let ms = col.as_primitive::<arrow::array::types::Date64Type>().value(i);
-                                let dt = NaiveDateTime::from_timestamp_opt(ms / 1000, (ms % 1000 * 1_000_000) as u32).unwrap();
-                                Some(dt.format("%Y-%m-%d %H:%M:%S").to_string())
-                            }
-                            DataType::Timestamp(unit, _) => {
-                                let nanos: i128 = match unit {
-                                    TimeUnit::Second => col.as_primitive::<TimestampSecondType>().value(i) as i128 * 1_000_000_000,
-                                    TimeUnit::Millisecond => col.as_primitive::<TimestampMillisecondType>().value(i) as i128 * 1_000_000,
-                                    TimeUnit::Microsecond => col.as_primitive::<TimestampMicrosecondType>().value(i) as i128 * 1_000,
-                                    TimeUnit::Nanosecond => col.as_primitive::<TimestampNanosecondType>().value(i) as i128,
-                                };
-                                let secs = (nanos / 1_000_000_000) as i64;
-                                let nsec = (nanos % 1_000_000_000) as u32;
-                                let dt = NaiveDateTime::from_timestamp_opt(secs, nsec).unwrap();
-                                Some(dt.format("%Y-%m-%d %H:%M:%S%.f").to_string())
-                            }
-                            _ => Some(String::new()),
-                        }
-                    };
-                    row.push(val);
-                }
-                rows.push(row);
-            }
-        }
-        Ok((schema_desc, rows))
-    }
-}
-
-fn build_record_batch(
-    schema_desc: &[HashMap<String, String>],
-    rows: &[Vec<Option<String>>],
-) -> ArrowQueryResult {
-    let fields: Vec<Field> = schema_desc
-        .iter()
-        .map(|c| Field::new(c.get("name").unwrap(), DataType::Utf8, true))
-        .collect();
-
-    let mut builders: Vec<StringBuilder> = fields.iter().map(|_| StringBuilder::new()).collect();
-
-    for row in rows {
-        for (i, val) in row.iter().enumerate() {
-            match val {
-                Some(v) => builders[i].append_value(v),
-                None => builders[i].append_null(),
-            }
-        }
-    }
-
-    let arrays: Vec<ArrayRef> = builders
-        .into_iter()
-        .map(|mut b| Arc::new(b.finish()) as ArrayRef)
-        .collect();
-    let schema = Arc::new(Schema::new(fields));
-    let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
-    (vec![batch], schema)
-}
-
 
 fn arrow_to_pg_rows(
     batches: Vec<RecordBatch>,
@@ -479,7 +321,7 @@ impl PythonWorker {
                                     kwargs.set_item("do_describe", do_describe).unwrap();
 
                                     // Connection identifier
-                                    kwargs.set_item("connection_id", connection_id).unwrap();
+                                    kwargs.set_item("connection_id", connection_id).unwrap();                                    
 
                                     // Add query_args if present
                                     if let (Some(params), Some(param_types)) = (&params, &param_types) {
@@ -587,8 +429,8 @@ impl PythonWorker {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-    ) -> (Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>) {
-        let (tx, rx) = oneshot::channel();
+    ) -> ArrowQueryResult {
+        let (tx, rx) = oneshot::channel::<ArrowQueryResult>();
         debug!("[RUST] Sending query to worker: {}", query);
 
         self.sender
@@ -604,9 +446,10 @@ impl PythonWorker {
 
         rx.await.unwrap_or_else(|e| {
             error!("[RUST] Worker failed: {:?}", e);
-            (vec![], vec![])
+            (Vec::new(), Arc::new(Schema::empty()))
         })
     }
+
 
     pub async fn on_connect(&self, connection_id: u64, ip: String, port: u16) -> bool {
         let (tx, rx) = oneshot::channel();
@@ -694,10 +537,10 @@ impl QueryRunner for RouterQueryRunner {
             let py_worker = py_worker.clone();
             let sql_owned = sql.to_string();
             async move {
-                let (schema_desc, rows) = py_worker
+                let res = py_worker
                     .on_query(sql_owned, p, t, do_describe, connection_id)
-                    .await;
-                Ok(build_record_batch(&schema_desc, &rows))
+                    .await;                  // already ArrowQueryResult
+                Ok(res)
             }
         };
 
@@ -709,6 +552,7 @@ struct DirectQueryRunner {
     py_worker: Arc<PythonWorker>,
 }
 
+
 #[async_trait]
 impl QueryRunner for DirectQueryRunner {
     async fn execute(
@@ -719,11 +563,11 @@ impl QueryRunner for DirectQueryRunner {
         do_describe: bool,
         connection_id: u64,
     ) -> datafusion::error::Result<ArrowQueryResult> {
-        let (desc, rows) = self
-            .py_worker
-            .on_query(query, params, param_types, do_describe, connection_id)
-            .await;
-        Ok(build_record_batch(&desc, &rows))
+        Ok(
+            self.py_worker
+                .on_query(query, params, param_types, do_describe, connection_id)
+                .await,                     // ArrowQueryResult, no rebuilding
+        )
     }
 }
 
@@ -862,7 +706,6 @@ impl SimpleQueryHandler for RiffqProcessor {
 
 
         debug!("[PGWIRE] do_query called with: {}", query);
-        // let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
         let connection_id = _client
             .metadata()
             .get("connection_id")

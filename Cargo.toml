@@ -17,7 +17,6 @@ codegen-units = 4
 
 [dependencies]
 pyo3 = { version = "0.20", features = ["extension-module"] }
-pyo3-asyncio = { version = "0.20", features = ["tokio-runtime"] }
 
 pgwire = "0.28.0"
 bytes = "1.5"

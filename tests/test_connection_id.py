@@ -10,16 +10,24 @@ import psycopg
 import unittest
 from helpers import _ensure_riffq_built
 
+import pyarrow as pa
 
 def _run_server(port: int):
     import riffq
+    from riffq.helpers import to_arrow
 
-    def handle_query(sql, callback, **kwargs):
-        conn_id = kwargs.get("connection_id")
+    def handle_query(sql, callback, **kw):
         if sql.strip().lower() == "select conn_id":
-            callback(([{"name": "id", "type": "int"}], [[int(conn_id)]]))
+            capsule = to_arrow(
+                [{"name": "id",  "type": "int"}],
+                [[int(kw["connection_id"])]],
+            )
         else:
-            callback(([{"name": "val", "type": "int"}], [[1]]))
+            capsule = to_arrow(
+                [{"name": "val", "type": "int"}],
+                [[1]],
+            )
+        callback(capsule)
 
     server = riffq.Server(f"127.0.0.1:{port}")
     server.on_query(handle_query)

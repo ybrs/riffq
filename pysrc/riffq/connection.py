@@ -14,6 +14,7 @@ class BaseConnection:
         if hasattr(reader, "__arrow_c_stream__"):
             capsule = reader.__arrow_c_stream__()
         else:
+            # old pyarrow support
             from pyarrow.cffi import export_stream
             capsule = export_stream(reader)
         callback(capsule)
@@ -25,11 +26,9 @@ class BaseConnection:
         )
 
     def handle_auth(self, user, password, host, database=None, callback=callable):
-        print("conn_id onauth:", self.conn_id, user, password, database)
         return callback(user == "user" and password == "secret")
 
     def handle_connect(self, ip, port, callback=callable):
-        print("conn_id onconnect:", self.conn_id, ip, port)
         return callback(True)
 
 

@@ -17,7 +17,6 @@ codegen-units = 4
 
 [dependencies]
 pyo3 = { version = "0.20", features = ["extension-module"] }
-pyo3-asyncio = { version = "0.20", features = ["tokio-runtime"] }
 
 pgwire = "0.28.0"
 bytes = "1.5"
@@ -36,7 +35,5 @@ datafusion = "47.0.0"
 datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", branch = "main", package = "datafusion_pg_catalog" }
 env_logger = "0.11.8"
 
-[features]
-default = []
-zero_copy = []
+
 

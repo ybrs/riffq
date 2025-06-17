@@ -11,9 +11,10 @@ from helpers import _ensure_riffq_built
 
 def _run_server(port: int):
     import riffq
+    from riffq.helpers import to_arrow
 
     def handle_query(sql, callback, **kwargs):
-        callback(([{"name": "val", "type": "int"}], [[1]]))
+        callback(to_arrow([{"name": "val", "type": "int"}], [[1]]))
 
     def handle_auth(conn_id, user, password, host, *, callback, database=None):
         callback(user == "user" and password == "secret")

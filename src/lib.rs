@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use pyo3::{FromPyObject, PyAny};
+use pyo3::{PyAny, Bound, IntoPyObjectExt};
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::{Sink, SinkExt, StreamExt, Stream};
@@ -117,8 +117,14 @@ impl CallbackWrapper {
         if let Some(sender) = self.responder.lock().unwrap().take() {
             Python::with_gil(|py| {
                 // Try Arrow C stream pointer first
-                debug!("[RUST] result python type: {}", result.as_ref(py).get_type().name().unwrap_or("<unknown>"));
-                if let Ok(capsule) = result.extract::<&PyCapsule>(py) {
+                let result_bound = result.bind(py);
+                let type_name = result_bound
+                    .get_type()
+                    .name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "<unknown>".to_string());
+                debug!("[RUST] result python type: {}", type_name);
+                if let Ok(capsule) = result_bound.extract::<Bound<PyCapsule>>() {
                     debug!("[RUST] received PyCapsule");
                     let ptr = capsule.pointer() as *mut c_void;
 
@@ -145,7 +151,7 @@ impl CallbackWrapper {
                 // First try to treat the result as Arrow IPC bytes. When the
                 // callback returns bytes we assume they contain an Arrow IPC
                 // stream produced by ``pyarrow``.
-                if let Ok(pybytes) = result.extract::<&pyo3::types::PyBytes>(py) {
+                if let Ok(pybytes) = result_bound.extract::<Bound<pyo3::types::PyBytes>>() {
                     let data = pybytes.as_bytes();
                     let cursor = std::io::Cursor::new(data);
                     let mut reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).unwrap();
@@ -156,20 +162,19 @@ impl CallbackWrapper {
                 }
 
                 // Fallback: assume (schema_desc, rows) tuple, build batches
-                let parsed: PyResult<(Vec<HashMap<String, String>>, Vec<Vec<PyObject>>)> = result.extract(py);
+                let parsed: PyResult<(Vec<HashMap<String, String>>, Vec<Vec<PyObject>>)> = result_bound.extract::<(Vec<HashMap<String, String>>, Vec<Vec<PyObject>>)>() ;
                 if let Ok((schema_desc, py_rows)) = parsed {
                     // turn PyObjects into Rust Option<String>
                     let rows: Vec<Vec<Option<String>>> = py_rows.into_iter()
                         .map(|row| {
                             row.into_iter()
                                 .map(|val| {
-                                    Python::with_gil(|py| {
-                                        if val.as_ref(py).is_none() {
-                                            None
-                                        } else {
-                                            val.extract::<String>(py).ok()
-                                        }
-                                    })
+                                    let val_bound = val.bind(py);
+                                    if val_bound.is_none() {
+                                        None
+                                    } else {
+                                        val_bound.extract::<String>().ok()
+                                    }
                                 })
                                 .collect()
                         })
@@ -341,7 +346,13 @@ impl PythonWorker {
                     Ok(msg) => match msg {
                         WorkerMessage::Query { query, params, param_types, do_describe, connection_id, responder } => {
                             debug!("[PY_WORKER] received query: {}", query);
-                            let cb_opt = query_cb.lock().unwrap().clone();
+                            let cb_opt = Python::with_gil(|py| {
+                                query_cb
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .map(|cb| cb.clone_ref(py))
+                            });
 
                             if let Some(cb) = cb_opt {
                                 Python::with_gil(|py| {
@@ -350,7 +361,10 @@ impl PythonWorker {
                                         responder: Arc::new(Mutex::new(Some(responder))),
                                     }).unwrap();
 
-                                    let args = PyTuple::new(py, &[query.into_py(py), wrapper.into_py(py)]);
+                                    let args = PyTuple::new(py, [
+                                        query.clone().into_py_any(py).unwrap(),
+                                        wrapper.clone_ref(py).into_py_any(py).unwrap(),
+                                    ]).unwrap();
                                     let kwargs = PyDict::new(py);
 
                                     // Add do_describe flag
@@ -363,44 +377,53 @@ impl PythonWorker {
                                     if let (Some(params), Some(param_types)) = (&params, &param_types) {
                                         let py_args = PyList::empty(py);
                                         for (val, ty) in params.iter().zip(param_types.iter()) {
-                                            let py_obj = match val {
-                                                None => py.None(),
+                                            match val {
+                                                None => {
+                                                    py_args.append(py.None()).unwrap();
+                                                }
                                                 Some(bytes) => {
                                                     let mut buf = &bytes[..];
                                                     match ty {
-                                                        &Type::INT2 => i16::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
-                                                        &Type::INT4 => i32::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
-                                                        &Type::INT8 => i64::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
-                                                        &Type::FLOAT4 => f32::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
-                                                        &Type::FLOAT8 => f64::from_sql(ty, &mut buf).map(|v| v.into_py(py)),
-                                                        &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR => {
-                                                            String::from_sql(ty, &mut buf).map(|v| v.into_py(py))
-                                                        }
-                                                        _ => Ok(py.None()),
-                                                    }.unwrap_or_else(|_| py.None())
+                                                        &Type::INT2 => if let Ok(v) = i16::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
+                                                        &Type::INT4 => if let Ok(v) = i32::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
+                                                        &Type::INT8 => if let Ok(v) = i64::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
+                                                        &Type::FLOAT4 => if let Ok(v) = f32::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
+                                                        &Type::FLOAT8 => if let Ok(v) = f64::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
+                                                        &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR => if let Ok(v) = String::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
+                                                        _ => { py_args.append(py.None()).unwrap(); }
+                                                    }
                                                 }
-                                            };
-                                            py_args.append(py_obj).unwrap();
+                                            }
                                         }
 
                                         kwargs.set_item("query_args", py_args).unwrap();
                                     }
 
-                                    let _ = cb.call(py, args, Some(kwargs));
+                                    let _ = cb.call(py, args, Some(&kwargs));
                                 });
                             }
                         }
                         WorkerMessage::Connect { connection_id, ip, port, responder } => {
-                            let cb_opt = connect_cb.lock().unwrap().clone();
+                            let cb_opt = Python::with_gil(|py| {
+                                connect_cb
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .map(|cb| cb.clone_ref(py))
+                            });
                             if let Some(cb) = cb_opt {
                                 Python::with_gil(|py| {
                                     let wrapper = Py::new(py, BoolCallbackWrapper {
                                         responder: Arc::new(Mutex::new(Some(responder))),
                                     }).unwrap();
-                                    let args = PyTuple::new(py, &[connection_id.into_py(py), ip.into_py(py), port.into_py(py)]);
+                                    let args = PyTuple::new(py, [
+                                        connection_id.into_py_any(py).unwrap(),
+                                        ip.clone().into_py_any(py).unwrap(),
+                                        port.into_py_any(py).unwrap(),
+                                    ]).unwrap();
                                     let kwargs = PyDict::new(py);
-                                    kwargs.set_item("callback", wrapper.into_py(py)).unwrap();
-                                    if let Err(e) = cb.call(py, args, Some(kwargs)) {
+                                    kwargs.set_item("callback", wrapper.clone_ref(py)).unwrap();
+                                    if let Err(e) = cb.call(py, args, Some(&kwargs)) {
                                         e.print(py);
                                     }
                                 });
@@ -409,10 +432,20 @@ impl PythonWorker {
                             }
                         }
                         WorkerMessage::Disconnect { connection_id, ip, port } => {
-                            let cb_opt = disconnect_cb.lock().unwrap().clone();
+                            let cb_opt = Python::with_gil(|py| {
+                                disconnect_cb
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .map(|cb| cb.clone_ref(py))
+                            });
                             if let Some(cb) = cb_opt {
                                 Python::with_gil(|py| {
-                                    let args = PyTuple::new(py, &[connection_id.into_py(py), ip.into_py(py), port.into_py(py)]);
+                                    let args = PyTuple::new(py, [
+                                        connection_id.into_py_any(py).unwrap(),
+                                        ip.clone().into_py_any(py).unwrap(),
+                                        port.into_py_any(py).unwrap(),
+                                    ]).unwrap();
                                     if let Err(e) = cb.call1(py, args) {
                                         e.print(py);
                                     }
@@ -420,24 +453,30 @@ impl PythonWorker {
                             }
                         }
                         WorkerMessage::Authentication { connection_id, user, database, host, password, responder } => {
-                            let cb_opt = auth_cb_thread.lock().unwrap().clone();
+                            let cb_opt = Python::with_gil(|py| {
+                                auth_cb_thread
+                                    .lock()
+                                    .unwrap()
+                                    .as_ref()
+                                    .map(|cb| cb.clone_ref(py))
+                            });
                             if let Some(cb) = cb_opt {
                                 Python::with_gil(|py| {
                                     let wrapper = Py::new(py, BoolCallbackWrapper {
                                         responder: Arc::new(Mutex::new(Some(responder))),
                                     }).unwrap();
-                                    let args = PyTuple::new(py, &[
-                                        connection_id.into_py(py),
-                                        user.into_py(py),
-                                        password.into_py(py),
-                                        host.into_py(py),
-                                    ]);
+                                    let args = PyTuple::new(py, [
+                                        connection_id.into_py_any(py).unwrap(),
+                                        user.clone().into_py_any(py).unwrap(),
+                                        password.clone().into_py_any(py).unwrap(),
+                                        host.clone().into_py_any(py).unwrap(),
+                                    ]).unwrap();
                                     let kwargs = PyDict::new(py);
-                                    kwargs.set_item("callback", wrapper.into_py(py)).unwrap();
+                                    kwargs.set_item("callback", wrapper.clone_ref(py)).unwrap();
                                     if let Some(db) = database {
                                         kwargs.set_item("database", db).unwrap();
                                     }
-                                    if let Err(e) = cb.call(py, args, Some(kwargs)) {
+                                    if let Err(e) = cb.call(py, args, Some(&kwargs)) {
                                         e.print(py);
                                     }
                                 });
@@ -1119,9 +1158,9 @@ impl Server {
 }
 
 #[pymodule]
-fn _riffq(_py: Python, m: &PyModule) -> PyResult<()> {
+fn _riffq(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).try_init();
 
-    m.add_class::<Server>()?;
+    module.add_class::<Server>()?;
     Ok(())
 }

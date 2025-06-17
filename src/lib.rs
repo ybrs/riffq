@@ -121,6 +121,15 @@ impl CallbackWrapper {
                 if let Ok(capsule) = result.extract::<&PyCapsule>(py) {
                     debug!("[RUST] received PyCapsule");
                     let ptr = capsule.pointer() as *mut c_void;
+
+                    // `ptr` is a live ArrowArrayStream* produced by PyArrow
+                    // (CallbackWrapper received it directly from Python).
+                    // ArrowArrayStreamReader takes ownership and will call `release`
+                    // *when the reader itself is dropped*.  We read every batch,
+                    // clone them into `batches`, clone the schema, and only then let
+                    // `reader` fall out of scope, so the underlying C buffers stay
+                    // alive as long as any RecordBatch/Schema clones do.  No
+                    // use-after-free possible.
                     unsafe {
                         let mut reader = ArrowArrayStreamReader::from_raw(ptr as *mut _).unwrap();
                         let mut batches = Vec::new();

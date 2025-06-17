@@ -614,17 +614,17 @@ impl QueryRunner for RouterQueryRunner {
     ) -> datafusion::error::Result<ArrowQueryResult> {
         let ctx = self.catalog_ctx.clone();
         let py_worker = self.py_worker.clone();
-        let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
+        let handler = move |_ctx: &SessionContext, sql: &str, params, param_types| {
             let py_worker = py_worker.clone();
             let sql_owned = sql.to_string();
             async move {
                 let res = py_worker
-                    .on_query(sql_owned, p, t, do_describe, connection_id)
-                    .await;                  // already ArrowQueryResult
+                    .on_query(sql_owned, params, param_types, do_describe, connection_id)
+                    .await;
                 Ok(res)
             }
         };
-
+        println!("dispatching query");
         dispatch_query(&ctx, &query, params, param_types, handler).await
     }
 }
@@ -1114,6 +1114,7 @@ impl Server {
             let (ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
             let catalog_ctx = Arc::new(ctx);
             let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
+                println!("enabled catalog emulation");
                 Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: catalog_ctx.clone() })
             } else {
                 Arc::new(DirectQueryRunner { py_worker: py_worker.clone() })

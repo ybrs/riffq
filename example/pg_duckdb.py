@@ -5,10 +5,10 @@ import riffq
 logging.basicConfig(level=logging.DEBUG)
 
 class Connection(riffq.BaseConnection):
-    def _handle_query(self, sql, callback, **kwargs):
+    def _handle_query(self, sql, query_args, callback, **kwargs):
         cur = duckdb_con.cursor()
         text = sql.strip().lower().split(';')[0]
-
+        print("---> sql text", text)
         if text == "select pg_catalog.version()":
             batch = self.arrow_batch(
                 [pa.array(["PostgreSQL 14.13"])],
@@ -48,8 +48,11 @@ class Connection(riffq.BaseConnection):
             )
             self.send_reader(batch, callback)
 
-    def handle_query(self, sql, callback, **kwargs):
-        self.executor.submit(self._handle_query, sql, callback, **kwargs)
+    def handle_query(self, sql, query_args=None, callback=None, **kwargs):
+        self.executor.submit(self._handle_query, sql, query_args, callback, **kwargs)
+
+    def handle_auth(self, user, password, host, database=None, callback=callable) -> None:
+        callback(True)
 
 def main():
     global duckdb_con
@@ -63,7 +66,8 @@ def main():
     )
     server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
     server.set_tls("certs/server.crt", "certs/server.key")
-    server.start()
+    
+    server.start(catalog_emulation=True)
 
 if __name__ == "__main__":
     main()

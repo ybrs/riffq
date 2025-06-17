@@ -2,6 +2,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import pyarrow as pa
 from ._riffq import Server
+from abc import ABC, abstractmethod
+
 
 class BaseConnection:
     conn_id = None
@@ -15,7 +17,7 @@ class BaseConnection:
             capsule = reader.__arrow_c_stream__()
         else:
             # old pyarrow support
-            from pyarrow.cffi import export_stream
+            from pyarrow.cffi import export_stream # type: ignore
             capsule = export_stream(reader)
         callback(capsule)
 
@@ -25,12 +27,19 @@ class BaseConnection:
             [pa.record_batch(values, names=names)],
         )
 
+    @abstractmethod
     def handle_auth(self, user, password, host, database=None, callback=callable):
-        return callback(user == "user" and password == "secret")
-
+        """
+            return callback(user == "user" and password == "secret")
+        """
+        pass
+        
     def handle_connect(self, ip, port, callback=callable):
         return callback(True)
 
+    @abstractmethod
+    def handle_query(self, sql, query_args=None, callback=callable, **kwargs):
+        pass
 
 class RiffqServer:
     def __init__(self, listen_addr, connection_cls=BaseConnection):
@@ -67,5 +76,5 @@ class RiffqServer:
         conn = self.get_connection(conn_id=conn_id)
         conn.handle_query(sql, callback=callback)
 
-    def start(self):
-        return self.server.start()
+    def start(self, catalog_emulation=False):
+        return self.server.start(catalog_emulation=catalog_emulation)

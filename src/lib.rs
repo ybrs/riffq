@@ -17,7 +17,7 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 use log::{debug, error, info};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,7 +34,13 @@ use arrow::record_batch::RecordBatchReader;
 use arrow::datatypes::{DataType, Field, Schema, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
 use arrow::array::{ArrayRef, StringBuilder};
 use datafusion::execution::context::SessionContext;
-use datafusion_pg_catalog::{dispatch_query, get_base_session_context};
+use datafusion_pg_catalog::{
+    dispatch_query,
+    get_base_session_context,
+    register_user_database,
+    register_user_tables,
+    ColumnDef,
+};
 use postgres_types::FromSql;
 
 use chrono::{DateTime, Duration, NaiveDate};
@@ -1043,6 +1049,8 @@ pub struct Server {
     on_disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_authentication_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     tls_acceptor: Arc<Mutex<Option<Arc<TlsAcceptor>>>>,
+    user_databases: Arc<Mutex<Vec<String>>>,
+    user_tables: Arc<Mutex<Vec<(String, Vec<BTreeMap<String, ColumnDef>>)>>>,
 }
 
 #[pymethods]
@@ -1056,6 +1064,8 @@ impl Server {
             on_disconnect_cb: Arc::new(Mutex::new(None)),
             on_authentication_cb: Arc::new(Mutex::new(None)),
             tls_acceptor: Arc::new(Mutex::new(None)),
+            user_databases: Arc::new(Mutex::new(Vec::new())),
+            user_tables: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -1073,6 +1083,20 @@ impl Server {
 
     fn on_authentication(&mut self, _py: Python, cb: Py<PyAny>) {
         *self.on_authentication_cb.lock().unwrap() = Some(cb);
+    }
+
+    fn register_database(&mut self, db_name: String) {
+        self.user_databases.lock().unwrap().push(db_name);
+    }
+
+    fn register_table(&mut self, table_name: String, columns: Vec<(String, String, bool)>) {
+        let mut cols = Vec::with_capacity(columns.len());
+        for (name, col_type, nullable) in columns {
+            let mut map = BTreeMap::new();
+            map.insert(name, ColumnDef { col_type, nullable });
+            cols.push(map);
+        }
+        self.user_tables.lock().unwrap().push((table_name, cols));
     }
 
     fn set_tls(&mut self, cert_path: String, key_path: String) -> PyResult<()> {
@@ -1099,6 +1123,8 @@ impl Server {
         let connect_cb = self.on_connect_cb.clone();
         let disconnect_cb = self.on_disconnect_cb.clone();
         let auth_cb = self.on_authentication_cb.clone();
+        let user_dbs = self.user_databases.clone();
+        let user_tables = self.user_tables.clone();
 
         if query_cb.lock().unwrap().is_none() {
             panic!("No callback set. Use on_query() before starting the server.");
@@ -1112,6 +1138,12 @@ impl Server {
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
             let (ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
+            for db in user_dbs.lock().unwrap().iter() {
+                register_user_database(&ctx, db).await.unwrap();
+            }
+            for (tbl, cols) in user_tables.lock().unwrap().iter() {
+                register_user_tables(&ctx, tbl, cols.clone()).await.unwrap();
+            }
             let catalog_ctx = Arc::new(ctx);
             let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
                 Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: catalog_ctx.clone() })

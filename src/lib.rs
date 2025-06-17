@@ -8,7 +8,7 @@ use tokio::signal;
 use tokio::sync::oneshot;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use tokio::net::TcpStream;
-use pyo3::types::{PyDict, PyList, PyTuple, PyCapsule};
+use pyo3::types::{PyDict, PyList, PyTuple, PyCapsule, PyDictMethods};
 use std::fs::File;
 use std::io::{BufReader, Error as IOError, ErrorKind};
 use rustls_pemfile::{certs, pkcs8_private_keys};
@@ -17,7 +17,7 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 use log::{debug, error, info};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,7 +34,14 @@ use arrow::record_batch::RecordBatchReader;
 use arrow::datatypes::{DataType, Field, Schema, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
 use arrow::array::{ArrayRef, StringBuilder};
 use datafusion::execution::context::SessionContext;
-use datafusion_pg_catalog::{dispatch_query, get_base_session_context};
+use datafusion_pg_catalog::{
+    dispatch_query,
+    get_base_session_context,
+    register_user_database,
+    register_schema,
+    register_user_tables,
+    ColumnDef,
+};
 use postgres_types::FromSql;
 
 use chrono::{DateTime, Duration, NaiveDate};
@@ -97,6 +104,14 @@ struct CallbackWrapper {
 #[pyclass]
 struct BoolCallbackWrapper {
     responder: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+}
+
+#[derive(Clone)]
+struct TableRegistration {
+    database: String,
+    schema: String,
+    table: String,
+    columns: Vec<BTreeMap<String, ColumnDef>>,
 }
 
 #[pymethods]
@@ -1043,6 +1058,9 @@ pub struct Server {
     on_disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_authentication_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     tls_acceptor: Arc<Mutex<Option<Arc<TlsAcceptor>>>>,
+    databases: Arc<Mutex<Vec<String>>>,
+    schemas: Arc<Mutex<Vec<(String, String)>>>,
+    tables: Arc<Mutex<Vec<TableRegistration>>>,
 }
 
 #[pymethods]
@@ -1056,6 +1074,9 @@ impl Server {
             on_disconnect_cb: Arc::new(Mutex::new(None)),
             on_authentication_cb: Arc::new(Mutex::new(None)),
             tls_acceptor: Arc::new(Mutex::new(None)),
+            databases: Arc::new(Mutex::new(Vec::new())),
+            schemas: Arc::new(Mutex::new(Vec::new())),
+            tables: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -1085,6 +1106,40 @@ impl Server {
         }
     }
 
+    fn register_database(&mut self, _py: Python, database: String) {
+        self.databases.lock().unwrap().push(database);
+    }
+
+    fn register_schema(&mut self, _py: Python, database: String, schema: String) {
+        self.schemas.lock().unwrap().push((database, schema));
+    }
+
+    fn register_table<'py>(
+        &mut self,
+        _py: Python<'py>,
+        database: String,
+        schema: String,
+        table: String,
+        columns: &Bound<'py, PyDict>,
+    ) -> PyResult<()> {
+        let mut cols = Vec::new();
+        for (name, def) in columns.iter() {
+            let col_name: String = name.extract()?;
+            let (col_type, nullable): (String, bool) = def.extract()?;
+            let mut map = BTreeMap::new();
+            map.insert(col_name, ColumnDef { col_type, nullable });
+            cols.push(map);
+        }
+        let reg = TableRegistration {
+            database,
+            schema,
+            table,
+            columns: cols,
+        };
+        self.tables.lock().unwrap().push(reg);
+        Ok(())
+    }
+
 
     #[pyo3(signature = (tls=false, catalog_emulation=false))]
     fn start(&self, py: Python, tls: bool, catalog_emulation: bool) {
@@ -1099,6 +1154,9 @@ impl Server {
         let connect_cb = self.on_connect_cb.clone();
         let disconnect_cb = self.on_disconnect_cb.clone();
         let auth_cb = self.on_authentication_cb.clone();
+        let reg_dbs = self.databases.clone();
+        let reg_schemas = self.schemas.clone();
+        let reg_tables = self.tables.clone();
 
         if query_cb.lock().unwrap().is_none() {
             panic!("No callback set. Use on_query() before starting the server.");
@@ -1113,6 +1171,24 @@ impl Server {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
             let (ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
             let catalog_ctx = Arc::new(ctx);
+
+            for db in reg_dbs.lock().unwrap().clone() {
+                register_user_database(&catalog_ctx, &db).await.unwrap();
+            }
+            for (db, sch) in reg_schemas.lock().unwrap().clone() {
+                register_schema(&catalog_ctx, &db, &sch).await.unwrap();
+            }
+            for tbl in reg_tables.lock().unwrap().clone() {
+                register_user_tables(
+                    &catalog_ctx,
+                    &tbl.database,
+                    &tbl.schema,
+                    &tbl.table,
+                    tbl.columns,
+                )
+                .await
+                .unwrap();
+            }
             let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
                 Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: catalog_ctx.clone() })
             } else {

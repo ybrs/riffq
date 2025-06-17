@@ -9,4 +9,7 @@ __pycache__/
 venv/
 duckdata.*
 example/data/*
-+riffq/_riffq*.so
+riffq/_riffq*.so
+
+.venv/
+pysrc/riffq/_riffq*.so

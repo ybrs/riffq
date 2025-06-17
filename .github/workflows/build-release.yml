@@ -1,0 +1,43 @@
+name: build-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.4.0)'
+        required: true
+      prerelease:
+        description: 'Mark as pre-release'
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: PyO3/maturin-action@v1
+      with:
+        command: build
+        args: --release
+    - uses: actions/upload-artifact@v4
+      with:
+        name: wheels
+        path: target/wheels/*.whl
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: wheels
+    - uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ github.event.inputs.tag }}
+        prerelease: ${{ github.event.inputs.prerelease }}
+        files: |
+          *.whl

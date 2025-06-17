@@ -41,7 +41,7 @@ use chrono::{NaiveDate, NaiveDateTime, Duration};
 use arrow::datatypes::TimeUnit;
 
 
-use pgwire::api::auth::{LoginInfo, DefaultServerParameterProvider, StartupHandler, finish_authentication};
+use pgwire::api::auth::{finish_authentication, DefaultServerParameterProvider, StartupHandler};
 use pgwire::api::PgWireConnectionState;
 use pgwire::api::copy::NoopCopyHandler;
 use pgwire::api::query::{SimpleQueryHandler, ExtendedQueryHandler};
@@ -199,38 +199,65 @@ impl CallbackWrapper {
     }
 }
 
+use std::pin::Pin;
+use futures::stream;
 fn arrow_to_pg_rows(
     batches: Vec<RecordBatch>,
     schema: Arc<Schema>,
-) -> (Arc<Vec<FieldInfo>>, impl Stream<Item = PgWireResult<DataRow>>) {
-    let mut fields = Vec::new();
-    for field in schema.fields() {
-        fields.push(FieldInfo::new(
-            field.name().clone().into(),
-            None,
-            None,
-            arrow_type_to_pgwire(field.data_type()),
-            FieldFormat::Text,
-        ));
-    }
-    let schema_arc = Arc::new(fields);
-    let schema_ref = schema_arc.clone();
+) -> (
+    Arc<Vec<FieldInfo>>,
+    Pin<Box<dyn Stream<Item = PgWireResult<DataRow>> + Send>>,
+) {
+    // column metadata
+    let field_defs: Arc<Vec<FieldInfo>> = Arc::new(
+        schema
+            .fields()
+            .iter()
+            .map(|f| {
+                FieldInfo::new(
+                    f.name().clone().into(),
+                    None,
+                    None,
+                    arrow_type_to_pgwire(f.data_type()),
+                    FieldFormat::Text,
+                )
+            })
+            .collect(),
+    );
 
-    let mut rows = Vec::new();
-    for batch in batches {
-        let columns = batch.columns().to_vec();
-        let row_count = batch.num_rows();
-        for i in 0..row_count {
-            let mut encoder = DataRowEncoder::new(schema_ref.clone());
-            for col in &columns {
-                encode_arrow_value(&mut encoder, col.as_ref(), i).unwrap();
+    // lazy row stream
+    let row_stream = stream::unfold((0usize, batches), {
+        let meta_outer = field_defs.clone();          // captured by outer FnMut
+        move |(mut row_idx, mut remaining_batches)| {
+            // clone **inside** so the async move owns its copy
+            let meta = meta_outer.clone();
+            async move {
+                loop {
+                    if remaining_batches.is_empty() {
+                        return None;
+                    }
+                    if row_idx == remaining_batches[0].num_rows() {
+                        remaining_batches.remove(0);
+                        row_idx = 0;
+                        continue;
+                    }
+
+                    let batch = &remaining_batches[0];
+                    let mut enc = DataRowEncoder::new(meta.clone());
+                    for col in batch.columns() {
+                        if let Err(e) = encode_arrow_value(&mut enc, col.as_ref(), row_idx) {
+                            return Some((Err(e), (row_idx + 1, remaining_batches)));
+                        }
+                    }
+                    let row = enc.finish();
+                    return Some((row, (row_idx + 1, remaining_batches)));
+                }
             }
-            rows.push(encoder.finish());
         }
-    }
+    });
 
-    let stream = futures::stream::iter(rows);
-    (schema_arc, stream)
+    // pin + box so it is Unpin
+    (field_defs, Box::pin(row_stream))
 }
 
 fn encode_arrow_value(

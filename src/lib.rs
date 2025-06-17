@@ -18,6 +18,7 @@ use tokio_rustls::TlsAcceptor;
 use log::{debug, error, info};
 
 use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::mpsc::{channel, Sender};
 use std::thread;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,7 +35,14 @@ use arrow::record_batch::RecordBatchReader;
 use arrow::datatypes::{DataType, Field, Schema, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
 use arrow::array::{ArrayRef, StringBuilder};
 use datafusion::execution::context::SessionContext;
-use datafusion_pg_catalog::{dispatch_query, get_base_session_context};
+use datafusion_pg_catalog::{
+    dispatch_query,
+    get_base_session_context,
+    register_user_database,
+    register_schema,
+    register_user_tables,
+    ColumnDef,
+};
 use postgres_types::FromSql;
 
 use chrono::{DateTime, Duration, NaiveDate};
@@ -1043,6 +1051,9 @@ pub struct Server {
     on_disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_authentication_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     tls_acceptor: Arc<Mutex<Option<Arc<TlsAcceptor>>>>,
+    databases: Vec<String>,
+    schemas: Vec<(String, String)>,
+    tables: Vec<(String, String, String, Vec<BTreeMap<String, ColumnDef>>)>,
 }
 
 #[pymethods]
@@ -1056,6 +1067,9 @@ impl Server {
             on_disconnect_cb: Arc::new(Mutex::new(None)),
             on_authentication_cb: Arc::new(Mutex::new(None)),
             tls_acceptor: Arc::new(Mutex::new(None)),
+            databases: Vec::new(),
+            schemas: Vec::new(),
+            tables: Vec::new(),
         }
     }
 
@@ -1085,6 +1099,50 @@ impl Server {
         }
     }
 
+    fn register_database(&mut self, database_name: String) {
+        self.databases.push(database_name);
+    }
+
+    fn register_schema(&mut self, database_name: String, schema_name: String) {
+        self.schemas.push((database_name, schema_name));
+    }
+
+    fn register_table(
+        &mut self,
+        _py: Python,
+        database_name: String,
+        schema_name: String,
+        table_name: String,
+        columns: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let list: &Bound<'_, PyList> = columns.downcast()?;
+        let mut cols: Vec<BTreeMap<String, ColumnDef>> = Vec::new();
+        for item in list.iter() {
+            let mapping: &Bound<'_, PyDict> = item.downcast()?;
+            if mapping.len() != 1 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "each column must be a single-key dict",
+                ));
+            }
+            let (name, def_obj) = mapping.iter().next().unwrap();
+            let name_str: String = name.extract()?;
+            let def_dict: &Bound<'_, PyDict> = def_obj.downcast()?;
+            let col_type: String = def_dict
+                .get_item("type")?
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("missing type"))?
+                .extract()?;
+            let nullable: bool = def_dict
+                .get_item("nullable")?
+                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("missing nullable"))?
+                .extract()?;
+            let mut m = BTreeMap::new();
+            m.insert(name_str, ColumnDef { col_type, nullable });
+            cols.push(m);
+        }
+        self.tables.push((database_name, schema_name, table_name, cols));
+        Ok(())
+    }
+
 
     #[pyo3(signature = (tls=false, catalog_emulation=false))]
     fn start(&self, py: Python, tls: bool, catalog_emulation: bool) {
@@ -1112,6 +1170,17 @@ impl Server {
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
             let (ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
+
+            for db in &self.databases {
+                register_user_database(&ctx, db).await.unwrap();
+            }
+            for (db, schema) in &self.schemas {
+                register_schema(&ctx, db, schema).await.unwrap();
+            }
+            for (db, schema, table, cols) in &self.tables {
+                register_user_tables(&ctx, db, schema, table, cols.clone()).await.unwrap();
+            }
+
             let catalog_ctx = Arc::new(ctx);
             let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
                 Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: catalog_ctx.clone() })

@@ -12,13 +12,14 @@ from helpers import _ensure_riffq_built
 
 def _run_server_tls(port: int, cert: str, key: str):
     import riffq
+    from riffq.helpers import to_arrow
 
     def handle_query(sql, callback, **kwargs):
         args = kwargs.get("query_args")
 
         sql_clean = sql.strip().lower()
         if sql_clean == "select 1":
-            callback(([{"name": "val", "type": "int"}], [[1]]) )
+            callback(to_arrow([{"name": "val", "type": "int"}], [[1]]) )
             return
         if args:
             value = int(args[0])
@@ -26,7 +27,7 @@ def _run_server_tls(port: int, cert: str, key: str):
             value = int(sql_clean[7:])
         else:
             value = 1
-        callback(([{"name": "val", "type": "int"}], [[value]]))
+        callback(to_arrow([{"name": "val", "type": "int"}], [[value]]))
 
     server = riffq.Server(f"127.0.0.1:{port}")
     server.on_query(handle_query)

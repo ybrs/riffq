@@ -5,3 +5,6 @@
 - Don't remove any existing feature/functionality unless you are explicitly told.
 - Always run tests, if tests fail fix the code. If you can't fix the code, or fail to implement the task, it's fine to fail. You can give up.
 - For any given task add test cases. Don't try to finish the task without any tests. 
+
+- For function parameters never use one letter parameters. Always be descriptive.
+- Try to keep newly added functions less than 100 lines

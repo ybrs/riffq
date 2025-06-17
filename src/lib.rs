@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::{FromPyObject, PyAny};
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
-use futures::{Sink, SinkExt, StreamExt};
+use futures::{Sink, SinkExt, StreamExt, Stream};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::oneshot;
@@ -31,18 +31,22 @@ use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::array::{Array, RecordBatch};
 use arrow::array::cast::AsArray;
 use arrow::record_batch::RecordBatchReader;
-use arrow::datatypes::{DataType, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
+use arrow::datatypes::{DataType, Field, Schema, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
+use arrow::array::{ArrayRef, StringBuilder};
+use datafusion::execution::context::SessionContext;
+use datafusion_pg_catalog::{dispatch_query, get_base_session_context};
 use postgres_types::FromSql;
 
 use chrono::{NaiveDate, NaiveDateTime, Duration};
 use arrow::datatypes::TimeUnit;
 
 
-use pgwire::api::auth::{LoginInfo, DefaultServerParameterProvider, StartupHandler, finish_authentication};
+use pgwire::api::auth::{finish_authentication, DefaultServerParameterProvider, StartupHandler};
 use pgwire::api::PgWireConnectionState;
 use pgwire::api::copy::NoopCopyHandler;
 use pgwire::api::query::{SimpleQueryHandler, ExtendedQueryHandler};
 use pgwire::api::results::{DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
+use pgwire::messages::data::DataRow;
 use pgwire::api::{ClientInfo, ClientPortalStore, NoopErrorHandler, PgWireServerHandlers, Type};
 use pgwire::api::portal::Portal;
 use pgwire::error::{PgWireError, PgWireResult, ErrorInfo};
@@ -52,31 +56,8 @@ use pgwire::messages::response::ErrorResponse;
 use pgwire::tokio::process_socket;
 use pgwire::api::stmt::{StoredStatement, NoopQueryParser};
 
-fn map_python_type_to_pgwire(t: &str) -> Type {
-    match t {
-        "int" => Type::INT8,
-        "float" => Type::FLOAT8,
-        "str" | "string" => Type::VARCHAR,
-        "bool" => Type::BOOL,
-        "date" => Type::DATE,
-        "datetime" => Type::TIMESTAMP,
-        _ => Type::VARCHAR,
-    }
-}
-
-fn map_arrow_type(dt: &DataType) -> &'static str {
-    use DataType::*;
-    match dt {
-        Int8 | Int16 | Int32 | Int64 | UInt8 | UInt16 | UInt32 | UInt64 => "int",
-        Float16 | Float32 | Float64 => "float",
-        Boolean => "bool",
-        Utf8 | LargeUtf8 => "str",
-        Date32 | Date64 => "date",
-        Timestamp(_, _) => "datetime",
-        _ => "str",
-    }
-}
-
+pub mod pg;
+use pg::arrow_type_to_pgwire;
 
 pub enum WorkerMessage {
     Query {
@@ -85,7 +66,7 @@ pub enum WorkerMessage {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-        responder: oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>,
+        responder: oneshot::Sender<ArrowQueryResult>,
     },
     Connect {
         connection_id: u64,
@@ -110,7 +91,7 @@ pub enum WorkerMessage {
 
 #[pyclass]
 struct CallbackWrapper {
-    responder: Arc<Mutex<Option<oneshot::Sender<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>)>>>>,
+    responder: Arc<Mutex<Option<oneshot::Sender<ArrowQueryResult>>>>,  
 }
 
 #[pyclass]
@@ -140,207 +121,202 @@ impl CallbackWrapper {
                 if let Ok(capsule) = result.extract::<&PyCapsule>(py) {
                     debug!("[RUST] received PyCapsule");
                     let ptr = capsule.pointer() as *mut c_void;
-                    if let Ok(res) = arrow_stream_to_rows(ptr) {
-                        let _ = sender.send(res);
-                    } else {
-                        error!("[RUST] arrow_stream_to_rows failed for capsule");
+
+                    // `ptr` is a live ArrowArrayStream* produced by PyArrow
+                    // (CallbackWrapper received it directly from Python).
+                    // ArrowArrayStreamReader takes ownership and will call `release`
+                    // *when the reader itself is dropped*.  We read every batch,
+                    // clone them into `batches`, clone the schema, and only then let
+                    // `reader` fall out of scope, so the underlying C buffers stay
+                    // alive as long as any RecordBatch/Schema clones do.  No
+                    // use-after-free possible.
+                    unsafe {
+                        let mut reader = ArrowArrayStreamReader::from_raw(ptr as *mut _).unwrap();
+                        let mut batches = Vec::new();
+                        while let Some(batch) = reader.next().transpose().unwrap() {
+                            batches.push(batch);
+                        }
+                        let schema = reader.schema();
+                        let _ = sender.send((batches, schema));
                     }
                     return;
-                } 
+                }
 
                 // First try to treat the result as Arrow IPC bytes. When the
                 // callback returns bytes we assume they contain an Arrow IPC
-                // stream produced by ``pyarrow``.  Use ``pyarrow`` again to
-                // decode the bytes into a schema description and rows so that
-                // the rest of the code can operate on plain Rust types.
+                // stream produced by ``pyarrow``.
                 if let Ok(pybytes) = result.extract::<&pyo3::types::PyBytes>(py) {
-                    let locals = PyDict::new(py);
-                    locals.set_item("data", pybytes).unwrap();
-                    // The Python snippet reads the IPC stream and converts it
-                    // to two Python objects: ``schema_desc`` describing the
-                    // columns and ``rows`` containing the record batches as a
-                    // list of rows (lists). The column types are normalised to
-                    // simple strings that map to pgwire types later on.
-                    py.run(
-                        r#"
-import pyarrow as pa
-import pyarrow.ipc as ipc
-import pyarrow.types as pat
-reader = ipc.open_stream(data)
-table = reader.read_all()
-def map_type(field):
-    t = field.type
-    if pat.is_integer(t):
-        return "int"
-    if pat.is_floating(t):
-        return "float"
-    if pat.is_boolean(t):
-        return "bool"
-    if pat.is_string(t) or pat.is_large_string(t):
-        return "str"
-    if pat.is_date(t):
-        return "date"
-    if pat.is_timestamp(t):
-        return "datetime"
-    return "str"
-schema_desc = [{"name": f.name, "type": map_type(f)} for f in table.schema]
-rows = [[row.get(f.name) for f in table.schema] for row in table.to_pylist()]
-result_py = (schema_desc, rows)
-"#,
-                        None,
-                        Some(locals),
-                    )
-                    .unwrap();
-                    let tuple_any = match PyDict::get_item(locals, "result_py")
-                        .unwrap()
-                    {
-                        Some(v) => v,
-                        None => panic!("result_py missing"),
-                    };
-                    let parsed: (
-                        Vec<HashMap<String, String>>,
-                        Vec<Vec<PyObject>>,
-                    ) = <(
-                        Vec<HashMap<String, String>>,
-                        Vec<Vec<PyObject>>,
-                    ) as FromPyObject>::extract(tuple_any).unwrap();
-                    let converted_rows: Vec<Vec<Option<String>>> = parsed
-                        .1
-                        .into_iter()
-                        .map(|row| {
-                            row.into_iter()
-                                .map(|val| {
-                                    Python::with_gil(|py| {
-                                        let v = val.as_ref(py);
-                                        if v.is_none() {
-                                            Ok::<Option<String>, ()>(None)
-                                        } else {
-                                            match v.str() {
-                                                Ok(pystr) => Ok(Some(pystr.to_str().unwrap_or("").to_string())),
-                                                Err(_) => Ok(None),
-                                            }
-                                        }
-                                    })
-                                    .unwrap_or(None)
-                                })
-                                .collect()
-                        })
-                        .collect();
-                    let _ = sender.send((parsed.0, converted_rows));
+                    let data = pybytes.as_bytes();
+                    let cursor = std::io::Cursor::new(data);
+                    let mut reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).unwrap();
+                    let schema = reader.schema().clone();
+                    let batches: Vec<RecordBatch> = reader.collect::<Result<_, _>>().unwrap();
+                    let _ = sender.send((batches, schema));
                     return;
                 }
 
+                // Fallback: assume (schema_desc, rows) tuple, build batches
                 let parsed: PyResult<(Vec<HashMap<String, String>>, Vec<Vec<PyObject>>)> = result.extract(py);
                 if let Ok((schema_desc, py_rows)) = parsed {
-                    let converted_rows: Vec<Vec<Option<String>>> = py_rows
-                        .into_iter()
+                    // turn PyObjects into Rust Option<String>
+                    let rows: Vec<Vec<Option<String>>> = py_rows.into_iter()
                         .map(|row| {
                             row.into_iter()
                                 .map(|val| {
                                     Python::with_gil(|py| {
-                                        let v = val.as_ref(py);
-                                        if v.is_none() {
-                                            Ok::<Option<String>, ()>(None)
+                                        if val.as_ref(py).is_none() {
+                                            None
                                         } else {
-                                            match v.str() {
-                                                Ok(pystr) => Ok(Some(pystr.to_str().unwrap_or("").to_string())),
-                                                Err(_) => Ok(None),
-                                            }
+                                            val.extract::<String>(py).ok()
                                         }
-                                    }).unwrap_or(None)
+                                    })
                                 })
                                 .collect()
                         })
                         .collect();
-                    let _ = sender.send((schema_desc, converted_rows));
+
+                    // build arrow arrays column-wise
+                    let fields: Vec<Field> = schema_desc.iter()
+                        .map(|c| Field::new(c.get("name").unwrap(), DataType::Utf8, true))
+                        .collect();
+
+                    let mut builders: Vec<StringBuilder> =
+                        fields.iter().map(|_| StringBuilder::new()).collect();
+
+                    for row in &rows {
+                        for (i, cell) in row.iter().enumerate() {
+                            match cell {
+                                Some(s) => builders[i].append_value(s),
+                                None    => builders[i].append_null(),
+                            }
+                        }
+                    }
+
+                    let arrays: Vec<ArrayRef> = builders
+                        .into_iter()
+                        .map(|mut b| Arc::new(b.finish()) as ArrayRef)
+                        .collect();
+
+                    let schema = Arc::new(Schema::new(fields));
+                    let batch  = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+                    let _      = sender.send((vec![batch], schema));
                 }
+
+
             });
         }
     }
 }
 
-fn arrow_value_to_string(array: &dyn Array, row: usize) -> Option<String> {
+use std::pin::Pin;
+use futures::stream;
+fn arrow_to_pg_rows(
+    batches: Vec<RecordBatch>,
+    schema: Arc<Schema>,
+) -> (
+    Arc<Vec<FieldInfo>>,
+    Pin<Box<dyn Stream<Item = PgWireResult<DataRow>> + Send>>,
+) {
+    // column metadata
+    let field_defs: Arc<Vec<FieldInfo>> = Arc::new(
+        schema
+            .fields()
+            .iter()
+            .map(|f| {
+                FieldInfo::new(
+                    f.name().clone().into(),
+                    None,
+                    None,
+                    arrow_type_to_pgwire(f.data_type()),
+                    FieldFormat::Text,
+                )
+            })
+            .collect(),
+    );
+
+    // lazy row stream
+    let row_stream = stream::unfold((0usize, batches), {
+        let meta_outer = field_defs.clone();          // captured by outer FnMut
+        move |(mut row_idx, mut remaining_batches)| {
+            // clone **inside** so the async move owns its copy
+            let meta = meta_outer.clone();
+            async move {
+                loop {
+                    if remaining_batches.is_empty() {
+                        return None;
+                    }
+                    if row_idx == remaining_batches[0].num_rows() {
+                        remaining_batches.remove(0);
+                        row_idx = 0;
+                        continue;
+                    }
+
+                    let batch = &remaining_batches[0];
+                    let mut enc = DataRowEncoder::new(meta.clone());
+                    for col in batch.columns() {
+                        if let Err(e) = encode_arrow_value(&mut enc, col.as_ref(), row_idx) {
+                            return Some((Err(e), (row_idx + 1, remaining_batches)));
+                        }
+                    }
+                    let row = enc.finish();
+                    return Some((row, (row_idx + 1, remaining_batches)));
+                }
+            }
+        }
+    });
+
+    // pin + box so it is Unpin
+    (field_defs, Box::pin(row_stream))
+}
+
+fn encode_arrow_value(
+    encoder: &mut DataRowEncoder,
+    array: &dyn Array,
+    row: usize,
+) -> PgWireResult<()> {
     if array.is_null(row) {
-        return None;
+        return encoder.encode_field(&Option::<i32>::None); // type will be ignored
     }
     match array.data_type() {
-        DataType::Int8 => Some(array.as_primitive::<arrow::array::types::Int8Type>().value(row).to_string()),
-        DataType::Int16 => Some(array.as_primitive::<arrow::array::types::Int16Type>().value(row).to_string()),
-        DataType::Int32 => Some(array.as_primitive::<arrow::array::types::Int32Type>().value(row).to_string()),
-        DataType::Int64 => Some(array.as_primitive::<arrow::array::types::Int64Type>().value(row).to_string()),
-        DataType::UInt8 => Some(array.as_primitive::<arrow::array::types::UInt8Type>().value(row).to_string()),
-        DataType::UInt16 => Some(array.as_primitive::<arrow::array::types::UInt16Type>().value(row).to_string()),
-        DataType::UInt32 => Some(array.as_primitive::<arrow::array::types::UInt32Type>().value(row).to_string()),
-        DataType::UInt64 => Some(array.as_primitive::<arrow::array::types::UInt64Type>().value(row).to_string()),
-        DataType::Float32 => Some(array.as_primitive::<arrow::array::types::Float32Type>().value(row).to_string()),
-        DataType::Float64 => Some(array.as_primitive::<arrow::array::types::Float64Type>().value(row).to_string()),
-        DataType::Boolean => Some(array.as_boolean().value(row).to_string()),
-        DataType::Utf8 => Some(array.as_string::<i32>().value(row).to_string()),
-        DataType::LargeUtf8 => Some(array.as_string::<i64>().value(row).to_string()),
+        DataType::Int8 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int8Type>().value(row) as i16)),
+        DataType::Int16 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int16Type>().value(row))),
+        DataType::Int32 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int32Type>().value(row))),
+        DataType::Int64 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int64Type>().value(row))),
+        DataType::UInt8 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::UInt8Type>().value(row) as i16)),
+        DataType::UInt16 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::UInt16Type>().value(row) as i32)),
+        DataType::UInt32 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::UInt32Type>().value(row) as i64)),
+        DataType::UInt64 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::UInt64Type>().value(row) as i64)),
+        DataType::Float32 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Float32Type>().value(row))),
+        DataType::Float64 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Float64Type>().value(row))),
+        DataType::Boolean => encoder.encode_field(&Some(array.as_boolean().value(row))),
+        DataType::Utf8 => encoder.encode_field(&Some(array.as_string::<i32>().value(row))),
+        DataType::LargeUtf8 => encoder.encode_field(&Some(array.as_string::<i64>().value(row))),
         DataType::Date32 => {
             let days = array.as_primitive::<arrow::array::types::Date32Type>().value(row) as i64;
             let date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + Duration::days(days);
-            Some(date.format("%Y-%m-%d").to_string())
+            encoder.encode_field(&Some(date))
         }
         DataType::Date64 => {
             let ms = array.as_primitive::<arrow::array::types::Date64Type>().value(row);
             let dt = NaiveDateTime::from_timestamp_opt(ms / 1000, (ms % 1000 * 1_000_000) as u32).unwrap();
-            Some(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            encoder.encode_field(&Some(dt))
         }
         DataType::Timestamp(unit, _) => {
             let nanos: i128 = match unit {
-                TimeUnit::Second => {
-                    array.as_primitive::<TimestampSecondType>().value(row) as i128 * 1_000_000_000
-                }
-                TimeUnit::Millisecond => {
-                    array.as_primitive::<TimestampMillisecondType>().value(row) as i128 * 1_000_000
-                }
-                TimeUnit::Microsecond => {
-                    array.as_primitive::<TimestampMicrosecondType>().value(row) as i128 * 1_000
-                }
-                TimeUnit::Nanosecond => {
-                    array.as_primitive::<TimestampNanosecondType>().value(row) as i128
-                }
+                TimeUnit::Second => array.as_primitive::<TimestampSecondType>().value(row) as i128 * 1_000_000_000,
+                TimeUnit::Millisecond => array.as_primitive::<TimestampMillisecondType>().value(row) as i128 * 1_000_000,
+                TimeUnit::Microsecond => array.as_primitive::<TimestampMicrosecondType>().value(row) as i128 * 1_000,
+                TimeUnit::Nanosecond => array.as_primitive::<TimestampNanosecondType>().value(row) as i128,
             };
             let secs = (nanos / 1_000_000_000) as i64;
             let nsec = (nanos % 1_000_000_000) as u32;
             let dt = NaiveDateTime::from_timestamp_opt(secs, nsec).unwrap();
-            Some(dt.format("%Y-%m-%d %H:%M:%S%.f").to_string())
+            encoder.encode_field(&Some(dt))
         }
-        _ => {
-            debug!("unknown data type");
-            Some("".to_string())
-        },
+        _ => encoder.encode_field(&Option::<&str>::None),
     }
 }
 
-fn arrow_stream_to_rows(ptr: *mut c_void) -> Result<(Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>), String> {
-    unsafe {
-        debug!("[RUST] arrow_stream_to_rows: ptr={:?}", ptr);
-        let mut reader = ArrowArrayStreamReader::from_raw(ptr as *mut _).map_err(|e| e.to_string())?;
-        debug!("[RUST] reader constructed");
-        let schema = reader.schema();
-        let mut schema_desc = Vec::new();
-        for field in schema.fields() {
-            let mut map = HashMap::new();
-            map.insert("name".to_string(), field.name().to_string());
-            map.insert("type".to_string(), map_arrow_type(field.data_type()).to_string());
-            schema_desc.push(map);
-        }
-        let mut rows = Vec::new();
-        while let Some(batch) = reader.next().transpose().map_err(|e| e.to_string())? {
-            let num_rows = batch.num_rows();
-            for i in 0..num_rows {
-                let mut row = Vec::new();
-                for col in batch.columns() {
-                    row.push(arrow_value_to_string(col.as_ref(), i));
-                }
-                rows.push(row);
-            }
-        }
-        Ok((schema_desc, rows))
-    }
-}
 
 pub struct PythonWorker {
     sender: Sender<WorkerMessage>,
@@ -356,7 +332,6 @@ impl PythonWorker {
     ) -> Self {
         let (tx, rx) = channel::<WorkerMessage>();
         let auth_cb_thread = auth_cb.clone();
-
         thread::spawn(move || {
             info!("[PY_WORKER] Thread started");
             pyo3::prepare_freethreaded_python();
@@ -382,7 +357,7 @@ impl PythonWorker {
                                     kwargs.set_item("do_describe", do_describe).unwrap();
 
                                     // Connection identifier
-                                    kwargs.set_item("connection_id", connection_id).unwrap();
+                                    kwargs.set_item("connection_id", connection_id).unwrap();                                    
 
                                     // Add query_args if present
                                     if let (Some(params), Some(param_types)) = (&params, &param_types) {
@@ -490,8 +465,8 @@ impl PythonWorker {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-    ) -> (Vec<HashMap<String, String>>, Vec<Vec<Option<String>>>) {
-        let (tx, rx) = oneshot::channel();
+    ) -> ArrowQueryResult {
+        let (tx, rx) = oneshot::channel::<ArrowQueryResult>();
         debug!("[RUST] Sending query to worker: {}", query);
 
         self.sender
@@ -507,9 +482,10 @@ impl PythonWorker {
 
         rx.await.unwrap_or_else(|e| {
             error!("[RUST] Worker failed: {:?}", e);
-            (vec![], vec![])
+            (Vec::new(), Arc::new(Schema::empty()))
         })
     }
+
 
     pub async fn on_connect(&self, connection_id: u64, ip: String, port: u16) -> bool {
         let (tx, rx) = oneshot::channel();
@@ -561,10 +537,83 @@ impl PythonWorker {
     }
 }
 
+#[async_trait]
+trait QueryRunner: Send + Sync {
+    async fn execute(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> datafusion::error::Result<ArrowQueryResult>;
+}
+
+type ArrowQueryResult = (Vec<RecordBatch>, Arc<Schema>);
+
+struct RouterQueryRunner {
+    py_worker: Arc<PythonWorker>,
+    catalog_ctx: Arc<SessionContext>,
+}
+
+
+#[async_trait]
+impl QueryRunner for RouterQueryRunner {
+    async fn execute(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> datafusion::error::Result<ArrowQueryResult> {
+        let ctx = self.catalog_ctx.clone();
+        let py_worker = self.py_worker.clone();
+        let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
+            let py_worker = py_worker.clone();
+            let sql_owned = sql.to_string();
+            async move {
+                let res = py_worker
+                    .on_query(sql_owned, p, t, do_describe, connection_id)
+                    .await;                  // already ArrowQueryResult
+                Ok(res)
+            }
+        };
+
+        dispatch_query(&ctx, &query, params, param_types, handler).await
+    }
+}
+
+struct DirectQueryRunner {
+    py_worker: Arc<PythonWorker>,
+}
+
+
+#[async_trait]
+impl QueryRunner for DirectQueryRunner {
+    async fn execute(
+        &self,
+        query: String,
+        params: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+        do_describe: bool,
+        connection_id: u64,
+    ) -> datafusion::error::Result<ArrowQueryResult> {
+        Ok(
+            self.py_worker
+                .on_query(query, params, param_types, do_describe, connection_id)
+                .await,                     // ArrowQueryResult, no rebuilding
+        )
+    }
+}
+
 pub struct RiffqProcessor {
     py_worker: Arc<PythonWorker>,
     conn_id_sender: Arc<Mutex<Option<oneshot::Sender<u64>>>>,
+    query_runner: Arc<dyn QueryRunner>,
 }
+
+
 
 #[async_trait]
 impl StartupHandler for RiffqProcessor {
@@ -693,52 +742,27 @@ impl SimpleQueryHandler for RiffqProcessor {
 
 
         debug!("[PGWIRE] do_query called with: {}", query);
-        // let (schema_desc, rows_list) = self.py_worker.query(query.to_string()).await;
         let connection_id = _client
             .metadata()
             .get("connection_id")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (schema_desc, rows_list) = self
-            .py_worker
-            .on_query(query.to_string(), None, None, false, connection_id)
-            .await;
-        debug!("[PGWIRE] Schema and rows received");
-
-
-        let mut fields = Vec::new();
-        for col in &schema_desc {
-            let col_name = col.get("name").unwrap();
-            let col_type = col.get("type").unwrap();
-
-            fields.push(FieldInfo::new(
-                col_name.clone().into(),
-                None,
-                None,
-                map_python_type_to_pgwire(col_type),
-                FieldFormat::Text,
-            ));
-        }
-
-        let schema = Arc::new(fields);
-        let schema_ref = schema.clone();
-
-        let data_row_stream =
-            futures::stream::iter(rows_list.into_iter()).map(move |row| {
-                let mut encoder = DataRowEncoder::new(schema_ref.clone());
-                for val in row {
-                    encoder.encode_field(&val)?;
-                }
-                encoder.finish()
-            });
+        let (schema, data_row_stream) = {
+            let (batches, schema) = self
+                .query_runner
+                .execute(query.to_string(), None, None, false, connection_id)
+                .await
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            arrow_to_pg_rows(batches, schema)
+        };
 
         Ok(vec![Response::Query(QueryResponse::new(schema, data_row_stream))])
     }
 }
 
 pub struct MyExtendedQueryHandler {
-    pub py_worker: Arc<PythonWorker>,
+    query_runner: Arc<dyn QueryRunner>,
 }
 #[derive(Clone)]
 pub struct MyStatement {
@@ -813,40 +837,20 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (schema_desc, rows_list) = self
-            .py_worker
-            .on_query(
-                query.to_string(),
-                Some(portal.parameters.clone()),
-                Some(portal.statement.parameter_types.clone()),
-                false,
-                connection_id,
-            )
-            .await;
-
-        let mut fields = Vec::new();
-        for col in &schema_desc {
-            let col_name = col.get("name").unwrap();
-            let col_type = col.get("type").unwrap();
-            fields.push(FieldInfo::new(
-                col_name.clone().into(),
-                None,
-                None,
-                map_python_type_to_pgwire(col_type),
-                FieldFormat::Text,
-            ));
-        }
-
-        let schema = Arc::new(fields);
-        let schema_ref = schema.clone();
-
-        let data_row_stream = futures::stream::iter(rows_list.into_iter()).map(move |row| {
-            let mut encoder = DataRowEncoder::new(schema_ref.clone());
-            for val in row {
-                encoder.encode_field(&val)?;
-            }
-            encoder.finish()
-        });
+        let (schema, data_row_stream) = {
+            let (batches, schema) = self
+                .query_runner
+                .execute(
+                    query.to_string(),
+                    Some(portal.parameters.clone()),
+                    Some(portal.statement.parameter_types.clone()),
+                    false,
+                    connection_id,
+                )
+                .await
+                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+            arrow_to_pg_rows(batches, schema)
+        };
 
         Ok(Response::Query(QueryResponse::new(schema, data_row_stream)))
     }
@@ -884,30 +888,30 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (schema_desc, rows_list) = self
-            .py_worker
-            .on_query(
+        let (batches, schema) = self
+            .query_runner
+            .execute(
                 query.to_string(),
                 Some(portal.parameters.clone()),
                 Some(portal.statement.parameter_types.clone()),
                 true,
                 connection_id,
             )
-            .await;
-
-        let mut fields = Vec::new();
-        for col in &schema_desc {
-            let col_name = col.get("name").unwrap();
-            let col_type = col.get("type").unwrap();
-            fields.push(FieldInfo::new(
-                col_name.clone().into(),
-                None,
-                None,
-                map_python_type_to_pgwire(col_type),
-                FieldFormat::Text,
-            ));
-        }
-
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        let fields: Vec<FieldInfo> = schema
+            .fields()
+            .iter()
+            .map(|f| {
+                FieldInfo::new(
+                    f.name().clone().into(),
+                    None,
+                    None,
+                    arrow_type_to_pgwire(f.data_type()),
+                    FieldFormat::Text,
+                )
+            })
+            .collect();
         Ok(DescribePortalResponse::new(fields))
     }
 
@@ -1038,14 +1042,14 @@ impl Server {
     }
 
 
-    #[pyo3(signature = (tls=false))]
-    fn start(&self, py: Python, tls: bool) {
+    #[pyo3(signature = (tls=false, catalog_emulation=false))]
+    fn start(&self, py: Python, tls: bool, catalog_emulation: bool) {
         py.allow_threads(|| {
-            self.run_server(tls);
+            self.run_server(tls, catalog_emulation);
         });
     }
 
-    fn run_server(&self, tls: bool) {
+    fn run_server(&self, tls: bool, catalog_emulation: bool) {
         let addr = self.addr.clone();
         let query_cb = self.on_query_cb.clone();
         let connect_cb = self.on_connect_cb.clone();
@@ -1063,6 +1067,13 @@ impl Server {
 
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
+            let (ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
+            let catalog_ctx = Arc::new(ctx);
+            let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
+                Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: catalog_ctx.clone() })
+            } else {
+                Arc::new(DirectQueryRunner { py_worker: py_worker.clone() })
+            };
 
             let listener = TcpListener::bind(&addr).await.unwrap();
             info!("Listening on {}", addr);
@@ -1079,10 +1090,11 @@ impl Server {
                             let handler = Arc::new(RiffqProcessor {
                                 py_worker: py_worker.clone(),
                                 conn_id_sender: Arc::new(Mutex::new(Some(id_tx))),
+                                query_runner: query_runner.clone(),
                             });
                             let factory = Arc::new(RiffqProcessorFactory {
                                 handler: handler.clone(),
-                                extended_handler: Arc::new(MyExtendedQueryHandler { py_worker: py_worker.clone() }),
+                                extended_handler: Arc::new(MyExtendedQueryHandler { query_runner: query_runner.clone() }),
                             });
                             let py_worker_clone = py_worker.clone();
                             let ip = addr.ip().to_string();
@@ -1108,6 +1120,8 @@ impl Server {
 
 #[pymodule]
 fn _riffq(_py: Python, m: &PyModule) -> PyResult<()> {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).try_init();
+
     m.add_class::<Server>()?;
     Ok(())
 }

@@ -37,7 +37,7 @@ use datafusion::execution::context::SessionContext;
 use datafusion_pg_catalog::{dispatch_query, get_base_session_context};
 use postgres_types::FromSql;
 
-use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime};
+use chrono::{DateTime, Duration, NaiveDate};
 use arrow::datatypes::TimeUnit;
 
 
@@ -391,7 +391,10 @@ impl PythonWorker {
                                                         &Type::FLOAT4 => if let Ok(v) = f32::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
                                                         &Type::FLOAT8 => if let Ok(v) = f64::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
                                                         &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR => if let Ok(v) = String::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
-                                                        _ => { py_args.append(py.None()).unwrap(); }
+                                                        _ => { 
+                                                            info!("unknown query argument type {:}?", ty);
+                                                            py_args.append(py.None()).unwrap(); 
+                                                        }
                                                     }
                                                 }
                                             }
@@ -400,7 +403,9 @@ impl PythonWorker {
                                         kwargs.set_item("query_args", py_args).unwrap();
                                     }
 
-                                    let _ = cb.call(py, args, Some(&kwargs));
+                                    if let Err(e) = cb.call(py, args, Some(&kwargs)) {
+                                        e.print(py);
+                                    }
                                 });
                             }
                         }

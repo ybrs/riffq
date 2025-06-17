@@ -5,9 +5,7 @@
 
 use arrow::datatypes::DataType;
 use pgwire::api::Type;
-use arrow_schema::extension::CanonicalExtensionType;
-
-
+// use arrow_schema::extension::CanonicalExtensionType;
 
 // pub fn arrow_field_to_pgwire(field: &Field) -> Type {
 //     if matches!(field.data_type(), DataType::FixedSizeBinary(16))

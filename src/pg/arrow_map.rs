@@ -5,6 +5,20 @@
 
 use arrow::datatypes::DataType;
 use pgwire::api::Type;
+use arrow_schema::extension::CanonicalExtensionType;
+
+
+
+// pub fn arrow_field_to_pgwire(field: &Field) -> Type {
+//     if matches!(field.data_type(), DataType::FixedSizeBinary(16))
+//         && field.extension_type_name() == Some(arrow_uuid::Uuid::NAME)
+//     {
+//         Type::UUID
+//     } else {
+//         arrow_type_to_pgwire(field.data_type())
+//     }
+// }
+
 
 /// Translate an Arrow `DataType` into a pgwire `Type` (PostgreSQL OID).
 ///
@@ -43,20 +57,35 @@ pub fn arrow_type_to_pgwire(dt: &DataType) -> Type {
         Timestamp(_, tz)               =>
             if tz.is_some() { Type::TIMESTAMPTZ } else { Type::TIMESTAMP },
         Duration(_) | Interval(_)      => Type::INTERVAL,
+        /* ── UUID ──────────────────────────────── */        
+        // TODO: we probably need to support uuid with something similar to this 
+        //pub fn arrow_field_to_pgwire(field: &Field) -> Type {
+        //     use DataType::*;
 
-        /* ── UUID ──────────────────────────────── */
-        Uuid                           => Type::UUID,
+        //     // Look for the extension marker first
+        //     if let Some(ext) = field.metadata().get("ARROW:extension:name") {
+        //         if ext == "uuid" {
+        //             return Type::UUID;
+        //         }
+        //     }
 
-        /* ── everything else: send as text ─────── */
-        List(_)
-        | LargeList(_)
-        | FixedSizeList(_, _)
-        | Struct(_)
-        | Map(_, _)
-        | Union(_, _)              // two-field variant in Arrow 55
-        | Dictionary(_, _)
-        | RunEndEncoded(_, _)
-        | Null                      => Type::VARCHAR,
+        //     match field.data_type() {
+        //         FixedSizeBinary(16)           => Type::BYTEA,   // raw binary, *not* UUID
+        //         // … all the other matches exactly like before …
+        //         _                              => Type::VARCHAR,
+        //     }
+        // }
+
+        // /* ── everything else: send as text ─────── */
+        // List(_)
+        // | LargeList(_)
+        // | FixedSizeList(_, _)
+        // | Struct(_)
+        // | Map(_, _)
+        // | Union(_, _)              // two-field variant in Arrow 55
+        // | Dictionary(_, _)
+        // | RunEndEncoded(_, _)
+        // | Null                      => Type::VARCHAR,
 
         /* ── everything complex / unsupported ─── */
         _=> Type::VARCHAR,

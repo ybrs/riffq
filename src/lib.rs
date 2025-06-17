@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::{PyAny, Bound, IntoPyObjectExt};
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
-use futures::{Sink, SinkExt, StreamExt, Stream};
+use futures::{Sink, SinkExt, Stream};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::oneshot;
@@ -37,7 +37,7 @@ use datafusion::execution::context::SessionContext;
 use datafusion_pg_catalog::{dispatch_query, get_base_session_context};
 use postgres_types::FromSql;
 
-use chrono::{NaiveDate, NaiveDateTime, Duration};
+use chrono::{DateTime, Duration, NaiveDate, NaiveDateTime};
 use arrow::datatypes::TimeUnit;
 
 
@@ -47,14 +47,14 @@ use pgwire::api::copy::NoopCopyHandler;
 use pgwire::api::query::{SimpleQueryHandler, ExtendedQueryHandler};
 use pgwire::api::results::{DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
 use pgwire::messages::data::DataRow;
-use pgwire::api::{ClientInfo, ClientPortalStore, NoopErrorHandler, PgWireServerHandlers, Type};
+use pgwire::api::{ClientInfo, NoopErrorHandler, PgWireServerHandlers, Type};
 use pgwire::api::portal::Portal;
 use pgwire::error::{PgWireError, PgWireResult, ErrorInfo};
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
 use pgwire::messages::startup::Authentication;
 use pgwire::messages::response::ErrorResponse;
 use pgwire::tokio::process_socket;
-use pgwire::api::stmt::{StoredStatement, NoopQueryParser};
+use pgwire::api::stmt::{StoredStatement};
 
 pub mod pg;
 use pg::arrow_type_to_pgwire;
@@ -148,13 +148,14 @@ impl CallbackWrapper {
                     return;
                 }
 
+
                 // First try to treat the result as Arrow IPC bytes. When the
                 // callback returns bytes we assume they contain an Arrow IPC
                 // stream produced by ``pyarrow``.
                 if let Ok(pybytes) = result_bound.extract::<Bound<pyo3::types::PyBytes>>() {
                     let data = pybytes.as_bytes();
                     let cursor = std::io::Cursor::new(data);
-                    let mut reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).unwrap();
+                    let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).unwrap();
                     let schema = reader.schema().clone();
                     let batches: Vec<RecordBatch> = reader.collect::<Result<_, _>>().unwrap();
                     let _ = sender.send((batches, schema));
@@ -303,7 +304,7 @@ fn encode_arrow_value(
         }
         DataType::Date64 => {
             let ms = array.as_primitive::<arrow::array::types::Date64Type>().value(row);
-            let dt = NaiveDateTime::from_timestamp_opt(ms / 1000, (ms % 1000 * 1_000_000) as u32).unwrap();
+            let dt = DateTime::from_timestamp(ms / 1000, (ms % 1000 * 1_000_000) as u32).unwrap();
             encoder.encode_field(&Some(dt))
         }
         DataType::Timestamp(unit, _) => {
@@ -315,7 +316,7 @@ fn encode_arrow_value(
             };
             let secs = (nanos / 1_000_000_000) as i64;
             let nsec = (nanos % 1_000_000_000) as u32;
-            let dt = NaiveDateTime::from_timestamp_opt(secs, nsec).unwrap();
+            let dt = DateTime::from_timestamp(secs, nsec).unwrap();
             encoder.encode_field(&Some(dt))
         }
         _ => encoder.encode_field(&Option::<&str>::None),
@@ -918,8 +919,7 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let query = &portal.statement.statement.query;
-        let params = &portal.parameters;
+        let query = &portal.statement.statement.query;        
 
         let connection_id = _client
             .metadata()
@@ -927,7 +927,7 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (batches, schema) = self
+        let (_, schema) = self
             .query_runner
             .execute(
                 query.to_string(),

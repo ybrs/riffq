@@ -34,7 +34,7 @@ arrow = { version = "55.1.0", features = ["ffi", "canonical_extension_types"] }
 chrono = "0.4.41"
 log = "0.4"
 datafusion = "47.0.0"
-datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", branch = "main", package = "datafusion_pg_catalog" }
+pg_catalog_rs = { git = "https://github.com/ybrs/pg_catalog", branch = "main", package = "datafusion_pg_catalog" }
 env_logger = "0.11.8"
 
 

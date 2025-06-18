@@ -1,3 +1,5 @@
+use datafusion::sql::sqlparser::dialect::PostgreSqlDialect;
+use datafusion_pg_catalog::session::ClientOpts;
 use pyo3::prelude::*;
 use pyo3::{PyAny, Bound, IntoPyObjectExt};
 use std::sync::{Arc, Mutex};
@@ -27,6 +29,8 @@ static CONNECTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use bytes::Bytes;
 use std::ffi::c_void;
+use std::pin::Pin;
+use futures::stream::{self, BoxStream};
 
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::array::{Array, RecordBatch};
@@ -66,6 +70,12 @@ use pgwire::api::stmt::{StoredStatement};
 
 pub mod pg;
 use pg::arrow_type_to_pgwire;
+use sqlparser::parser::Parser;
+use sqlparser::ast::Statement;
+
+
+/// PostgreSQL version reported to clients during startup and via `SHOW server_version`.
+pub const SERVER_VERSION: &str = "17.4.0";
 
 pub enum WorkerMessage {
     Query {
@@ -222,8 +232,6 @@ impl CallbackWrapper {
     }
 }
 
-use std::pin::Pin;
-use futures::stream;
 fn arrow_to_pg_rows(
     batches: Vec<RecordBatch>,
     schema: Arc<Schema>,
@@ -664,9 +672,130 @@ pub struct RiffqProcessor {
     py_worker: Arc<PythonWorker>,
     conn_id_sender: Arc<Mutex<Option<oneshot::Sender<u64>>>>,
     query_runner: Arc<dyn QueryRunner>,
+    ctx: Arc<SessionContext>,
 }
 
+use datafusion::{
+    logical_expr::{create_udf, Volatility, ColumnarValue},
+    common::ScalarValue,
+};
 
+
+impl RiffqProcessor {
+
+    fn register_current_database<C>(&self, client: &C) -> datafusion::error::Result<()>
+    where
+        C: ClientInfo + ?Sized,
+    {
+        static KEY: &str = "current_database";
+
+        if self.ctx.state().scalar_functions().contains_key(KEY){
+            return Ok(());
+        }
+
+        if let Some(db) = client.metadata().get(pgwire::api::METADATA_DATABASE).cloned() {
+            let fun = Arc::new(move |_args: &[ColumnarValue]| {
+                Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(db.clone()))))
+            });
+            let udf = create_udf(KEY, vec![], DataType::Utf8, Volatility::Stable, fun.clone());
+            self.ctx.register_udf(udf);
+            // udf.with_aliases("pg_catalog.current_database");
+            let udf = create_udf("pg_catalog.current_database", vec![], DataType::Utf8, Volatility::Stable, fun.clone());
+            self.ctx.register_udf(udf);
+        }
+
+        Ok(())
+    }
+
+    fn register_session_user<C>(&self, client: &C) -> datafusion::error::Result<()>
+    where
+        C: ClientInfo + ?Sized,
+    {
+        static KEY: &str = "session_user";
+        if self.ctx.state().scalar_functions().contains_key(KEY){
+            return Ok(());
+        }
+
+        if let Some(user) = client.metadata().get(pgwire::api::METADATA_USER).cloned() {
+            let fun = Arc::new(move |_args: &[ColumnarValue]| {
+                Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(user.clone()))))
+            });
+            let udf = create_udf(KEY, vec![], DataType::Utf8, Volatility::Stable, fun);
+            self.ctx.register_udf(udf);
+        }
+
+        Ok(())
+    }
+
+    fn register_current_user<C>(&self, client: &C) -> datafusion::error::Result<()>
+    where
+        C: ClientInfo + ?Sized,
+    {
+        static KEY: &str = "current_user";
+
+        if self.ctx.state().scalar_functions().contains_key(KEY) {
+            return Ok(());
+        }
+
+        if let Some(user) = client.metadata().get(pgwire::api::METADATA_USER).cloned() {
+            let fun = Arc::new(move |_args: &[ColumnarValue]| {
+                Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(user.clone()))))
+            });
+            let udf = create_udf(KEY, vec![], DataType::Utf8, Volatility::Stable, fun.clone());
+            self.ctx.register_udf(udf);
+            let udf = create_udf(
+                "pg_catalog.current_user",
+                vec![],
+                DataType::Utf8,
+                Volatility::Stable,
+                fun,
+            );
+            self.ctx.register_udf(udf);
+        }
+
+        Ok(())
+    }
+
+    fn show_variable_response<'a>(&self, name: &str, format: FieldFormat) -> Option<Response<'a>> {
+        let state = self.ctx.state();
+        let opts = state
+            .config_options()
+            .extensions
+            .get::<ClientOpts>()?;
+
+        let value = match name {
+            "application_name" => opts.application_name.as_str(),
+            "datestyle" => opts.datestyle.as_str(),
+            "search_path" => opts.search_path.as_str(),
+            _ => return None,
+        };
+
+        let fields = Arc::new(vec![
+            FieldInfo::new(name.to_string(), None, None, Type::TEXT, format),
+        ]);
+
+        let mut encoder = DataRowEncoder::new(fields.clone());
+        encoder.encode_field(&Some(value)).ok()?;
+        let row = encoder.finish().ok()?;
+        let rows = stream::iter(vec![Ok(row)]);
+        let rows: BoxStream<'a, PgWireResult<DataRow>> = Box::pin(rows);
+        Some(Response::Query(QueryResponse::new(fields, rows)))
+    }
+
+    fn parse_show_variable(sql: &str) -> Option<String> {
+        let dialect = PostgreSqlDialect {};
+        let mut statements = Parser::parse_sql(&dialect, sql).ok()?;
+        if statements.len() != 1 {
+            return None;
+        }
+        match statements.pop()? {
+            Statement::ShowVariable { variable } if variable.len() == 1 => {
+                Some(variable[0].value.clone())
+            }
+            _ => None,
+        }
+    }
+}
 
 #[async_trait]
 impl StartupHandler for RiffqProcessor {
@@ -680,6 +809,10 @@ impl StartupHandler for RiffqProcessor {
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        // We set server version here. We also should make it optional in future. 
+        let mut params = DefaultServerParameterProvider::default();
+        params.server_version = SERVER_VERSION.to_string();
+
         match message {
             PgWireFrontendMessage::Startup(ref startup) => {
                 pgwire::api::auth::save_startup_parameters_to_metadata(client, startup);
@@ -711,7 +844,7 @@ impl StartupHandler for RiffqProcessor {
                         client.close().await?;
                         return Ok(());
                     }
-                    finish_authentication(client, &DefaultServerParameterProvider::default()).await?;
+                    finish_authentication(client, &params).await?;
                 }
             }
             PgWireFrontendMessage::PasswordMessageFamily(pwd) => {
@@ -763,10 +896,20 @@ impl StartupHandler for RiffqProcessor {
                     return Ok(());
                 }
 
-                finish_authentication(client, &DefaultServerParameterProvider::default()).await?;
+                finish_authentication(client, &params).await?;
             }
             _ => {}
         }
+
+        let user = client.metadata().get(pgwire::api::METADATA_USER).cloned();
+        let database = client.metadata().get(pgwire::api::METADATA_DATABASE).cloned();
+        log::debug!("database: {:?} {:?}", database, user);
+
+        let _ = self.register_current_database(client);
+        let _ = self.register_session_user(client);
+        let _ = self.register_current_user(client);
+
+
         Ok(())
     }
 }
@@ -1169,8 +1312,8 @@ impl Server {
 
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
-            let (ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
-
+            let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
+            let ctx = Arc::new(raw_ctx);
             for db in &self.databases {
                 register_user_database(&ctx, db).await.unwrap();
             }
@@ -1181,9 +1324,8 @@ impl Server {
                 register_user_tables(&ctx, db, schema, table, cols.clone()).await.unwrap();
             }
 
-            let catalog_ctx = Arc::new(ctx);
             let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
-                Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: catalog_ctx.clone() })
+                Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: ctx.clone() })
             } else {
                 Arc::new(DirectQueryRunner { py_worker: py_worker.clone() })
             };
@@ -1201,6 +1343,7 @@ impl Server {
                             let tls_acceptor_ref = tls_acceptor.clone();
                             let (id_tx, id_rx) = oneshot::channel();
                             let handler = Arc::new(RiffqProcessor {
+                                ctx: ctx.clone(),
                                 py_worker: py_worker.clone(),
                                 conn_id_sender: Arc::new(Mutex::new(Some(id_tx))),
                                 query_runner: query_runner.clone(),

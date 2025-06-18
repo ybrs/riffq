@@ -29,6 +29,7 @@ tokio-rustls = "0.26"
 rustls-pemfile = "2"
 rustls-pki-types = "1"
 arrow = { version = "55.1.0", features = ["ffi", "canonical_extension_types"] }
+sqlparser = "0.55.0"
 
 
 chrono = "0.4.41"

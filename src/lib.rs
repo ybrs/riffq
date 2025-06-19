@@ -1324,12 +1324,6 @@ impl Server {
                 register_user_tables(&ctx, db, schema, table, cols.clone()).await.unwrap();
             }
 
-            let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
-                Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: ctx.clone() })
-            } else {
-                Arc::new(DirectQueryRunner { py_worker: py_worker.clone() })
-            };
-
             let listener = TcpListener::bind(&addr).await.unwrap();
             info!("Listening on {}", addr);
 
@@ -1340,10 +1334,23 @@ impl Server {
                     loop {
                         let (socket, addr) = listener.accept().await.unwrap();
                         if let Some(socket) = detect_gssencmode(socket).await {
+
+                            let conn_ctx = SessionContext::new_with_state(
+                                ctx.state().clone(),
+                            );
+                            let conn_ctx = Arc::new(conn_ctx);
+
+                            let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
+                                Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: conn_ctx.clone() })
+                            } else {
+                                Arc::new(DirectQueryRunner { py_worker: py_worker.clone() })
+                            };
+
                             let tls_acceptor_ref = tls_acceptor.clone();
                             let (id_tx, id_rx) = oneshot::channel();
+                            
                             let handler = Arc::new(RiffqProcessor {
-                                ctx: ctx.clone(),
+                                ctx: conn_ctx.clone(),
                                 py_worker: py_worker.clone(),
                                 conn_id_sender: Arc::new(Mutex::new(Some(id_tx))),
                                 query_runner: query_runner.clone(),
@@ -1352,9 +1359,11 @@ impl Server {
                                 handler: handler.clone(),
                                 extended_handler: Arc::new(MyExtendedQueryHandler { query_runner: query_runner.clone() }),
                             });
+                            
                             let py_worker_clone = py_worker.clone();
                             let ip = addr.ip().to_string();
                             let port = addr.port();
+                            
                             tokio::spawn(async move {
                                 if let Err(e) = process_socket(socket, tls_acceptor_ref, factory).await {
                                     error!("process_socket error: {:?}", e);

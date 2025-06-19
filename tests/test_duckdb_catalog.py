@@ -10,7 +10,7 @@ def _run_server(port: int):
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from duckdb_pgcatalog import run_server
+    from duckdb_pgcatalog.server import run_server
     run_server(port)
 
 

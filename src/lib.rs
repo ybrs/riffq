@@ -111,12 +111,17 @@ pub enum WorkerMessage {
 
 #[pyclass]
 struct CallbackWrapper {
-    responder: Arc<Mutex<Option<oneshot::Sender<ArrowQueryResult>>>>,  
+    responder: Arc<Mutex<Option<oneshot::Sender<(Vec<RecordBatch>, Arc<Schema>)>>>>,
 }
 
 #[pyclass]
 struct BoolCallbackWrapper {
     responder: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+}
+
+#[pyclass]
+struct TagCallbackWrapper {
+    responder: Arc<Mutex<Option<oneshot::Sender<String>>>>,
 }
 
 #[pymethods]
@@ -126,6 +131,18 @@ impl BoolCallbackWrapper {
             Python::with_gil(|py| {
                 let val: bool = result.extract(py).unwrap_or(false);
                 let _ = sender.send(val);
+            });
+        }
+    }
+}
+
+#[pymethods]
+impl TagCallbackWrapper {
+    fn __call__(&self, result: PyObject) {
+        if let Some(sender) = self.responder.lock().unwrap().take() {
+            Python::with_gil(|py| {
+                let tag: String = result.extract(py).unwrap_or_default();
+                let _ = sender.send(tag);
             });
         }
     }
@@ -374,10 +391,16 @@ impl PythonWorker {
                             });
 
                             if let Some(cb) = cb_opt {
+                                // channel for arrow results
+                                let (arrow_tx, arrow_rx) = oneshot::channel();
+                                let (tag_tx, tag_rx) = oneshot::channel();
                                 Python::with_gil(|py| {
                                     debug!("[PY_WORKER] GIL acquired, invoking callback");
                                     let wrapper = Py::new(py, CallbackWrapper {
-                                        responder: Arc::new(Mutex::new(Some(responder))),
+                                        responder: Arc::new(Mutex::new(Some(arrow_tx))),
+                                    }).unwrap();
+                                    let tag_wrapper = Py::new(py, TagCallbackWrapper {
+                                        responder: Arc::new(Mutex::new(Some(tag_tx))),
                                     }).unwrap();
 
                                     let args = PyTuple::new(py, [
@@ -420,11 +443,18 @@ impl PythonWorker {
 
                                         kwargs.set_item("query_args", py_args).unwrap();
                                     }
+                                    kwargs.set_item("tag_callback", tag_wrapper.clone_ref(py)).unwrap();
 
                                     if let Err(e) = cb.call(py, args, Some(&kwargs)) {
                                         e.print(py);
                                     }
                                 });
+
+                                let arrow_result = arrow_rx.blocking_recv().unwrap_or((Vec::new(), Arc::new(Schema::empty())));
+                                let tag_result = tag_rx.blocking_recv().ok();
+                                let _ = responder.send((arrow_result.0, arrow_result.1, tag_result));
+                            } else {
+                                let _ = responder.send((Vec::new(), Arc::new(Schema::empty()), None));
                             }
                         }
                         WorkerMessage::Connect { connection_id, ip, port, responder } => {
@@ -545,7 +575,7 @@ impl PythonWorker {
 
         rx.await.unwrap_or_else(|e| {
             error!("[RUST] Worker failed: {:?}", e);
-            (Vec::new(), Arc::new(Schema::empty()))
+            (Vec::new(), Arc::new(Schema::empty()), None)
         })
     }
 
@@ -612,7 +642,7 @@ trait QueryRunner: Send + Sync {
     ) -> datafusion::error::Result<ArrowQueryResult>;
 }
 
-type ArrowQueryResult = (Vec<RecordBatch>, Arc<Schema>);
+type ArrowQueryResult = (Vec<RecordBatch>, Arc<Schema>, Option<String>);
 
 struct RouterQueryRunner {
     py_worker: Arc<PythonWorker>,
@@ -632,18 +662,26 @@ impl QueryRunner for RouterQueryRunner {
     ) -> datafusion::error::Result<ArrowQueryResult> {
         let ctx = self.catalog_ctx.clone();
         let py_worker = self.py_worker.clone();
+        let tag_holder = Arc::new(Mutex::new(None));
+        let tag_holder_inner = tag_holder.clone();
+
         let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
             let py_worker = py_worker.clone();
             let sql_owned = sql.to_string();
+            let tag_holder = tag_holder_inner.clone();
             async move {
-                let res = py_worker
+                let (batches, schema, tag) = py_worker
                     .on_query(sql_owned, p, t, do_describe, connection_id)
-                    .await;                  // already ArrowQueryResult
-                Ok(res)
+                    .await;
+                *tag_holder.lock().unwrap() = tag;
+                Ok((batches, schema))
             }
         };
 
-        dispatch_query(&ctx, &query, params, param_types, handler).await
+        let (batches, schema) =
+            dispatch_query(&ctx, &query, params, param_types, handler).await?;
+        let tag = tag_holder.lock().unwrap().take();
+        Ok((batches, schema, tag))
     }
 }
 
@@ -931,13 +969,7 @@ impl SimpleQueryHandler for RiffqProcessor {
         // TODO: this should be up to the user to be handled here
         let trimmed = query.trim();
         let lowercase = trimmed.to_lowercase();
-        if lowercase.starts_with("begin") {
-            return Ok(vec![Response::Execution(Tag::new("BEGIN"))]);
-        } else if lowercase.starts_with("commit") {
-            return Ok(vec![Response::Execution(Tag::new("COMMIT"))]);
-        } else if lowercase.starts_with("rollback") {
-            return Ok(vec![Response::Execution(Tag::new("ROLLBACK"))]);
-        } else if lowercase.starts_with("discard all") {
+        if lowercase.starts_with("discard all") {
             return Ok(vec![Response::Execution(Tag::new("DISCARD ALL"))]);
         } else if lowercase == "show transaction isolation level" {
             let field_infos = Arc::new(vec![FieldInfo::new(
@@ -954,10 +986,6 @@ impl SimpleQueryHandler for RiffqProcessor {
 
             let rows = stream::iter(vec![Ok(row)]);
             return Ok(vec![Response::Query(QueryResponse::new(field_infos, rows))]);
-        } else if let Some(var) = Self::parse_show_variable(lowercase.as_str()) {
-            if let Some(resp) = self.show_variable_response(&var.to_lowercase(), FieldFormat::Text) {
-                return Ok(vec![resp]);
-            }
         } else if lowercase == "" {
             return Ok(vec![Response::Execution(Tag::new(""))]);
         }
@@ -969,14 +997,17 @@ impl SimpleQueryHandler for RiffqProcessor {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (schema, data_row_stream) = {
-            let (batches, schema) = self
-                .query_runner
-                .execute(query.to_string(), None, None, false, connection_id)
-                .await
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            arrow_to_pg_rows(batches, schema)
-        };
+        let (batches, schema, tag) = self
+            .query_runner
+            .execute(query.to_string(), None, None, false, connection_id)
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+        if let Some(t) = tag {
+            return Ok(vec![Response::Execution(Tag::new(t.as_str()))]);
+        }
+
+        let (schema, data_row_stream) = arrow_to_pg_rows(batches, schema);
 
         Ok(vec![Response::Query(QueryResponse::new(schema, data_row_stream))])
     }
@@ -1047,10 +1078,6 @@ impl ExtendedQueryHandler for RiffqProcessor {
             let row = encoder.finish()?;
             let rows = stream::iter(vec![Ok(row)]);
             return Ok(Response::Query(QueryResponse::new(field_infos, rows)));
-        } else if let Some(var) = Self::parse_show_variable(query.as_str()) {
-            if let Some(resp) = self.show_variable_response(&var.to_lowercase(), portal.result_column_format.format_for(0)) {
-                return Ok(resp);
-            }
         }
 
         let connection_id = _client
@@ -1059,20 +1086,23 @@ impl ExtendedQueryHandler for RiffqProcessor {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (schema, data_row_stream) = {
-            let (batches, schema) = self
-                .query_runner
-                .execute(
-                    query.to_string(),
-                    Some(portal.parameters.clone()),
-                    Some(portal.statement.parameter_types.clone()),
-                    false,
-                    connection_id,
-                )
-                .await
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            arrow_to_pg_rows(batches, schema)
-        };
+        let (batches, schema, tag) = self
+            .query_runner
+            .execute(
+                query.to_string(),
+                Some(portal.parameters.clone()),
+                Some(portal.statement.parameter_types.clone()),
+                false,
+                connection_id,
+            )
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+        if let Some(t) = tag {
+            return Ok(Response::Execution(Tag::new(t.as_str())));
+        }
+
+        let (schema, data_row_stream) = arrow_to_pg_rows(batches, schema);
 
         Ok(Response::Query(QueryResponse::new(schema, data_row_stream)))
     }
@@ -1109,7 +1139,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (_, schema) = self
+        let (_, schema, _) = self
             .query_runner
             .execute(
                 query.to_string(),

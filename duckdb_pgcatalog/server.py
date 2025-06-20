@@ -48,7 +48,9 @@ def map_type(data_type: str) -> str:
 def run_server(port: int):
     global duckdb_con
     duckdb_con = duckdb.connect()
-    server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
+    server = riffq.Server(f"127.0.0.1:{port}")
+    conn_mgr = Connection(port)
+    server.on_query(conn_mgr.handle_query)
     # server.set_tls("certs/server.crt", "certs/server.key")
 
     # duckdb_con.execute("CREATE TABLE users(id INTEGER, name VARCHAR)")
@@ -63,7 +65,7 @@ def run_server(port: int):
     ).fetchall()
 
     for schema_name, table_name in tbls:
-        server.server.register_schema("duckdb", schema_name)
+        server.register_schema("duckdb", schema_name)
         cols_info = duckdb_con.execute(
             "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
             "WHERE table_schema=? AND table_name=?",
@@ -79,7 +81,7 @@ def run_server(port: int):
                     }
                 }
             )
-        server.server.register_table("duckdb", schema_name, table_name, columns)
+        server.register_table("duckdb", schema_name, table_name, columns)
 
     server.start(catalog_emulation=True)
 

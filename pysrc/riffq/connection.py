@@ -19,6 +19,9 @@ class BaseConnection:
             capsule = export_stream(reader)
         callback(capsule)
 
+    def send_tag(self, tag: str, callback):
+        callback(tag, is_tag=True)
+
     def arrow_batch(self, values:list, names:list):
         return pa.RecordBatchReader.from_batches(
             pa.schema(list(zip(names, [v.type for v in values]))),

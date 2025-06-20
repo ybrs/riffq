@@ -86,7 +86,7 @@ pub enum WorkerMessage {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-        responder: oneshot::Sender<ArrowQueryResult>,
+        responder: oneshot::Sender<QueryResult>,
     },
     Connect {
         connection_id: u64,
@@ -111,7 +111,7 @@ pub enum WorkerMessage {
 
 #[pyclass]
 struct CallbackWrapper {
-    responder: Arc<Mutex<Option<oneshot::Sender<ArrowQueryResult>>>>,  
+    responder: Arc<Mutex<Option<oneshot::Sender<QueryResult>>>>,
 }
 
 #[pyclass]
@@ -133,9 +133,15 @@ impl BoolCallbackWrapper {
 
 #[pymethods]
 impl CallbackWrapper {
-    fn __call__(&self, result: PyObject) {
+    #[pyo3(signature=(result, *, is_tag=false))]
+    fn __call__(&self, result: PyObject, is_tag: bool) {
         if let Some(sender) = self.responder.lock().unwrap().take() {
             Python::with_gil(|py| {
+                if is_tag {
+                    let tag = result.bind(py).extract::<String>().unwrap_or_default();
+                    let _ = sender.send(QueryResult::Tag(tag));
+                    return;
+                }
                 // Try Arrow C stream pointer first
                 let result_bound = result.bind(py);
                 let type_name = result_bound
@@ -163,7 +169,7 @@ impl CallbackWrapper {
                             batches.push(batch);
                         }
                         let schema = reader.schema();
-                        let _ = sender.send((batches, schema));
+                        let _ = sender.send(QueryResult::Arrow(batches, schema));
                     }
                     return;
                 }
@@ -178,7 +184,7 @@ impl CallbackWrapper {
                     let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).unwrap();
                     let schema = reader.schema().clone();
                     let batches: Vec<RecordBatch> = reader.collect::<Result<_, _>>().unwrap();
-                    let _ = sender.send((batches, schema));
+                    let _ = sender.send(QueryResult::Arrow(batches, schema));
                     return;
                 }
 
@@ -225,7 +231,7 @@ impl CallbackWrapper {
 
                     let schema = Arc::new(Schema::new(fields));
                     let batch  = RecordBatch::try_new(schema.clone(), arrays).unwrap();
-                    let _      = sender.send((vec![batch], schema));
+                    let _      = sender.send(QueryResult::Arrow(vec![batch], schema));
                 }
 
 
@@ -425,6 +431,8 @@ impl PythonWorker {
                                         e.print(py);
                                     }
                                 });
+                            } else {
+                                let _ = responder.send(QueryResult::Arrow(Vec::new(), Arc::new(Schema::empty())));
                             }
                         }
                         WorkerMessage::Connect { connection_id, ip, port, responder } => {
@@ -528,8 +536,8 @@ impl PythonWorker {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-    ) -> ArrowQueryResult {
-        let (tx, rx) = oneshot::channel::<ArrowQueryResult>();
+    ) -> QueryResult {
+        let (tx, rx) = oneshot::channel::<QueryResult>();
         debug!("[RUST] Sending query to worker: {}", query);
 
         self.sender
@@ -545,7 +553,7 @@ impl PythonWorker {
 
         rx.await.unwrap_or_else(|e| {
             error!("[RUST] Worker failed: {:?}", e);
-            (Vec::new(), Arc::new(Schema::empty()))
+            QueryResult::Arrow(Vec::new(), Arc::new(Schema::empty()))
         })
     }
 
@@ -609,10 +617,13 @@ trait QueryRunner: Send + Sync {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-    ) -> datafusion::error::Result<ArrowQueryResult>;
+    ) -> datafusion::error::Result<QueryResult>;
 }
 
-type ArrowQueryResult = (Vec<RecordBatch>, Arc<Schema>);
+pub enum QueryResult {
+    Arrow(Vec<RecordBatch>, Arc<Schema>),
+    Tag(String),
+}
 
 struct RouterQueryRunner {
     py_worker: Arc<PythonWorker>,
@@ -629,7 +640,20 @@ impl QueryRunner for RouterQueryRunner {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-    ) -> datafusion::error::Result<ArrowQueryResult> {
+    ) -> datafusion::error::Result<QueryResult> {
+        let trimmed = query.trim().to_lowercase();
+        if trimmed.starts_with("begin")
+            || trimmed.starts_with("commit")
+            || trimmed.starts_with("rollback")
+        {
+            return Ok(
+                self
+                    .py_worker
+                    .on_query(query, params, param_types, do_describe, connection_id)
+                    .await,
+            );
+        }
+
         let ctx = self.catalog_ctx.clone();
         let py_worker = self.py_worker.clone();
         let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
@@ -638,12 +662,18 @@ impl QueryRunner for RouterQueryRunner {
             async move {
                 let res = py_worker
                     .on_query(sql_owned, p, t, do_describe, connection_id)
-                    .await;                  // already ArrowQueryResult
-                Ok(res)
+                    .await;
+                match res {
+                    QueryResult::Arrow(b, s) => Ok((b, s)),
+                    QueryResult::Tag(tag) => Err(datafusion::error::DataFusionError::Plan(format!(
+                        "Unexpected tag result {tag} during DataFusion execution"
+                    ))),
+                }
             }
         };
 
-        dispatch_query(&ctx, &query, params, param_types, handler).await
+        let (batches, schema) = dispatch_query(&ctx, &query, params, param_types, handler).await?;
+        Ok(QueryResult::Arrow(batches, schema))
     }
 }
 
@@ -661,11 +691,11 @@ impl QueryRunner for DirectQueryRunner {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-    ) -> datafusion::error::Result<ArrowQueryResult> {
+    ) -> datafusion::error::Result<QueryResult> {
         Ok(
             self.py_worker
                 .on_query(query, params, param_types, do_describe, connection_id)
-                .await,                     // ArrowQueryResult, no rebuilding
+                .await,
         )
     }
 }
@@ -931,13 +961,7 @@ impl SimpleQueryHandler for RiffqProcessor {
         // TODO: this should be up to the user to be handled here
         let trimmed = query.trim();
         let lowercase = trimmed.to_lowercase();
-        if lowercase.starts_with("begin") {
-            return Ok(vec![Response::Execution(Tag::new("BEGIN"))]);
-        } else if lowercase.starts_with("commit") {
-            return Ok(vec![Response::Execution(Tag::new("COMMIT"))]);
-        } else if lowercase.starts_with("rollback") {
-            return Ok(vec![Response::Execution(Tag::new("ROLLBACK"))]);
-        } else if lowercase.starts_with("discard all") {
+        if lowercase.starts_with("discard all") {
             return Ok(vec![Response::Execution(Tag::new("DISCARD ALL"))]);
         } else if lowercase == "show transaction isolation level" {
             let field_infos = Arc::new(vec![FieldInfo::new(
@@ -969,16 +993,19 @@ impl SimpleQueryHandler for RiffqProcessor {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (schema, data_row_stream) = {
-            let (batches, schema) = self
-                .query_runner
-                .execute(query.to_string(), None, None, false, connection_id)
-                .await
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            arrow_to_pg_rows(batches, schema)
-        };
+        let result = self
+            .query_runner
+            .execute(query.to_string(), None, None, false, connection_id)
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
-        Ok(vec![Response::Query(QueryResponse::new(schema, data_row_stream))])
+        match result {
+            QueryResult::Arrow(batches, schema) => {
+                let (schema, data_row_stream) = arrow_to_pg_rows(batches, schema);
+                Ok(vec![Response::Query(QueryResponse::new(schema, data_row_stream))])
+            }
+            QueryResult::Tag(tag) => Ok(vec![Response::Execution(Tag::new(&tag))]),
+        }
     }
 }
 
@@ -1059,22 +1086,25 @@ impl ExtendedQueryHandler for RiffqProcessor {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (schema, data_row_stream) = {
-            let (batches, schema) = self
-                .query_runner
-                .execute(
-                    query.to_string(),
-                    Some(portal.parameters.clone()),
-                    Some(portal.statement.parameter_types.clone()),
-                    false,
-                    connection_id,
-                )
-                .await
-                .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-            arrow_to_pg_rows(batches, schema)
-        };
+        let result = self
+            .query_runner
+            .execute(
+                query.to_string(),
+                Some(portal.parameters.clone()),
+                Some(portal.statement.parameter_types.clone()),
+                false,
+                connection_id,
+            )
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
-        Ok(Response::Query(QueryResponse::new(schema, data_row_stream)))
+        match result {
+            QueryResult::Arrow(batches, schema) => {
+                let (schema, data_row_stream) = arrow_to_pg_rows(batches, schema);
+                Ok(Response::Query(QueryResponse::new(schema, data_row_stream)))
+            }
+            QueryResult::Tag(tag) => Ok(Response::Execution(Tag::new(&tag))),
+        }
     }
 
     async fn do_describe_statement<C>(
@@ -1109,7 +1139,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let (_, schema) = self
+        let result = self
             .query_runner
             .execute(
                 query.to_string(),
@@ -1120,20 +1150,26 @@ impl ExtendedQueryHandler for RiffqProcessor {
             )
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
-        let fields: Vec<FieldInfo> = schema
-            .fields()
-            .iter()
-            .map(|f| {
-                FieldInfo::new(
-                    f.name().clone().into(),
-                    None,
-                    None,
-                    arrow_type_to_pgwire(f.data_type()),
-                    FieldFormat::Text,
-                )
-            })
-            .collect();
-        Ok(DescribePortalResponse::new(fields))
+
+        match result {
+            QueryResult::Arrow(_, schema) => {
+                let fields: Vec<FieldInfo> = schema
+                    .fields()
+                    .iter()
+                    .map(|f| {
+                        FieldInfo::new(
+                            f.name().clone().into(),
+                            None,
+                            None,
+                            arrow_type_to_pgwire(f.data_type()),
+                            FieldFormat::Text,
+                        )
+                    })
+                    .collect();
+                Ok(DescribePortalResponse::new(fields))
+            }
+            QueryResult::Tag(_) => Ok(DescribePortalResponse::new(vec![])),
+        }
     }
 
 

@@ -38,7 +38,7 @@ class DuckDbCatalogTest(unittest.TestCase):
         cls.proc.join()
 
     def test_catalog_entries(self):
-        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
+        conn = psycopg.connect(f"postgresql://user:123@127.0.0.1:{self.port}/db")
         with conn.cursor() as cur:
             cur.execute("SELECT datname FROM pg_catalog.pg_database WHERE datname='duckdb'")
             self.assertEqual(cur.fetchone()[0], "duckdb")

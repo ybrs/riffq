@@ -1,6 +1,7 @@
 import duckdb
 import pyarrow as pa
 import riffq
+from riffq.connection import RiffqServer
 from riffq.helpers import to_arrow
 import logging
 import duckdb
@@ -9,8 +10,25 @@ import riffq
 logging.basicConfig(level=logging.DEBUG)
 
 class Connection(riffq.BaseConnection):
-    def _handle_query(self, sql, callback, **kwargs):
+    def _handle_query(self, sql, callback, tag_callback=callable, **kwargs):
         print(">>> sql", sql)
+
+        sql_clean = sql.strip().lower()
+        if sql_clean in ("begin", "commit", "rollback", "end"):
+            if tag_callback:
+                tag_callback("COMMIT" if sql_clean == "end" else sql_clean.upper())
+            return
+        if sql_clean.startswith("set "):
+            print("set !!!")
+            return tag_callback("SET")
+
+        if sql_clean.startswith("show "):
+            var = sql_clean.split()[1]
+            callback(to_arrow([{"name": var, "type": "str"}], [["1"]]))
+            return
+
+
+
         cur = duckdb_con.cursor()
         try:
             reader = cur.execute(sql).fetch_record_batch()
@@ -48,24 +66,23 @@ def map_type(data_type: str) -> str:
 def run_server(port: int):
     global duckdb_con
     duckdb_con = duckdb.connect()
-    server = riffq.Server(f"127.0.0.1:{port}")
-    conn_mgr = Connection(port)
-    server.on_query(conn_mgr.handle_query)
+    server = RiffqServer(f"127.0.0.1:{port}", connection_cls=Connection)
     # server.set_tls("certs/server.crt", "certs/server.key")
 
-    # duckdb_con.execute("CREATE TABLE users(id INTEGER, name VARCHAR)")
-    # duckdb_con.execute("CREATE TABLE projects(id INTEGER, name VARCHAR)")
-    # duckdb_con.execute(
-    #     "CREATE TABLE tasks(id INTEGER, project_id INTEGER, description VARCHAR)"
-    # )
+    duckdb_con.execute("CREATE TABLE users(id INTEGER, name VARCHAR)")
+    duckdb_con.execute("CREATE TABLE projects(id INTEGER, name VARCHAR)")
+    duckdb_con.execute(
+        "CREATE TABLE tasks(id INTEGER, project_id INTEGER, description VARCHAR)"
+    )
 
     tbls = duckdb_con.execute(
         "SELECT table_schema, table_name FROM information_schema.tables "
         "WHERE table_schema NOT IN ('pg_catalog','information_schema')"
     ).fetchall()
 
+    server.server.register_database("duckdb")
     for schema_name, table_name in tbls:
-        server.register_schema("duckdb", schema_name)
+        server.server.register_schema("duckdb", schema_name)
         cols_info = duckdb_con.execute(
             "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
             "WHERE table_schema=? AND table_name=?",
@@ -81,7 +98,7 @@ def run_server(port: int):
                     }
                 }
             )
-        server.register_table("duckdb", schema_name, table_name, columns)
+        server.server.register_table("duckdb", schema_name, table_name, columns)
 
     server.start(catalog_emulation=True)
 

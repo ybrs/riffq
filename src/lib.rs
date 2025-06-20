@@ -69,9 +69,11 @@ use pgwire::tokio::process_socket;
 use pgwire::api::stmt::{StoredStatement};
 
 pub mod pg;
+mod helpers;
 use pg::arrow_type_to_pgwire;
 use sqlparser::parser::Parser;
 use sqlparser::ast::Statement;
+use helpers::_debug_parameters;
 
 
 /// PostgreSQL version reported to clients during startup and via `SHOW server_version`.
@@ -927,15 +929,38 @@ impl SimpleQueryHandler for RiffqProcessor {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         // TODO: this should be up to the user to be handled here
-        let lowercase = query.trim().to_lowercase();
+        let trimmed = query.trim();
+        let lowercase = trimmed.to_lowercase();
         if lowercase.starts_with("begin") {
             return Ok(vec![Response::Execution(Tag::new("BEGIN"))]);
         } else if lowercase.starts_with("commit") {
             return Ok(vec![Response::Execution(Tag::new("COMMIT"))]);
         } else if lowercase.starts_with("rollback") {
             return Ok(vec![Response::Execution(Tag::new("ROLLBACK"))]);
-        }
+        } else if lowercase.starts_with("discard all") {
+            return Ok(vec![Response::Execution(Tag::new("DISCARD ALL"))]);
+        } else if lowercase == "show transaction isolation level" {
+            let field_infos = Arc::new(vec![FieldInfo::new(
+                "transaction_isolation".to_string(),
+                None,
+                None,
+                Type::TEXT,
+                FieldFormat::Text,
+            )]);
 
+            let mut encoder = DataRowEncoder::new(field_infos.clone());
+            encoder.encode_field(&Some("read committed"))?;
+            let row = encoder.finish()?;
+
+            let rows = stream::iter(vec![Ok(row)]);
+            return Ok(vec![Response::Query(QueryResponse::new(field_infos, rows))]);
+        } else if let Some(var) = Self::parse_show_variable(lowercase.as_str()) {
+            if let Some(resp) = self.show_variable_response(&var.to_lowercase(), FieldFormat::Text) {
+                return Ok(vec![resp]);
+            }
+        } else if lowercase == "" {
+            return Ok(vec![Response::Execution(Tag::new(""))]);
+        }
 
         debug!("[PGWIRE] do_query called with: {}", query);
         let connection_id = _client
@@ -957,9 +982,9 @@ impl SimpleQueryHandler for RiffqProcessor {
     }
 }
 
-pub struct MyExtendedQueryHandler {
-    query_runner: Arc<dyn QueryRunner>,
-}
+// pub struct MyExtendedQueryHandler {
+//     query_runner: Arc<dyn QueryRunner>,
+// }
 #[derive(Clone)]
 pub struct MyStatement {
     pub query: String,
@@ -978,32 +1003,8 @@ impl pgwire::api::stmt::QueryParser for MyQueryParser {
 }
 
 
-fn _debug_parameters(params: &[Option<Bytes>], types: &[Type]) -> String {
-    params.iter().zip(types.iter()).map(|(param, ty)| {
-        match param {
-            None => "NULL".to_string(),
-            Some(bytes) => {
-                let mut buf = &bytes[..];
-                let decoded = match ty {
-                    &Type::INT2 => i16::from_sql(ty, &mut buf).map(|v| v.to_string()),
-                    &Type::INT4 => i32::from_sql(ty, &mut buf).map(|v| v.to_string()),
-                    &Type::INT8 => i64::from_sql(ty, &mut buf).map(|v| v.to_string()),
-                    &Type::FLOAT4 => f32::from_sql(ty, &mut buf).map(|v| v.to_string()),
-                    &Type::FLOAT8 => f64::from_sql(ty, &mut buf).map(|v| v.to_string()),
-                    &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR => {
-                        String::from_sql(ty, &mut buf).map(|s| format!("{:?}", s))
-                    }
-                    _ => Err("unsupported type".into())
-                };
-                decoded.unwrap_or_else(|_| format!("0x{}", hex::encode(bytes)))
-            }
-        }
-    }).collect::<Vec<_>>().join(", ")
-}
-
-
 #[async_trait]
-impl ExtendedQueryHandler for MyExtendedQueryHandler {
+impl ExtendedQueryHandler for RiffqProcessor {
     type Statement = MyStatement;
     type QueryParser = MyQueryParser;
 
@@ -1026,6 +1027,31 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
         let query = &portal.statement.statement.query;
         debug!("[PGWIRE EXTENDED] do_query: {} {}", portal.statement.statement.query, _debug_parameters(&portal.parameters, &portal.statement.parameter_types));
 
+        let query = query.trim().to_lowercase();
+
+        if query.is_empty() {
+            return Ok(Response::Execution(Tag::new("")));
+        } else if query.starts_with("discard all") {
+            return Ok(Response::Execution(Tag::new("DISCARD ALL")));
+        } else if query == "show transaction isolation level" {
+            let field_infos = Arc::new(vec![FieldInfo::new(
+                "transaction_isolation".to_string(),
+                None,
+                None,
+                Type::TEXT,
+                portal.result_column_format.format_for(0),
+            )]);
+
+            let mut encoder = DataRowEncoder::new(field_infos.clone());
+            encoder.encode_field(&Some("read committed"))?;
+            let row = encoder.finish()?;
+            let rows = stream::iter(vec![Ok(row)]);
+            return Ok(Response::Query(QueryResponse::new(field_infos, rows)));
+        } else if let Some(var) = Self::parse_show_variable(query.as_str()) {
+            if let Some(resp) = self.show_variable_response(&var.to_lowercase(), portal.result_column_format.format_for(0)) {
+                return Ok(resp);
+            }
+        }
 
         let connection_id = _client
             .metadata()
@@ -1116,13 +1142,13 @@ impl ExtendedQueryHandler for MyExtendedQueryHandler {
 
 struct RiffqProcessorFactory {
     handler: Arc<RiffqProcessor>,
-    extended_handler: Arc<MyExtendedQueryHandler>,
+    extended_handler: Arc<RiffqProcessor>,
 }
 
 impl PgWireServerHandlers for RiffqProcessorFactory {
     type StartupHandler = RiffqProcessor;
     type SimpleQueryHandler = RiffqProcessor;
-    type ExtendedQueryHandler = MyExtendedQueryHandler;
+    type ExtendedQueryHandler = RiffqProcessor;
     type CopyHandler = NoopCopyHandler;
     type ErrorHandler = NoopErrorHandler;
 
@@ -1357,7 +1383,7 @@ impl Server {
                             });
                             let factory = Arc::new(RiffqProcessorFactory {
                                 handler: handler.clone(),
-                                extended_handler: Arc::new(MyExtendedQueryHandler { query_runner: query_runner.clone() }),
+                                extended_handler: handler.clone(),
                             });
                             
                             let py_worker_clone = py_worker.clone();

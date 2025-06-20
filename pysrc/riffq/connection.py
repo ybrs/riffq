@@ -67,5 +67,5 @@ class RiffqServer:
         conn = self.get_connection(conn_id=conn_id)
         conn.handle_query(sql, callback=callback)
 
-    def start(self):
-        return self.server.start()
+    def start(self, **kw):
+        return self.server.start(**kw)

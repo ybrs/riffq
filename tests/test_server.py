@@ -27,6 +27,14 @@ def _run_server(port: int):
     def handle_query(sql, callback, **kwargs):
         args = kwargs.get("query_args")
         sql_clean = sql.strip().lower()
+        if sql_clean.startswith("begin"):
+            return callback("BEGIN", is_tag=True)
+        if sql_clean.startswith("commit"):
+            return callback("COMMIT", is_tag=True)
+        if sql_clean.startswith("rollback"):
+            return callback("ROLLBACK", is_tag=True)
+        if sql_clean.startswith("discard all"):
+            return callback("DISCARD ALL", is_tag=True)
         if sql_clean == "select multi":
             batch = pa.record_batch(
                 [
@@ -122,6 +130,18 @@ class ServerTest(unittest.TestCase):
             self.assertIsInstance(row[0], bool)
             names = [desc.name for desc in cur.description]
             self.assertEqual(names, ["flag"])
+        conn.close()
+
+    def test_transaction_tags(self):
+        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
+        with conn.cursor() as cur:
+            cur.execute("BEGIN")
+            self.assertEqual(cur.statusmessage, "BEGIN")
+            cur.execute("ROLLBACK")
+            self.assertEqual(cur.statusmessage, "ROLLBACK")
+            cur.execute("BEGIN")
+            cur.execute("COMMIT")
+            self.assertEqual(cur.statusmessage, "COMMIT")
         conn.close()
 
 if __name__ == "__main__":

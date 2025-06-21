@@ -1,35 +1,9 @@
 import duckdb
 import pyarrow as pa
 import riffq
-from riffq.helpers import to_arrow
 import logging
-import duckdb
-import pyarrow as pa
-import riffq
 logging.basicConfig(level=logging.DEBUG)
 
-class Connection(riffq.BaseConnection):
-    def _handle_query(self, sql, callback, **kwargs):
-        print(">>> sql", sql)
-        cur = duckdb_con.cursor()
-        try:
-            reader = cur.execute(sql).fetch_record_batch()
-            self.send_reader(reader, callback)
-        except Exception as exc:
-            logging.exception("error on executing query")
-            batch = self.arrow_batch(
-                [pa.array(["ERROR"]), pa.array([str(exc)])],
-                ["error", "message"],
-            )
-            self.send_reader(batch, callback)
-
-    def handle_query(self, sql, callback, **kwargs):
-        self.executor.submit(self._handle_query, sql, callback, **kwargs)
-
-    def handle_auth(self, user, password, host, database=None, callback=callable):
-        return callback(True)
-        # 
-        return callback(user == "user" and password == "secret")
 
 def map_type(data_type: str) -> str:
     dt = data_type.upper()
@@ -48,22 +22,27 @@ def map_type(data_type: str) -> str:
 def run_server(port: int):
     global duckdb_con
     duckdb_con = duckdb.connect()
-    server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
+    server = riffq.Server(f"127.0.0.1:{port}")
     # server.set_tls("certs/server.crt", "certs/server.key")
 
-    # duckdb_con.execute("CREATE TABLE users(id INTEGER, name VARCHAR)")
-    # duckdb_con.execute("CREATE TABLE projects(id INTEGER, name VARCHAR)")
-    # duckdb_con.execute(
-    #     "CREATE TABLE tasks(id INTEGER, project_id INTEGER, description VARCHAR)"
-    # )
+    duckdb_con.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER, name VARCHAR)")
+    duckdb_con.execute("CREATE TABLE IF NOT EXISTS projects(id INTEGER, name VARCHAR)")
+    duckdb_con.execute(
+        "CREATE TABLE IF NOT EXISTS tasks(id INTEGER, project_id INTEGER, description VARCHAR)"
+    )
+
+    server.register_database("duckdb")
 
     tbls = duckdb_con.execute(
         "SELECT table_schema, table_name FROM information_schema.tables "
         "WHERE table_schema NOT IN ('pg_catalog','information_schema')"
     ).fetchall()
 
+    registered_schemas = set()
     for schema_name, table_name in tbls:
-        server.server.register_schema("duckdb", schema_name)
+        if schema_name not in registered_schemas:
+            server.register_schema("duckdb", schema_name)
+            registered_schemas.add(schema_name)
         cols_info = duckdb_con.execute(
             "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
             "WHERE table_schema=? AND table_name=?",
@@ -79,8 +58,27 @@ def run_server(port: int):
                     }
                 }
             )
-        server.server.register_table("duckdb", schema_name, table_name, columns)
+        server.register_table("duckdb", schema_name, table_name, columns)
 
+    def handle_query(sql, callback, **kwargs):
+        cur = duckdb_con.cursor()
+        try:
+            rb = cur.execute(sql).fetch_record_batch()
+        except Exception as exc:
+            logging.exception("error on executing query")
+            rb = pa.record_batch(
+                [pa.array(["ERROR"]), pa.array([str(exc)])],
+                names=["error", "message"],
+            )
+        reader = pa.RecordBatchReader.from_batches(rb.schema, [rb])
+        if hasattr(reader, "__arrow_c_stream__"):
+            capsule = reader.__arrow_c_stream__()
+        else:
+            from pyarrow.cffi import export_stream
+            capsule = export_stream(reader)
+        callback(capsule)
+
+    server.on_query(handle_query)
     server.start(catalog_emulation=True)
 
 if __name__ == "__main__":

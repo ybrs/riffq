@@ -45,6 +45,22 @@ def get_schema_from_duckdb(columns, types):
 def _handle_query(sql, callback, **kwargs):
     local_con = duckdb_con.cursor()
     print("< received (python):", sql)
+    sql_lc = sql.strip().lower()
+
+    if sql_lc.startswith("set"):
+        return callback("SET", is_tag=True)
+
+    if sql_lc.startswith("begin"):
+        return callback("BEGIN", is_tag=True)
+
+    if sql_lc.startswith("commit"):
+        return callback("COMMIT", is_tag=True)
+
+    if sql_lc.startswith("rollback"):
+        return callback("ROLLBACK", is_tag=True)
+
+    if sql_lc.startswith("discard all"):
+        return callback("DISCARD ALL", is_tag=True)
     if sql.strip().lower() == "select pg_catalog.version()":
         result = (
             [
@@ -59,6 +75,11 @@ def _handle_query(sql, callback, **kwargs):
 
 
     if sql.strip().lower() == "show transaction isolation level":
+        return callback(([
+            {"name": "transaction_isolation", "type": "string"},
+        ], [ ["read committed"] ] ))
+
+    if sql.strip().lower() == "show standard_conforming_strings":
         return callback(([
             {"name": "transaction_isolation", "type": "string"},
         ], [ ["read committed"] ] ))

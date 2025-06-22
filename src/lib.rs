@@ -642,18 +642,24 @@ impl QueryRunner for RouterQueryRunner {
     ) -> datafusion::error::Result<QueryResult> {
         let ctx = self.catalog_ctx.clone();
         let py_worker = self.py_worker.clone();
+
         let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
             let py_worker = py_worker.clone();
             let sql_owned = sql.to_string();
             async move {
                 let res = py_worker
                     .on_query(sql_owned, p, t, do_describe, connection_id)
-                .await;                  // already QueryResult
-                Ok(res)
+                    .await;
+                match res {
+                    QueryResult::Arrow(b, s) => Ok((b, s)),
+                    QueryResult::Tag(_) => Ok((Vec::new(), Arc::new(Schema::empty()))),
+                }
             }
         };
 
-        dispatch_query(&ctx, &query, params, param_types, handler).await
+        let (batches, schema) =
+            dispatch_query(&ctx, &query, params, param_types, handler).await?;
+        Ok(QueryResult::Arrow(batches, schema))
     }
 }
 

@@ -21,6 +21,24 @@ def map_type(data_type: str) -> str:
 
 def _handle_query(sql, callback, **kwargs):
     print(">>> sql", sql)
+    sql = sql.strip().lower()
+    if sql.startswith("set"):
+        return callback("SET", is_tag=True)
+
+    if sql.startswith("begin"):
+        print("sending tag")
+        return callback("BEGIN", is_tag=True)
+    
+    if sql.startswith("commit"):
+        return callback("COMMIT", is_tag=True)
+    
+    if sql.startswith("rollback"):
+        return callback("ROLLBACK", is_tag=True)
+    
+    if sql.startswith("discard all"):
+        return callback("DISCARD ALL", is_tag=True)
+
+
     callback(to_arrow([{"name": "val", "type": "int"}], [[1]]))
 
 

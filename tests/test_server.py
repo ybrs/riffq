@@ -133,10 +133,13 @@ class ServerTest(unittest.TestCase):
         conn.close()
 
     def test_transaction_tags(self):
+        print("checking tags")
         conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
         with conn.cursor() as cur:
             cur.execute("BEGIN")
             self.assertEqual(cur.statusmessage, "BEGIN")
+            print("checking tags", cur.statusmessage)
+
             cur.execute("ROLLBACK")
             self.assertEqual(cur.statusmessage, "ROLLBACK")
             cur.execute("BEGIN")

@@ -49,6 +49,18 @@ def _handle_query(sql, callback, **kwargs):
     print("< received (python):", sql)
     sql_lc = sql.strip().lower()
 
+    if sql_lc.startswith("begin"):
+        return callback("BEGIN", is_tag=True)
+    if sql_lc.startswith("commit"):
+        return callback("COMMIT", is_tag=True)
+    if sql_lc.startswith("rollback"):
+        return callback("ROLLBACK", is_tag=True)
+    if sql_lc.startswith("discard all"):
+        return callback("DISCARD ALL", is_tag=True)
+
+    if sql_lc.startswith("select t.oid") and "from pg_type" in sql_lc and "hstore" in sql_lc:
+        return callback(([{"name": "oid", "type": "int"}, {"name": "typarray", "type": "int"}], []))
+
     if sql_lc == "select pg_catalog.version()":
         return callback(([{"name": "version", "type": "string"}],
                          [["PostgreSQL 14.13"]]))
@@ -56,6 +68,10 @@ def _handle_query(sql, callback, **kwargs):
     if sql_lc == "show transaction isolation level":
         return callback(([{"name": "transaction_isolation", "type": "string"}],
                          [["read committed"]]))
+
+    if sql_lc == "show standard_conforming_strings":
+        return callback(([{"name": "standard_conforming_strings", "type": "string"}],
+                         [["on"]]))
 
     if sql_lc == "select current_schema()":
         return callback(([{"name": "current_schema", "type": "string"}],

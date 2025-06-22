@@ -24,6 +24,20 @@ def _handle_query(sql, callback, **kwargs):
     cur = duckdb_con.cursor()
     text = sql.strip().lower().split(';')[0]
 
+    if text.startswith("begin"):
+        return callback("BEGIN", is_tag=True)
+    if text.startswith("commit"):
+        return callback("COMMIT", is_tag=True)
+    if text.startswith("rollback"):
+        return callback("ROLLBACK", is_tag=True)
+    if text.startswith("discard all"):
+        return callback("DISCARD ALL", is_tag=True)
+
+    if text.startswith("select t.oid") and "from pg_type" in text and "hstore" in text:
+        empty = [pa.array([], pa.int32()), pa.array([], pa.int32())]
+        batch = arrow_batch(empty, ["oid", "typarray"])
+        return send_reader(batch, callback)
+
     if text == "select pg_catalog.version()":
         batch = arrow_batch(
             [pa.array(["PostgreSQL 14.13"])],
@@ -40,8 +54,8 @@ def _handle_query(sql, callback, **kwargs):
 
     if text == "show standard_conforming_strings":
         batch = arrow_batch(
-            [pa.array(["read committed"])],
-            ["transaction_isolation"],
+            [pa.array(["on"])],
+            ["standard_conforming_strings"],
         )
         return send_reader(batch, callback)
     

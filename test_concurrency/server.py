@@ -45,7 +45,21 @@ def get_schema_from_duckdb(columns, types):
 def _handle_query(sql, callback, **kwargs):
     local_con = duckdb_con.cursor()
     print("< received (python):", sql)
-    if sql.strip().lower() == "select pg_catalog.version()":
+    sql_lc = sql.strip().lower()
+
+    if sql_lc.startswith("begin"):
+        return callback("BEGIN", is_tag=True)
+    if sql_lc.startswith("commit"):
+        return callback("COMMIT", is_tag=True)
+    if sql_lc.startswith("rollback"):
+        return callback("ROLLBACK", is_tag=True)
+    if sql_lc.startswith("discard all"):
+        return callback("DISCARD ALL", is_tag=True)
+
+    if sql_lc.startswith("select t.oid") and "from pg_type" in sql_lc and "hstore" in sql_lc:
+        return callback(([{"name": "oid", "type": "int"}, {"name": "typarray", "type": "int"}], []))
+
+    if sql_lc == "select pg_catalog.version()":
         result = (
             [
                 {"name": "version", "type": "string"},
@@ -58,19 +72,27 @@ def _handle_query(sql, callback, **kwargs):
         return callback(result)
 
 
-    if sql.strip().lower() == "show transaction isolation level":
+    if sql_lc == "show transaction isolation level":
         return callback(([
             {"name": "transaction_isolation", "type": "string"},
-        ], [ ["read committed"] ] ))
+        ], [["read committed"]]))
 
-    if sql.strip().lower() == "select current_schema()":
+    if sql_lc == "show standard_conforming_strings":
         return callback(([
-                             {"name": "current_schema", "type": "string"},
-                         ], [ ["public"] ] ))
+            {"name": "standard_conforming_strings", "type": "string"},
+        ], [["on"]]))
+
+    if sql_lc == "select current_schema()":
+        return callback(([
+            {"name": "current_schema", "type": "string"},
+        ], [["public"]]))
 
 
     try:
         res = local_con.sql(sql)
+        if res is None:
+            callback(([], []))
+            return
         schema = get_schema_from_duckdb(res.columns, res.types)
         callback((schema, res.fetchall()))
     except Exception as e:

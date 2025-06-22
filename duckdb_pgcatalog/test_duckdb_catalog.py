@@ -3,7 +3,6 @@ import socket
 import time
 import psycopg
 import unittest
-from helpers import _ensure_riffq_built
 
 
 def _run_server(port: int):
@@ -17,7 +16,6 @@ def _run_server(port: int):
 class DuckDbCatalogTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55441
         cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
         cls.proc.start()
@@ -38,7 +36,7 @@ class DuckDbCatalogTest(unittest.TestCase):
         cls.proc.join()
 
     def test_catalog_entries(self):
-        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
+        conn = psycopg.connect(f"postgresql://user:123@127.0.0.1:{self.port}/db")
         with conn.cursor() as cur:
             cur.execute("SELECT datname FROM pg_catalog.pg_database WHERE datname='duckdb'")
             self.assertEqual(cur.fetchone()[0], "duckdb")

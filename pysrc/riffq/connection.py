@@ -2,8 +2,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import pyarrow as pa
 from ._riffq import Server
+from abc import ABCMeta, abstractmethod
 
-class BaseConnection:
+class BaseConnection(metaclass=ABCMeta):
     conn_id = None
 
     def __init__(self, conn_id, executor:ThreadPoolExecutor):
@@ -25,28 +26,33 @@ class BaseConnection:
             [pa.record_batch(values, names=names)],
         )
 
+    @abstractmethod
     def handle_auth(self, user, password, host, database=None, callback=callable):
         return callback(user == "user" and password == "secret")
 
     def handle_connect(self, ip, port, callback=callable):
         return callback(True)
+    
+    @abstractmethod
+    def handle_query(self, sql, callback=callable, **kwargs):
+        pass
 
 
 class RiffqServer:
     def __init__(self, listen_addr, connection_cls=BaseConnection):
         # we aren't making the server class in rust/pyo3 subclassable
         # this way it's simpler
-        self.server = Server(listen_addr)
+        self._server = Server(listen_addr)
         # TODO: max cpu
         self.executor = ThreadPoolExecutor(max_workers=4)
-        self.server.on_authentication(self.handle_auth)
-        self.server.on_query(self.handle_query)
-        self.server.on_connect(self.handle_connect)
+        self._server.on_authentication(self.handle_auth)
+        self._server.on_query(self.handle_query)
+        self._server.on_connect(self.handle_connect)
         self.connections = {}
         self.connection_cls = connection_cls
     
     def set_tls(self, crt, key):
-        self.server.set_tls(crt, key)
+        self._server.set_tls(crt, key)
 
     def get_connection(self, conn_id) -> BaseConnection:
         conn = self.connections.get(conn_id, None)
@@ -65,7 +71,7 @@ class RiffqServer:
 
     def handle_query(self, sql, callback, conn_id=None, **kwargs):
         conn = self.get_connection(conn_id=conn_id)
-        conn.handle_query(sql, callback=callback)
+        conn.handle_query(sql, callback=callback, **kwargs)
 
     def start(self, **kw):
-        return self.server.start(**kw)
+        return self._server.start(**kw)

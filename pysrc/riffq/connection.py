@@ -3,6 +3,9 @@ from datetime import datetime
 import pyarrow as pa
 from ._riffq import Server
 from abc import ABCMeta, abstractmethod
+import logging
+
+logger = logging.getLogger('riffq:connection')
 
 class BaseConnection(metaclass=ABCMeta):
     conn_id = None
@@ -37,6 +40,9 @@ class BaseConnection(metaclass=ABCMeta):
     def handle_query(self, sql, callback=callable, **kwargs):
         pass
 
+    def handle_disconnect(self, ip, port, callback=callable):
+        return callback(True)
+
 
 class RiffqServer:
     def __init__(self, listen_addr, connection_cls=BaseConnection):
@@ -48,6 +54,7 @@ class RiffqServer:
         self._server.on_authentication(self.handle_auth)
         self._server.on_query(self.handle_query)
         self._server.on_connect(self.handle_connect)
+        self._server.on_disconnect(self.handle_disconnect)
         self.connections = {}
         self.connection_cls = connection_cls
     
@@ -72,6 +79,14 @@ class RiffqServer:
     def handle_query(self, sql, callback, conn_id=None, **kwargs):
         conn = self.get_connection(conn_id=conn_id)
         conn.handle_query(sql, callback=callback, **kwargs)
+
+    def handle_disconnect(self, conn_id, ip, port, callback=callable):
+        conn = self.get_connection(conn_id=conn_id)
+        conn.handle_disconnect(ip, port, callback=callback)
+        try:
+            del self.connections[conn_id]
+        except KeyError:
+            logger.exception("Connection disconnected but not in self.connections")
 
     def start(self, **kw):
         return self._server.start(**kw)

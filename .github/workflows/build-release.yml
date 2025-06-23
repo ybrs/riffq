@@ -13,18 +13,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
-
-    - name: set-version
-      shell: bash
-      run: |
-        VERSION=${GITHUB_REF_NAME#release-}
-        python - "$VERSION" <<'PY'
-        import re, sys, pathlib
-        v = sys.argv[1]
-        p = pathlib.Path("Cargo.toml")
-        p.write_text(re.sub(r'^version\s*=.*$', f'version = "{v}"', p.read_text(), flags=re.M))
-        PY
-
     - uses: PyO3/maturin-action@v1
       with:
         command: build
@@ -38,9 +26,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - run: |
-        VERSION=${GITHUB_REF_NAME#release-}
-        sed -i "s/^version = .*/version = \"${VERSION}\"/" Cargo.toml
     - uses: PyO3/maturin-action@v1
       with:
         command: sdist
@@ -58,10 +43,12 @@ jobs:
     steps:
     - uses: actions/download-artifact@v4
       with:
-        pattern: "wheels-*"
+        pattern: wheels-*
+        merge-multiple: true
     - uses: actions/download-artifact@v4
       with:
-        pattern: "sdist"
+        pattern: sdist
+        merge-multiple: true
     - run: |
         mkdir dist
         find . -name '*.whl' -exec cp {} dist/ \;

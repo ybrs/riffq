@@ -9,7 +9,7 @@ It allows you to serve data from Python over the PostgreSQL protocol — turning
 
 - Implements the PostgreSQL wire protocol in Rust for performance and concurrency
 - Sends raw SQL queries (Simple or Extended protocol) to Python for interpretation
-- Implements postgres catalog compatibility layer (see [`pg_catalog_rs`](https://github.com/ybrs/pg_catalog)
+- Implements postgres catalog compatibility layer, see [`pg_catalog_rs`](https://github.com/ybrs/pg_catalog)
 
 Since you are in python, you can
 - Allows you to connect to remote data sources (e.g., analytics DB, CRM) and expose them as a unified PostgreSQL database
@@ -88,6 +88,12 @@ The Rust side calls this Python handler when a SQL query comes in via the Postgr
   - SQL execution (via any engine: DuckDB, Polars, etc.)
   - Data transformation
   - Custom logic and dynamic schema definitions
+
+### Zero Copy
+
+We try to achieve zero-copy by using arrow/pycapsule. So data from duckdb comes to python as a pycapsule pointer, which goes to thread in python which goes to the callback in rust still as a pycapsule pointer. We then stream to network with postgresql using pgwire.  
+
+https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html
 
 ---
 
@@ -221,6 +227,14 @@ For example
 - 🟡 Better logging, monitoring, observability
 ---
 
+## Installation
+
+We currently have a pre release on pypi. You can install it with `--pre` tag.
+
+```bash
+pip install riffq --pre
+```
+
 ## Running Locally
 
 Install the development requirements and run the test suite:
@@ -228,6 +242,8 @@ Install the development requirements and run the test suite:
 ```bash
 git clone git@github.com:ybrs/riffq.git
 cd riffq
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 
 maturin build --profile=fast -i python3
@@ -249,16 +265,15 @@ MIT or Apache 2.0 — your choice.
 ## Contributing
 
 Contributions are welcome! Especially for:
+- For the emulation layer, I am currently testing with
+  - Intellij Datagrid
+  - Dbeaver
+  - psql cli
+  - [Vscode Postgresql Extension](https://marketplace.visualstudio.com/items?itemName=ms-ossdata.vscode-pgsql)
+
+  So testing with other clients, especially BI tools are very welcomed. 
+  
 - Better Python DX
 - Example apps (data lake, feature store, etc.)
-
----
-
-# Architecture Notes
-
-We try to achieve zero-copy by using arrow/pycapsule. So data from duckdb comes to python as a pycapsule pointer, which goes to thread in python which goes to the callback in rust still as a pycapsule pointer. We then stream to network with postgresql using pgwire.  
-
-
-https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html
 
 ---

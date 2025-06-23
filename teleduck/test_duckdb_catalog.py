@@ -1,23 +1,34 @@
 import multiprocessing
 import socket
 import time
+import tempfile
+from pathlib import Path
 import psycopg
 import unittest
+import duckdb
 
 
-def _run_server(port: int):
+def _run_server(db_file: str, port: int):
     import sys
-    from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from duckdb_pgcatalog.server import run_server
-    run_server(port)
+    from teleduck.server import run_server
+    run_server(db_file, port)
 
 
 class DuckDbCatalogTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.port = 55441
-        cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
+        fd, cls.db_file = tempfile.mkstemp(suffix=".db")
+        Path(cls.db_file).unlink()  # remove so DuckDB can create it
+        con = duckdb.connect(cls.db_file)
+        con.execute("CREATE TABLE users(id INTEGER, name VARCHAR)")
+        con.execute("CREATE TABLE projects(id INTEGER, name VARCHAR)")
+        con.execute("CREATE TABLE tasks(id INTEGER, project_id INTEGER, description VARCHAR)")
+        con.close()
+        cls.proc = multiprocessing.Process(
+            target=_run_server, args=(cls.db_file, cls.port), daemon=True
+        )
         cls.proc.start()
         start = time.time()
         while time.time() - start < 10:
@@ -34,6 +45,7 @@ class DuckDbCatalogTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.proc.terminate()
         cls.proc.join()
+        Path(cls.db_file).unlink(missing_ok=True)
 
     def test_catalog_entries(self):
         conn = psycopg.connect(f"postgresql://user:123@127.0.0.1:{self.port}/db")

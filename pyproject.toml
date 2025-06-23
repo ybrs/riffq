@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "riffq"
-version = "0.1.0"
+dynamic = ["version"]
 requires-python = ">=3.8"
 classifiers = ["Programming Language :: Rust"]
 packages = [{ include = "riffq", from = "pysrc" }] 

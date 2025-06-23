@@ -4,6 +4,7 @@ import riffq
 from riffq.helpers import to_arrow
 import logging
 from pathlib import Path
+from typing import Iterable, Optional
 
 def map_type(data_type: str) -> str:
     dt = data_type.upper()
@@ -85,11 +86,42 @@ class Connection(riffq.BaseConnection):
         # return callback(user == "user" and password == "secret")
         callback(True)
 
-def run_server(db_file: str, port: int = 5433, host: str = "127.0.0.1"):
-    """Start the teleduck server using the given DuckDB database file."""
+def run_server(
+    db_file: str,
+    port: int = 5433,
+    host: str = "127.0.0.1",
+    sql_scripts: Optional[Iterable[str]] = None,
+    sql: Optional[Iterable[str]] = None,
+):
+    """Start the teleduck server using the given DuckDB database file.
+
+    Parameters
+    ----------
+    db_file:
+        Path to the DuckDB database file.
+    port:
+        Port to listen on.
+    host:
+        Host to listen on.
+    sql_scripts:
+        Iterable of file paths pointing to SQL scripts that will be executed in
+        order before the server starts.
+    sql:
+        Iterable of SQL statements to execute before the server starts.
+    """
 
     global duckdb_con
     duckdb_con = duckdb.connect(db_file)
+
+    # execute initialization SQL before starting the server
+    if sql_scripts:
+        for script in sql_scripts:
+            with open(script, "r", encoding="utf-8") as file:
+                duckdb_con.execute(file.read())
+
+    if sql:
+        for statement in sql:
+            duckdb_con.execute(statement)
 
     server = riffq.RiffqServer(f"{host}:{port}", connection_cls=Connection)
     cert_dir = Path(__file__).parent / "certs"

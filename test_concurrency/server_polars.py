@@ -49,6 +49,18 @@ def _handle_query(sql, callback, **kwargs):
     print("< received (python):", sql)
     query = sql.strip().lower()
 
+    if query.startswith("begin"):
+        return callback("BEGIN", is_tag=True)
+    if query.startswith("commit"):
+        return callback("COMMIT", is_tag=True)
+    if query.startswith("rollback"):
+        return callback("ROLLBACK", is_tag=True)
+    if query.startswith("discard all"):
+        return callback("DISCARD ALL", is_tag=True)
+
+    if query.startswith("select t.oid") and "from pg_type" in query and "hstore" in query:
+        return callback(([{"name": "oid", "type": "int"}, {"name": "typarray", "type": "int"}], []))
+
     if query == "select pg_catalog.version()":
         return callback(([{"name": "version", "type": "string"}],
                          [["PostgreSQL 14.13"]]))
@@ -56,6 +68,10 @@ def _handle_query(sql, callback, **kwargs):
     if query == "show transaction isolation level":
         return callback(([{"name": "transaction_isolation", "type": "string"}],
                          [["read committed"]]))
+
+    if query == "show standard_conforming_strings":
+        return callback(([{"name": "standard_conforming_strings", "type": "string"}],
+                         [["on"]]))
 
     if query == "select current_schema()":
         return callback(([{"name": "current_schema", "type": "string"}],

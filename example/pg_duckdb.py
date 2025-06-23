@@ -48,7 +48,7 @@ class Connection(riffq.BaseConnection):
             )
             self.send_reader(batch, callback)
 
-    def handle_query(self, sql, callback, **kwargs):
+    def handle_query(self, sql, callback=callable, **kwargs):
         self.executor.submit(self._handle_query, sql, callback, **kwargs)
 
 def main():

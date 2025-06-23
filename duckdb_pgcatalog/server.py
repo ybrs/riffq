@@ -21,30 +21,45 @@ def map_type(data_type: str) -> str:
 class Connection(riffq.BaseConnection):
     def _handle_query(self, sql, callback, **kwargs):
         cur = duckdb_con.cursor()
-        text = sql.strip().lower().split(';')[0]
+        sql = sql.strip().lower().split(';')[0]
 
-        if text == "select pg_catalog.version()":
+        if sql.startswith("set"):
+            return callback("SET", is_tag=True)
+
+        if sql.startswith("begin"):
+            return callback("BEGIN", is_tag=True)
+        
+        if sql.startswith("commit"):
+            return callback("COMMIT", is_tag=True)
+        
+        if sql.startswith("rollback"):
+            return callback("ROLLBACK", is_tag=True)
+        
+        if sql.startswith("discard all"):
+            return callback("DISCARD ALL", is_tag=True)
+
+        if sql == "select pg_catalog.version()":
             batch = self.arrow_batch(
                 [pa.array(["PostgreSQL 14.13"])],
                 ["version"],
             )
             return self.send_reader(batch, callback)
 
-        if text == "show transaction isolation level":
+        if sql == "show transaction isolation level":
             batch = self.arrow_batch(
                 [pa.array(["read committed"])],
                 ["transaction_isolation"],
             )
             return self.send_reader(batch, callback)
 
-        if text == "show standard_conforming_strings":
+        if sql == "show standard_conforming_strings":
             batch = self.arrow_batch(
                 [pa.array(["read committed"])],
                 ["transaction_isolation"],
             )
             return self.send_reader(batch, callback)
         
-        if text == "select current_schema()":
+        if sql == "select current_schema()":
             batch = self.arrow_batch(
                 [pa.array(["public"])],
                 ["current_schema"],
@@ -66,30 +81,8 @@ class Connection(riffq.BaseConnection):
         self.executor.submit(self._handle_query, sql, callback, **kwargs)
 
     def handle_auth(self, user, password, host, database=None, callback=callable):
-        callback(True)
         # return callback(user == "user" and password == "secret")
-
-
-def _handle_query(sql, callback, **kwargs):
-    sql = sql.strip().lower()
-    if sql.startswith("set"):
-        return callback("SET", is_tag=True)
-
-    if sql.startswith("begin"):
-        return callback("BEGIN", is_tag=True)
-    
-    if sql.startswith("commit"):
-        return callback("COMMIT", is_tag=True)
-    
-    if sql.startswith("rollback"):
-        return callback("ROLLBACK", is_tag=True)
-    
-    if sql.startswith("discard all"):
-        return callback("DISCARD ALL", is_tag=True)
-
-
-    callback(to_arrow([{"name": "val", "type": "int"}], [[1]]))
-
+        callback(True)
 
 def run_server(port: int):
     global duckdb_con
@@ -130,7 +123,6 @@ def run_server(port: int):
             )
         server._server.register_table("duckdb", schema_name, table_name, columns)
 
-    # server.on_query(_handle_query)
     server.start(catalog_emulation=True)
 
 if __name__ == "__main__":

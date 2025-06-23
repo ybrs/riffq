@@ -1,7 +1,7 @@
 # riffq
 
-**riffq** is a Python-accessible toolkit (built in Rust) for building PostgreSQL wire-compatible databases.  
-It allows you to serve data from Python over the PostgreSQL protocol — turning your Python-based logic or in-memory data into a queryable, network-exposed system.
+**riffq** is a toolkit in python (built in Rust) for building PostgreSQL wire-compatible databases.  
+It allows you to serve data from Python over the PostgreSQL protocol — turning your Python-based logic or in-memory data into a queryable, network-exposed system. We also have a catalog emulation system in rust with datafusion.
 
 ---
 
@@ -32,12 +32,45 @@ Since you are in python, you can
 ## Example
 
 ```python
-# Python side
-def handle_query(sql: str) -> Tuple[List[Dict[str, Any]], List[Tuple[str, str]]]:
-    df = duckdb.query(sql).to_df()
-    columns = [(name, str(dtype)) for name, dtype in zip(df.columns, df.dtypes)]
-    rows = df.to_dict(orient="records")
-    return rows, columns
+import logging
+import duckdb
+import pyarrow as pa
+import riffq
+logging.basicConfig(level=logging.DEBUG)
+
+class Connection(riffq.BaseConnection):
+    def _handle_query(self, sql, callback, **kwargs):
+        cur = duckdb_con.cursor()
+        try:
+            reader = cur.execute(sql).fetch_record_batch()
+            self.send_reader(reader, callback)
+        except Exception as exc:
+            logging.exception("error on executing query")
+            batch = self.arrow_batch(
+                [pa.array(["ERROR"]), pa.array([str(exc)])],
+                ["error", "message"],
+            )
+            self.send_reader(batch, callback)
+
+    def handle_query(self, sql, callback=callable, **kwargs):
+        self.executor.submit(self._handle_query, sql, callback, **kwargs)
+
+def main():
+    global duckdb_con
+    duckdb_con = duckdb.connect()
+    duckdb_con.execute(
+        """
+        CREATE VIEW klines AS 
+        SELECT * 
+        FROM 'data/klines.parquet'
+        """
+    )
+    server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
+    server.set_tls("certs/server.crt", "certs/server.key")
+    server.start()
+
+if __name__ == "__main__":
+    main()
 ```
 
 The Rust side calls this Python handler when a SQL query comes in via the PostgreSQL protocol.
@@ -60,20 +93,66 @@ The Rust side calls this Python handler when a SQL query comes in via the Postgr
 
 ## Getting Started
 
+### Install the package
+
 ```bash
-pip install riffq
+pip install riffq --pre
 ```
+
+### Extend BaseConnection class
+
+You can extend the base class for 
+- handle_query
+- handle_auth - To check for username/password
+- handle_connect - To check ip/port restriction
+- handle_disconnect - WIP
 
 ```python
-import riffq
+class Connection(riffq.BaseConnection):
+    def _handle_query(self, sql, callback, **kwargs):
+        cur = duckdb_con.cursor()
+        try:
+            reader = cur.execute(sql).fetch_record_batch()
+            self.send_reader(reader, callback)
+        except Exception as exc:
+            logging.exception("error on executing query")
+            batch = self.arrow_batch(
+                [pa.array(["ERROR"]), pa.array([str(exc)])],
+                ["error", "message"],
+            )
+            self.send_reader(batch, callback)
 
-@riffq.query_handler
-def handle_sql(sql: str):
-    # Your query handling logic here
-    ...
-    
-riffq.serve(port=5432)
+    def handle_query(self, sql, callback=callable, **kwargs):
+        self.executor.submit(self._handle_query, sql, callback, **kwargs)
+
 ```
+
+### Start the server
+
+```python
+    global duckdb_con
+    duckdb_con = duckdb.connect()
+    duckdb_con.execute(
+        """
+        CREATE VIEW klines AS 
+        SELECT * 
+        FROM 'data/klines.parquet'
+        """
+    )
+    server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
+    server.set_tls("certs/server.crt", "certs/server.key")
+    server.start()
+```
+
+You can check server implementations on test_concurrency/ and example/ directory
+
+
+Then connect using any PostgreSQL client:
+
+```bash
+psql -h localhost -p 5433
+```
+
 
 ### Enabling TLS
 
@@ -83,19 +162,49 @@ Generate a temporary certificate and key:
 openssl req -newkey rsa:2048 -nodes -keyout server.key -x509 -days 1 -out server.crt -subj "/CN=localhost"
 ```
 
-Start the server with TLS enabled:
+### Enabling Catalog Emulation
+
+Postgresql clients sends queries to pg_catalog schema to find out databases, schemas, tables, columns.
+
+We have this (datafusion_pg_catalog)[https://github.com/ybrs/pg_catalog] for this purpose.
+
+You can register your own database and your tables. 
+
+For example
 
 ```python
-server = riffq.Server("127.0.0.1:5432")
-server.set_tls("server.crt", "server.key")
-server.start(tls=True)
+    server = riffq.RiffqServer(f"127.0.0.1:{port}", connection_cls=Connection)
+    server.set_tls("certs/server.crt", "certs/server.key")
+
+    server._server.register_database("duckdb")
+
+    tbls = duckdb_con.execute(
+        "SELECT table_schema, table_name FROM information_schema.tables "
+        "WHERE table_schema NOT IN ('pg_catalog','information_schema')"
+    ).fetchall()
+
+    for schema_name, table_name in tbls:
+        server._server.register_schema("duckdb", schema_name)
+        cols_info = duckdb_con.execute(
+            "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+            "WHERE table_schema=? AND table_name=?",
+            (schema_name, table_name),
+        ).fetchall()
+        columns = []
+        for col_name, data_type, is_nullable in cols_info:
+            columns.append(
+                {
+                    col_name: {
+                        "type": map_type(data_type),
+                        "nullable": is_nullable.upper() == "YES",
+                    }
+                }
+            )
+        server._server.register_table("duckdb", schema_name, table_name, columns)
+
+    server.start(catalog_emulation=True)
 ```
 
-Then connect using any PostgreSQL client:
-
-```bash
-psql -h localhost -p 5432
-```
 
 ---
 
@@ -103,21 +212,28 @@ psql -h localhost -p 5432
 
 - ✅ Wire protocol support (simple + extended)
 - ✅ Query dispatching to Python
+- ✅ Thread based non-blocking query execution (long queries don't block)
 - ✅ DuckDB, Pandas, Polars compatibility
-- 🟡 Limited SQL parsing on Rust side (forwarded to Python)
+- ✅ Limited SQL parsing on Rust side (forwarded to Python)
 - ✅ Optional TLS encryption
-
+- ✅ Integration with optional catalog emulation layer
+- 🟡 More examples
+- 🟡 Better logging, monitoring, observability
 ---
 
-## Running Tests
+## Running Locally
 
 Install the development requirements and run the test suite:
 
 ```bash
+git clone git@github.com:ybrs/riffq.git
+cd riffq
 pip install -r requirements.txt
+
 maturin build --profile=fast -i python3
 pip install target/wheels/*.whl
-python -m unittest discover -s tests
+# or maturin developer
+make all-tests
 ```
 
 The tests require the Rust extension to build successfully; any build failure will cause the suite to fail.
@@ -134,19 +250,15 @@ MIT or Apache 2.0 — your choice.
 
 Contributions are welcome! Especially for:
 - Better Python DX
-- Support for pg_catalog views
 - Example apps (data lake, feature store, etc.)
 
 ---
 
-## Development Notes
+# Architecture Notes
 
-This repository contains tests that exercise the ability to return query results
-as Arrow IPC streams from Python. The initial implementation in `src/lib.rs`
-only accepted raw bytes without decoding them, resulting in empty result sets.
+We try to achieve zero-copy by using arrow/pycapsule. So data from duckdb comes to python as a pycapsule pointer, which goes to thread in python which goes to the callback in rust still as a pycapsule pointer. We then stream to network with postgresql using pgwire.  
 
-The code now invokes `pyarrow` to parse these IPC bytes back into ordinary
-rows.  The parsing is performed inside the Rust callback while holding the
-Python GIL so no additional Rust Arrow dependencies are required.
+
+https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html
 
 ---

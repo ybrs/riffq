@@ -45,8 +45,12 @@ jobs:
         run: pip install maturin
       - name: Install wheel
         run: pip install .
+      - name: Install teleduck
+        run: pip install ./teleduck
       - name: Run Python unit tests
         run: python -m unittest discover -s tests
       - name: Run concurrency unit tests
         run: python -m unittest discover -s test_concurrency
+      - name: Run teleduck unit tests
+        run: python -m unittest discover -s teleduck -p 'test_*.py'
 

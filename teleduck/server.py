@@ -85,19 +85,13 @@ class Connection(riffq.BaseConnection):
         # return callback(user == "user" and password == "secret")
         callback(True)
 
-def run_server(db_file: str, port: int = 5433):
+def run_server(db_file: str, port: int = 5433, host: str = "127.0.0.1"):
     """Start the teleduck server using the given DuckDB database file."""
 
     global duckdb_con
     duckdb_con = duckdb.connect(db_file)
 
-    duckdb_con.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER, name VARCHAR)")
-    duckdb_con.execute("CREATE TABLE IF NOT EXISTS projects(id INTEGER, name VARCHAR)")
-    duckdb_con.execute(
-        "CREATE TABLE IF NOT EXISTS tasks(id INTEGER, project_id INTEGER, description VARCHAR)"
-    )
-
-    server = riffq.RiffqServer(f"127.0.0.1:{port}", connection_cls=Connection)
+    server = riffq.RiffqServer(f"{host}:{port}", connection_cls=Connection)
     cert_dir = Path(__file__).parent / "certs"
     server.set_tls(str(cert_dir / "server.crt"), str(cert_dir / "server.key"))
 

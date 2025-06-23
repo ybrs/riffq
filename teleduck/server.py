@@ -3,6 +3,7 @@ import pyarrow as pa
 import riffq
 from riffq.helpers import to_arrow
 import logging
+from pathlib import Path
 
 def map_type(data_type: str) -> str:
     dt = data_type.upper()
@@ -84,18 +85,21 @@ class Connection(riffq.BaseConnection):
         # return callback(user == "user" and password == "secret")
         callback(True)
 
-def run_server(port: int):
-    global duckdb_con
-    duckdb_con = duckdb.connect()
+def run_server(db_file: str, port: int = 5433):
+    """Start the teleduck server using the given DuckDB database file."""
 
-    duckdb_con.execute("CREATE TABLE users(id INTEGER, name VARCHAR)")
-    duckdb_con.execute("CREATE TABLE projects(id INTEGER, name VARCHAR)")
+    global duckdb_con
+    duckdb_con = duckdb.connect(db_file)
+
+    duckdb_con.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER, name VARCHAR)")
+    duckdb_con.execute("CREATE TABLE IF NOT EXISTS projects(id INTEGER, name VARCHAR)")
     duckdb_con.execute(
-        "CREATE TABLE tasks(id INTEGER, project_id INTEGER, description VARCHAR)"
+        "CREATE TABLE IF NOT EXISTS tasks(id INTEGER, project_id INTEGER, description VARCHAR)"
     )
 
     server = riffq.RiffqServer(f"127.0.0.1:{port}", connection_cls=Connection)
-    server.set_tls("certs/server.crt", "certs/server.key")
+    cert_dir = Path(__file__).parent / "certs"
+    server.set_tls(str(cert_dir / "server.crt"), str(cert_dir / "server.key"))
 
     server._server.register_database("duckdb")
 
@@ -126,4 +130,12 @@ def run_server(port: int):
     server.start(catalog_emulation=True)
 
 if __name__ == "__main__":
-    run_server(port=5433)
+    import click
+
+    @click.command()
+    @click.argument("db_file", type=click.Path())
+    @click.option("--port", default=5433, show_default=True, help="Port to listen on.")
+    def _main(db_file: str, port: int):
+        run_server(db_file, port)
+
+    _main()

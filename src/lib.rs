@@ -619,6 +619,8 @@ trait QueryRunner: Send + Sync {
         do_describe: bool,
         connection_id: u64,
     ) -> datafusion::error::Result<QueryResult>;
+
+    fn set_ctx(&self, _ctx: Arc<SessionContext>) {}
 }
 
 pub enum QueryResult {
@@ -628,7 +630,7 @@ pub enum QueryResult {
 
 struct RouterQueryRunner {
     py_worker: Arc<PythonWorker>,
-    catalog_ctx: Arc<SessionContext>,
+    catalog_ctx: Arc<Mutex<Arc<SessionContext>>>,
 }
 
 #[async_trait]
@@ -641,7 +643,7 @@ impl QueryRunner for RouterQueryRunner {
         do_describe: bool,
         connection_id: u64,
     ) -> datafusion::error::Result<QueryResult> {
-        let ctx = self.catalog_ctx.clone();
+        let ctx = self.catalog_ctx.lock().unwrap().clone();
         let py_worker = self.py_worker.clone();
 
         let tag_holder = Arc::new(Mutex::new(None));
@@ -674,6 +676,10 @@ impl QueryRunner for RouterQueryRunner {
             Ok(QueryResult::Arrow(batches, schema))
         }
     }
+
+    fn set_ctx(&self, ctx: Arc<SessionContext>) {
+        *self.catalog_ctx.lock().unwrap() = ctx;
+    }
 }
 
 
@@ -698,13 +704,16 @@ impl QueryRunner for DirectQueryRunner {
                 .await,                     // QueryResult, no rebuilding
         )
     }
+
+    fn set_ctx(&self, _ctx: Arc<SessionContext>) {}
 }
 
 pub struct RiffqProcessor {
     py_worker: Arc<PythonWorker>,
     conn_id_sender: Arc<Mutex<Option<oneshot::Sender<u64>>>>,
     query_runner: Arc<dyn QueryRunner>,
-    ctx: Arc<SessionContext>,
+    ctx_map: Arc<HashMap<String, Arc<SessionContext>>>,
+    ctx: Arc<Mutex<Arc<SessionContext>>>,
 }
 
 use datafusion::{
@@ -714,6 +723,23 @@ use datafusion::{
 
 
 impl RiffqProcessor {
+    fn get_ctx(&self) -> Arc<SessionContext> {
+        self.ctx.lock().unwrap().clone()
+    }
+
+    fn update_ctx_from_client<C>(&self, client: &C)
+    where
+        C: ClientInfo + ?Sized,
+    {
+        if let Some(db) = client.metadata().get(pgwire::api::METADATA_DATABASE).cloned() {
+            if let Some(base) = self.ctx_map.get(&db) {
+                let new_ctx = Arc::new(SessionContext::new_with_state(base.state().clone()));
+                *self.ctx.lock().unwrap() = new_ctx.clone();
+                self.query_runner.set_ctx(new_ctx);
+                log::debug!("updated context for db {}", db);
+            }
+        }
+    }
 
     fn register_current_database<C>(&self, client: &C) -> datafusion::error::Result<()>
     where
@@ -721,7 +747,8 @@ impl RiffqProcessor {
     {
         static KEY: &str = "current_database";
 
-        if self.ctx.state().scalar_functions().contains_key(KEY){
+        let ctx = self.get_ctx();
+        if ctx.state().scalar_functions().contains_key(KEY){
             return Ok(());
         }
 
@@ -730,10 +757,10 @@ impl RiffqProcessor {
                 Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(db.clone()))))
             });
             let udf = create_udf(KEY, vec![], DataType::Utf8, Volatility::Stable, fun.clone());
-            self.ctx.register_udf(udf);
+            ctx.register_udf(udf);
             // udf.with_aliases("pg_catalog.current_database");
             let udf = create_udf("pg_catalog.current_database", vec![], DataType::Utf8, Volatility::Stable, fun.clone());
-            self.ctx.register_udf(udf);
+            ctx.register_udf(udf);
         }
 
         Ok(())
@@ -744,7 +771,8 @@ impl RiffqProcessor {
         C: ClientInfo + ?Sized,
     {
         static KEY: &str = "session_user";
-        if self.ctx.state().scalar_functions().contains_key(KEY){
+        let ctx = self.get_ctx();
+        if ctx.state().scalar_functions().contains_key(KEY){
             return Ok(());
         }
 
@@ -753,7 +781,7 @@ impl RiffqProcessor {
                 Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(user.clone()))))
             });
             let udf = create_udf(KEY, vec![], DataType::Utf8, Volatility::Stable, fun);
-            self.ctx.register_udf(udf);
+            ctx.register_udf(udf);
         }
 
         Ok(())
@@ -765,7 +793,8 @@ impl RiffqProcessor {
     {
         static KEY: &str = "current_user";
 
-        if self.ctx.state().scalar_functions().contains_key(KEY) {
+        let ctx = self.get_ctx();
+        if ctx.state().scalar_functions().contains_key(KEY) {
             return Ok(());
         }
 
@@ -774,7 +803,7 @@ impl RiffqProcessor {
                 Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(user.clone()))))
             });
             let udf = create_udf(KEY, vec![], DataType::Utf8, Volatility::Stable, fun.clone());
-            self.ctx.register_udf(udf);
+            ctx.register_udf(udf);
             let udf = create_udf(
                 "pg_catalog.current_user",
                 vec![],
@@ -782,14 +811,15 @@ impl RiffqProcessor {
                 Volatility::Stable,
                 fun,
             );
-            self.ctx.register_udf(udf);
+            ctx.register_udf(udf);
         }
 
         Ok(())
     }
 
     fn show_variable_response<'a>(&self, name: &str, format: FieldFormat) -> Option<Response<'a>> {
-        let state = self.ctx.state();
+        let ctx = self.get_ctx();
+        let state = ctx.state();
         let opts = state
             .config_options()
             .extensions
@@ -936,6 +966,7 @@ impl StartupHandler for RiffqProcessor {
         let user = client.metadata().get(pgwire::api::METADATA_USER).cloned();
         let database = client.metadata().get(pgwire::api::METADATA_DATABASE).cloned();
         log::debug!("database: {:?} {:?}", database, user);
+        self.update_ctx_from_client(client);
 
         let _ = self.register_current_database(client);
         let _ = self.register_session_user(client);
@@ -1370,17 +1401,36 @@ impl Server {
 
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
-            let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
-            let ctx = Arc::new(raw_ctx);
-            for db in &self.databases {
-                register_user_database(&ctx, db).await.unwrap();
+
+            let mut ctx_map: HashMap<String, Arc<SessionContext>> = HashMap::new();
+            if self.databases.is_empty() {
+                let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
+                ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
+            } else {
+                for db in &self.databases {
+                    let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
+                    ctx_map.insert(db.clone(), Arc::new(raw_ctx));
+                }
+            }
+
+            for ctx in ctx_map.values() {
+                for db in &self.databases {
+                    register_user_database(ctx, db).await.unwrap();
+                }
             }
             for (db, schema) in &self.schemas {
-                register_schema(&ctx, db, schema).await.unwrap();
+                if let Some(c) = ctx_map.get(db) {
+                    register_schema(c, db, schema).await.unwrap();
+                }
             }
             for (db, schema, table, cols) in &self.tables {
-                register_user_tables(&ctx, db, schema, table, cols.clone()).await.unwrap();
+                if let Some(c) = ctx_map.get(db) {
+                    register_user_tables(c, db, schema, table, cols.clone()).await.unwrap();
+                }
             }
+
+            let ctx_map = Arc::new(ctx_map);
+            let default_ctx = ctx_map.values().next().unwrap().clone();
 
             let listener = TcpListener::bind(&addr).await.unwrap();
             info!("Listening on {}", addr);
@@ -1388,18 +1438,19 @@ impl Server {
             let server_task = tokio::spawn({
                 let tls_acceptor = if tls { self.tls_acceptor.lock().unwrap().clone() } else { None };
                 let py_worker = py_worker.clone();
+                let ctx_map = ctx_map.clone();
+                let default_ctx = default_ctx.clone();
                 async move {
                     loop {
                         let (socket, addr) = listener.accept().await.unwrap();
                         if let Some(socket) = detect_gssencmode(socket).await {
-
                             let conn_ctx = SessionContext::new_with_state(
-                                ctx.state().clone(),
+                                default_ctx.state().clone(),
                             );
                             let conn_ctx = Arc::new(conn_ctx);
 
                             let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
-                                Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: conn_ctx.clone() })
+                                Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: Arc::new(Mutex::new(conn_ctx.clone())) })
                             } else {
                                 Arc::new(DirectQueryRunner { py_worker: py_worker.clone() })
                             };
@@ -1408,7 +1459,8 @@ impl Server {
                             let (id_tx, id_rx) = oneshot::channel();
                             
                             let handler = Arc::new(RiffqProcessor {
-                                ctx: conn_ctx.clone(),
+                                ctx: Arc::new(Mutex::new(conn_ctx.clone())),
+                                ctx_map: ctx_map.clone(),
                                 py_worker: py_worker.clone(),
                                 conn_id_sender: Arc::new(Mutex::new(Some(id_tx))),
                                 query_runner: query_runner.clone(),

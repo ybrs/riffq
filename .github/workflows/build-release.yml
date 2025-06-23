@@ -13,9 +13,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4
-    - run: |
+
+    - name: set-version
+      shell: bash
+      run: |
         VERSION=${GITHUB_REF_NAME#release-}
-        sed -i "s/^version = .*/version = \"${VERSION}\"/" Cargo.toml
+        case "$(uname)" in
+          Darwin*) sed -i '' "s/^version = .*/version = \"${VERSION}\"/" Cargo.toml ;;
+          *)       sed -i    "s/^version = .*/version = \"${VERSION}\"/" Cargo.toml ;;
+        esac
+
     - uses: PyO3/maturin-action@v1
       with:
         command: build

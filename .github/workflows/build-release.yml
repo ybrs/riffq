@@ -18,10 +18,12 @@ jobs:
       shell: bash
       run: |
         VERSION=${GITHUB_REF_NAME#release-}
-        case "$(uname)" in
-          Darwin*) sed -i '' "s/^version = .*/version = \"${VERSION}\"/" Cargo.toml ;;
-          *)       sed -i    "s/^version = .*/version = \"${VERSION}\"/" Cargo.toml ;;
-        esac
+        python - "$VERSION" <<'PY'
+        import re, sys, pathlib
+        v = sys.argv[1]
+        p = pathlib.Path("Cargo.toml")
+        p.write_text(re.sub(r'^version\s*=.*$', f'version = "{v}"', p.read_text(), flags=re.M))
+        PY
 
     - uses: PyO3/maturin-action@v1
       with:

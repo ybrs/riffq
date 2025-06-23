@@ -138,10 +138,12 @@ impl CallbackWrapper {
         if let Some(sender) = self.responder.lock().unwrap().take() {
             Python::with_gil(|py| {
                 if is_tag {
-                    if let Ok(tag) = result.extract::<String>(py) {
-                        let _ = sender.send(QueryResult::Tag(tag));
-                        return;
+                    let tag = result.extract::<String>(py).unwrap_or_default();
+                    let ret = sender.send(QueryResult::Tag(tag));
+                    if ret.is_err() {
+                        error!("return for tag errored");
                     }
+                    return;
                 }
                 // Try Arrow C stream pointer first
                 let result_bound = result.bind(py);
@@ -629,7 +631,6 @@ struct RouterQueryRunner {
     catalog_ctx: Arc<SessionContext>,
 }
 
-
 #[async_trait]
 impl QueryRunner for RouterQueryRunner {
     async fn execute(
@@ -642,20 +643,39 @@ impl QueryRunner for RouterQueryRunner {
     ) -> datafusion::error::Result<QueryResult> {
         let ctx = self.catalog_ctx.clone();
         let py_worker = self.py_worker.clone();
+
+        let tag_holder = Arc::new(Mutex::new(None));
+        let tag_clone = tag_holder.clone();
+
         let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
             let py_worker = py_worker.clone();
+            let tag_store = tag_clone.clone();
             let sql_owned = sql.to_string();
             async move {
-                let res = py_worker
+                match py_worker
                     .on_query(sql_owned, p, t, do_describe, connection_id)
-                .await;                  // already QueryResult
-                Ok(res)
+                    .await
+                {
+                    QueryResult::Arrow(b, s) => Ok((b, s)),
+                    QueryResult::Tag(tag) => {
+                        *tag_store.lock().unwrap() = Some(tag);
+                        Ok((Vec::new(), Arc::new(Schema::empty())))
+                    }
+                }
             }
         };
 
-        dispatch_query(&ctx, &query, params, param_types, handler).await
+        let (batches, schema) =
+            dispatch_query(&ctx, &query, params, param_types, handler).await?;
+
+        if let Some(tag) = tag_holder.lock().unwrap().take() {
+            Ok(QueryResult::Tag(tag))
+        } else {
+            Ok(QueryResult::Arrow(batches, schema))
+        }
     }
 }
+
 
 struct DirectQueryRunner {
     py_worker: Arc<PythonWorker>,

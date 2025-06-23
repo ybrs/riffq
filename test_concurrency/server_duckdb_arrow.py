@@ -10,7 +10,7 @@ def send_reader(reader, callback):
     if hasattr(reader, "__arrow_c_stream__"):
         capsule = reader.__arrow_c_stream__()
     else:
-        from pyarrow.cffi import export_stream
+        from pyarrow.cffi import export_stream # type: ignore
         capsule = export_stream(reader)
     callback(capsule)
 
@@ -22,35 +22,58 @@ def arrow_batch(values, names):
 
 def _handle_query(sql, callback, **kwargs):
     cur = duckdb_con.cursor()
-    text = sql.strip().lower().split(';')[0]
+    query = sql.strip().lower().split(';')[0]
 
-    if text == "select pg_catalog.version()":
+    if query.startswith("begin"):
+        return callback("BEGIN", is_tag=True)
+    if query.startswith("commit"):
+        return callback("COMMIT", is_tag=True)
+    if query.startswith("rollback"):
+        return callback("ROLLBACK", is_tag=True)
+    if query.startswith("discard all"):
+        return callback("DISCARD ALL", is_tag=True)
+
+    if query.startswith("select t.oid") and "from pg_type" in query and "hstore" in query:
+        empty = [pa.array([], pa.int32()), pa.array([], pa.int32())]
+        batch = arrow_batch(empty, ["oid", "typarray"])
+        return send_reader(batch, callback)
+
+    if query == "select pg_catalog.version()":
         batch = arrow_batch(
             [pa.array(["PostgreSQL 14.13"])],
             ["version"],
         )
         return send_reader(batch, callback)
 
-    if text == "show transaction isolation level":
+    if query == "show transaction isolation level":
         batch = arrow_batch(
             [pa.array(["read committed"])],
             ["transaction_isolation"],
         )
         return send_reader(batch, callback)
 
-    if text == "show standard_conforming_strings":
+    if query == "show standard_conforming_strings":
         batch = arrow_batch(
-            [pa.array(["read committed"])],
-            ["transaction_isolation"],
+            [pa.array(["on"])],
+            ["standard_conforming_strings"],
         )
         return send_reader(batch, callback)
     
-    if text == "select current_schema()":
+    if query == "select current_schema()":
         batch = arrow_batch(
             [pa.array(["public"])],
             ["current_schema"],
         )
         return send_reader(batch, callback)
+
+    if query.startswith("begin"):
+        return callback("BEGIN", is_tag=True)
+    if query.startswith("commit"):
+        return callback("COMMIT", is_tag=True)
+    if query.startswith("rollback"):
+        return callback("ROLLBACK", is_tag=True)
+    if query.startswith("discard all"):
+        return callback("DISCARD ALL", is_tag=True)
 
     try:
         reader = cur.execute(sql).fetch_record_batch()

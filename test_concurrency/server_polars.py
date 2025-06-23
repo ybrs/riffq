@@ -47,21 +47,32 @@ def run_heavy_polars_query():
 
 def _handle_query(sql, callback, **kwargs):
     print("< received (python):", sql)
-    sql_lc = sql.strip().lower()
+    query = sql.strip().lower()
 
-    if sql_lc == "select pg_catalog.version()":
+    if query == "select pg_catalog.version()":
         return callback(([{"name": "version", "type": "string"}],
                          [["PostgreSQL 14.13"]]))
 
-    if sql_lc == "show transaction isolation level":
+    if query == "show transaction isolation level":
         return callback(([{"name": "transaction_isolation", "type": "string"}],
                          [["read committed"]]))
 
-    if sql_lc == "select current_schema()":
+    if query == "select current_schema()":
         return callback(([{"name": "current_schema", "type": "string"}],
                          [["public"]]))
 
-    if sql.strip().lower().replace(';', '') == "select heavy_query":
+
+    if query.startswith("begin"):
+        return callback("BEGIN", is_tag=True)
+    if query.startswith("commit"):
+        return callback("COMMIT", is_tag=True)
+    if query.startswith("rollback"):
+        return callback("ROLLBACK", is_tag=True)
+    if query.startswith("discard all"):
+        return callback("DISCARD ALL", is_tag=True)
+
+
+    if query.strip().lower().replace(';', '') == "select heavy_query":
         df = run_heavy_polars_query()
         schema = get_schema_from_polars(df)
         rows = df.to_numpy().tolist()

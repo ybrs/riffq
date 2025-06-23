@@ -33,7 +33,6 @@ def get_schema_from_duckdb(columns, types):
         "TIME": "str",  # optional: could be treated as 'time'
         "INTERVAL": "str",
     }
-    print("columns", columns)
     schema = []
     for col, dtype in zip(columns, types):
         duck_type = str(dtype).upper()
@@ -45,7 +44,8 @@ def get_schema_from_duckdb(columns, types):
 def _handle_query(sql, callback, **kwargs):
     local_con = duckdb_con.cursor()
     print("< received (python):", sql)
-    if sql.strip().lower() == "select pg_catalog.version()":
+    query = sql.strip().lower()
+    if query == "select pg_catalog.version()":
         result = (
             [
                 {"name": "version", "type": "string"},
@@ -58,15 +58,25 @@ def _handle_query(sql, callback, **kwargs):
         return callback(result)
 
 
-    if sql.strip().lower() == "show transaction isolation level":
+    if query == "show transaction isolation level":
         return callback(([
             {"name": "transaction_isolation", "type": "string"},
         ], [ ["read committed"] ] ))
 
-    if sql.strip().lower() == "select current_schema()":
+    if query == "select current_schema()":
         return callback(([
                              {"name": "current_schema", "type": "string"},
                          ], [ ["public"] ] ))
+
+
+    if query.startswith("begin"):
+        return callback("BEGIN", is_tag=True)
+    if query.startswith("commit"):
+        return callback("COMMIT", is_tag=True)
+    if query.startswith("rollback"):
+        return callback("ROLLBACK", is_tag=True)
+    if query.startswith("discard all"):
+        return callback("DISCARD ALL", is_tag=True)
 
 
     try:

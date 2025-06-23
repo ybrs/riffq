@@ -14,7 +14,7 @@ from utils import wait_for_server
 logging.basicConfig(level=logging.DEBUG)
 
 def start_duckdb_server():
-    from server import main
+    from test_concurrency.server_duckdb import main
     main()
 
 def run_heavy_query():

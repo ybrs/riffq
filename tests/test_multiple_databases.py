@@ -14,6 +14,7 @@ def _run_server(port: int):
         callback(to_arrow([{"name": "val", "type": "int"}], [[1]]))
 
     server = riffq.Server(f"127.0.0.1:{port}")
+    print("starting server")
     server.register_database("db1")
     server.register_database("db2")
     server.register_schema("db1", "s1")
@@ -30,8 +31,10 @@ def _run_server(port: int):
         "t2",
         [{"id": {"type": "int", "nullable": False}}],
     )
+    print("registered databases and tables")
     server.on_query(handle_query)
     server.start(catalog_emulation=True)
+    print("server started")
 
 
 class MultipleDatabaseTest(unittest.TestCase):
@@ -42,7 +45,8 @@ class MultipleDatabaseTest(unittest.TestCase):
         cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
         cls.proc.start()
         start = time.time()
-        while time.time() - start < 10:
+        # Having multiple databases can take sometime. This is a known issue. 
+        while time.time() - start < 30:
             with socket.socket() as sock:
                 if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
                     break

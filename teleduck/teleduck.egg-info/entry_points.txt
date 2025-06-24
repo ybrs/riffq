@@ -1,0 +1,2 @@
+[console_scripts]
+teleduck = teleduck.__main__:main

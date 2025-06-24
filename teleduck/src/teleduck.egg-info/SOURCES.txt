@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+src/teleduck/__init__.py
+src/teleduck/__main__.py
+src/teleduck/server.py
+src/teleduck.egg-info/PKG-INFO
+src/teleduck.egg-info/SOURCES.txt
+src/teleduck.egg-info/dependency_links.txt
+src/teleduck.egg-info/entry_points.txt
+src/teleduck.egg-info/requires.txt
+src/teleduck.egg-info/top_level.txt

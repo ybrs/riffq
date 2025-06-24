@@ -1,0 +1,22 @@
+Metadata-Version: 2.4
+Name: teleduck
+Version: 0.1.0
+Summary: Serve DuckDB over PostgreSQL protocol using riffq
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: duckdb
+Requires-Dist: pyarrow
+Requires-Dist: click
+Requires-Dist: riffq
+
+Teleduck
+========
+
+Teleduck exposes a DuckDB database over the PostgreSQL protocol using `riffq`.
+Simply run:
+
+```
+teleduck mydata.db
+```
+
+and connect with any PostgreSQL client.

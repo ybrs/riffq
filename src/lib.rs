@@ -1401,7 +1401,6 @@ impl Server {
 
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
-
             let mut ctx_map: HashMap<String, Arc<SessionContext>> = HashMap::new();
             if self.databases.is_empty() {
                 let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
@@ -1418,11 +1417,13 @@ impl Server {
                     register_user_database(ctx, db).await.unwrap();
                 }
             }
+
             for (db, schema) in &self.schemas {
                 if let Some(c) = ctx_map.get(db) {
                     register_schema(c, db, schema).await.unwrap();
                 }
             }
+
             for (db, schema, table, cols) in &self.tables {
                 if let Some(c) = ctx_map.get(db) {
                     register_user_tables(c, db, schema, table, cols.clone()).await.unwrap();

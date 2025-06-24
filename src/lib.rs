@@ -33,7 +33,9 @@ use std::pin::Pin;
 use futures::stream::{self, BoxStream};
 
 use arrow::ffi_stream::ArrowArrayStreamReader;
-use arrow::array::{Array, RecordBatch};
+use arrow::array::{
+    Array, RecordBatch, ListArray, LargeListArray, FixedSizeListArray,
+};
 use arrow::array::cast::AsArray;
 use arrow::record_batch::RecordBatchReader;
 use arrow::datatypes::{DataType, Field, Schema, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
@@ -302,6 +304,114 @@ fn arrow_to_pg_rows(
     (field_defs, Box::pin(row_stream))
 }
 
+fn arrow_value_to_string(array: &dyn Array, row: usize) -> Option<String> {
+    if array.is_null(row) {
+        return None;
+    }
+
+    match array.data_type() {
+        DataType::Int8 => Some(array.as_primitive::<arrow::array::types::Int8Type>().value(row).to_string()),
+        DataType::Int16 => Some(array.as_primitive::<arrow::array::types::Int16Type>().value(row).to_string()),
+        DataType::Int32 => Some(array.as_primitive::<arrow::array::types::Int32Type>().value(row).to_string()),
+        DataType::Int64 => Some(array.as_primitive::<arrow::array::types::Int64Type>().value(row).to_string()),
+        DataType::UInt8 => Some(array.as_primitive::<arrow::array::types::UInt8Type>().value(row).to_string()),
+        DataType::UInt16 => Some(array.as_primitive::<arrow::array::types::UInt16Type>().value(row).to_string()),
+        DataType::UInt32 => Some(array.as_primitive::<arrow::array::types::UInt32Type>().value(row).to_string()),
+        DataType::UInt64 => Some(array.as_primitive::<arrow::array::types::UInt64Type>().value(row).to_string()),
+        DataType::Float32 => Some(array.as_primitive::<arrow::array::types::Float32Type>().value(row).to_string()),
+        DataType::Float64 => Some(array.as_primitive::<arrow::array::types::Float64Type>().value(row).to_string()),
+        DataType::Boolean => Some(array.as_boolean().value(row).to_string()),
+        DataType::Utf8 => Some(array.as_string::<i32>().value(row).to_string()),
+        DataType::LargeUtf8 => Some(array.as_string::<i64>().value(row).to_string()),
+        DataType::Date32 => {
+            let days = array.as_primitive::<arrow::array::types::Date32Type>().value(row) as i64;
+            let date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + Duration::days(days);
+            Some(date.to_string())
+        }
+        DataType::Date64 => {
+            let ms = array.as_primitive::<arrow::array::types::Date64Type>().value(row);
+            let dt = DateTime::from_timestamp(ms / 1000, (ms % 1000 * 1_000_000) as u32).unwrap();
+            Some(dt.to_string())
+        }
+        DataType::Timestamp(unit, _) => {
+            let nanos: i128 = match unit {
+                TimeUnit::Second => array.as_primitive::<TimestampSecondType>().value(row) as i128 * 1_000_000_000,
+                TimeUnit::Millisecond => array.as_primitive::<TimestampMillisecondType>().value(row) as i128 * 1_000_000,
+                TimeUnit::Microsecond => array.as_primitive::<TimestampMicrosecondType>().value(row) as i128 * 1_000,
+                TimeUnit::Nanosecond => array.as_primitive::<TimestampNanosecondType>().value(row) as i128,
+            };
+            let secs = (nanos / 1_000_000_000) as i64;
+            let nsec = (nanos % 1_000_000_000) as u32;
+            let dt = DateTime::from_timestamp(secs, nsec).unwrap();
+            Some(dt.to_string())
+        }
+        DataType::List(_) => {
+            let list = array.as_any().downcast_ref::<ListArray>().unwrap();
+            let values = list.value(row);
+            let mut parts = Vec::new();
+            for i in 0..values.len() {
+                match arrow_value_to_string(values.as_ref(), i) {
+                    Some(v) => parts.push(v),
+                    None => parts.push("NULL".to_string()),
+                }
+            }
+            Some(format!("{{{}}}", parts.join(",")))
+        }
+        DataType::LargeList(_) => {
+            let list = array.as_any().downcast_ref::<LargeListArray>().unwrap();
+            let values = list.value(row);
+            let mut parts = Vec::new();
+            for i in 0..values.len() {
+                match arrow_value_to_string(values.as_ref(), i) {
+                    Some(v) => parts.push(v),
+                    None => parts.push("NULL".to_string()),
+                }
+            }
+            Some(format!("{{{}}}", parts.join(",")))
+        }
+        DataType::FixedSizeList(_, _) => {
+            let list = array.as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+            let values = list.value(row);
+            let mut parts = Vec::new();
+            for i in 0..values.len() {
+                match arrow_value_to_string(values.as_ref(), i) {
+                    Some(v) => parts.push(v),
+                    None => parts.push("NULL".to_string()),
+                }
+            }
+            Some(format!("{{{}}}", parts.join(",")))
+        }
+        _ => None,
+    }
+}
+
+fn arrow_list_to_vec(array: &dyn Array, row: usize) -> Vec<String> {
+    match array.data_type() {
+        DataType::List(_) => {
+            let list = array.as_any().downcast_ref::<ListArray>().unwrap();
+            let values = list.value(row);
+            (0..values.len())
+                .map(|i| arrow_value_to_string(values.as_ref(), i).unwrap_or_default())
+                .collect()
+        }
+        DataType::LargeList(_) => {
+            let list = array.as_any().downcast_ref::<LargeListArray>().unwrap();
+            let values = list.value(row);
+            (0..values.len())
+                .map(|i| arrow_value_to_string(values.as_ref(), i).unwrap_or_default())
+                .collect()
+        }
+        DataType::FixedSizeList(_, _) => {
+            let list = array.as_any().downcast_ref::<FixedSizeListArray>().unwrap();
+            let values = list.value(row);
+            (0..values.len())
+                .map(|i| arrow_value_to_string(values.as_ref(), i).unwrap_or_default())
+                .collect()
+        }
+        _ => vec![],
+    }
+}
+
 fn encode_arrow_value(
     encoder: &mut DataRowEncoder,
     array: &dyn Array,
@@ -345,6 +455,10 @@ fn encode_arrow_value(
             let nsec = (nanos % 1_000_000_000) as u32;
             let dt = DateTime::from_timestamp(secs, nsec).unwrap();
             encoder.encode_field(&Some(dt))
+        }
+        DataType::List(_) | DataType::LargeList(_) | DataType::FixedSizeList(_, _) => {
+            let vec = arrow_list_to_vec(array, row);
+            encoder.encode_field(&vec)
         }
         _ => encoder.encode_field(&Option::<&str>::None),
     }

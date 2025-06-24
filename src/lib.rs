@@ -346,6 +346,30 @@ fn encode_arrow_value(
             let dt = DateTime::from_timestamp(secs, nsec).unwrap();
             encoder.encode_field(&Some(dt))
         }
+        DataType::List(_) => {
+            let list = array.as_list::<i32>();
+            let values = list.value(row);
+            if matches!(values.data_type(), DataType::Utf8) {
+                let vals = values.as_string::<i32>();
+                let items: Vec<String> = (0..vals.len()).map(|i| vals.value(i).to_string()).collect();
+                let s = format!("{{{}}}", items.join(","));
+                encoder.encode_field(&Some(s))
+            } else {
+                encoder.encode_field(&Option::<&str>::None)
+            }
+        }
+        DataType::LargeList(_) => {
+            let list = array.as_list::<i64>();
+            let values = list.value(row);
+            if matches!(values.data_type(), DataType::Utf8) {
+                let vals = values.as_string::<i64>();
+                let items: Vec<String> = (0..vals.len()).map(|i| vals.value(i).to_string()).collect();
+                let s = format!("{{{}}}", items.join(","));
+                encoder.encode_field(&Some(s))
+            } else {
+                encoder.encode_field(&Option::<&str>::None)
+            }
+        }
         _ => encoder.encode_field(&Option::<&str>::None),
     }
 }
@@ -1500,4 +1524,32 @@ fn _riffq(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
     module.add_class::<Server>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::{ListBuilder, StringBuilder};
+    use pgwire::api::results::{DataRowEncoder, FieldFormat, FieldInfo};
+    use pgwire::api::Type;
+
+    #[test]
+    fn test_encode_list_of_utf8() {
+        let mut builder = ListBuilder::new(StringBuilder::new());
+        builder.values().append_value("public");
+        builder.append(true);
+        let array = builder.finish();
+        let array: ArrayRef = Arc::new(array);
+
+        let field = FieldInfo::new("val".into(), None, None, Type::VARCHAR, FieldFormat::Text);
+        let meta = Arc::new(vec![field]);
+        let mut enc = DataRowEncoder::new(meta);
+
+        encode_arrow_value(&mut enc, array.as_ref(), 0).unwrap();
+        let row = enc.finish().unwrap();
+        let bytes = &row.data;
+        let len = i32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let text = std::str::from_utf8(&bytes[4..4 + len]).unwrap();
+        assert_eq!(text, "{public}");
+    }
 }

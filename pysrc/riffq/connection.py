@@ -4,6 +4,7 @@ import pyarrow as pa
 from ._riffq import Server
 from abc import ABCMeta, abstractmethod
 import logging
+import os
 
 logger = logging.getLogger('riffq:connection')
 
@@ -59,6 +60,11 @@ class RiffqServer:
         self.connection_cls = connection_cls
     
     def set_tls(self, crt, key):
+        if not os.path.exists(crt):
+            raise OSError(f"Certificate not found in {crt}")
+        if not os.path.exists(key):
+            raise OSError(f"Certificate keyfile not found in {key}")
+
         self._server.set_tls(crt, key)
 
     def get_connection(self, conn_id) -> BaseConnection:

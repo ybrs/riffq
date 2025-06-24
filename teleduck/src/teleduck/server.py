@@ -24,6 +24,8 @@ class Connection(riffq.BaseConnection):
     def _handle_query(self, sql, callback, **kwargs):
         cur = duckdb_con.cursor()
         sql = sql.strip().lower().split(';')[0]
+        if sql == "":
+            return callback("OK", is_tag=True)
 
         if sql.startswith("set"):
             return callback("SET", is_tag=True)
@@ -47,6 +49,13 @@ class Connection(riffq.BaseConnection):
             )
             return self.send_reader(batch, callback)
 
+        if sql == "show datestyle":
+            batch = self.arrow_batch(
+                [pa.array(["ISO, MDY"])],
+                ["datestyle"],
+            )
+            return self.send_reader(batch, callback)
+
         if sql == "show transaction isolation level":
             batch = self.arrow_batch(
                 [pa.array(["read committed"])],
@@ -63,7 +72,7 @@ class Connection(riffq.BaseConnection):
         
         if sql == "select current_schema()":
             batch = self.arrow_batch(
-                [pa.array(["public"])],
+                [pa.array(["main"])],
                 ["current_schema"],
             )
             return self.send_reader(batch, callback)
@@ -72,7 +81,7 @@ class Connection(riffq.BaseConnection):
             reader = cur.execute(sql).fetch_record_batch()
             self.send_reader(reader, callback)
         except Exception as exc:
-            logging.exception("error on executing query")
+            logging.exception(f"error on executing query -- {sql}")
             batch = self.arrow_batch(
                 [pa.array(["ERROR"]), pa.array([str(exc)])],
                 ["error", "message"],
@@ -127,32 +136,48 @@ def run_server(
     cert_dir = Path(__file__).parent / "certs"
     server.set_tls(str(cert_dir / "server.crt"), str(cert_dir / "server.key"))
 
-    server._server.register_database("duckdb")
 
-    tbls = duckdb_con.execute(
-        "SELECT table_schema, table_name FROM information_schema.tables "
-        "WHERE table_schema NOT IN ('pg_catalog','information_schema')"
+    def register_schemas_and_tables_in_database(database_name):
+        if database_name in ("system", "temp"):
+            return
+
+        # duckdb_con.execute(f"use {database_name}")
+        
+        tbls = duckdb_con.execute(
+            "SELECT table_schema, table_name FROM information_schema.tables "
+            "WHERE table_schema NOT IN ('pg_catalog','information_schema')" \
+            "and table_catalog = ?", (database_name,)
+        ).fetchall()
+
+        for schema_name, table_name in tbls:
+            print("registering table", schema_name, table_name)
+            server._server.register_schema(database_name, schema_name)
+            cols_info = duckdb_con.execute(
+                "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+                "WHERE table_schema=? AND table_name=?",
+                (schema_name, table_name),
+            ).fetchall()
+            columns = []
+            for col_name, data_type, is_nullable in cols_info:
+                columns.append(
+                    {
+                        col_name: {
+                            "type": map_type(data_type),
+                            "nullable": is_nullable.upper() == "YES",
+                        }
+                    }
+                )
+            server._server.register_table(database_name, schema_name, table_name, columns)
+
+
+    databases = duckdb_con.execute(
+        "SELECT database_name, path, type FROM duckdb_databases()"
     ).fetchall()
 
-    for schema_name, table_name in tbls:
-        server._server.register_schema("duckdb", schema_name)
-        cols_info = duckdb_con.execute(
-            "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
-            "WHERE table_schema=? AND table_name=?",
-            (schema_name, table_name),
-        ).fetchall()
-        columns = []
-        for col_name, data_type, is_nullable in cols_info:
-            columns.append(
-                {
-                    col_name: {
-                        "type": map_type(data_type),
-                        "nullable": is_nullable.upper() == "YES",
-                    }
-                }
-            )
-        server._server.register_table("duckdb", schema_name, table_name, columns)
-
+    for database_name, path, type in databases:
+        server._server.register_database(database_name)
+        register_schemas_and_tables_in_database(database_name)
+    
     server.start(catalog_emulation=True)
 
 if __name__ == "__main__":

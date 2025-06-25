@@ -373,7 +373,7 @@ impl PythonWorker {
                 match rx.recv() {
                     Ok(msg) => match msg {
                         WorkerMessage::Query { query, params, param_types, do_describe, connection_id, responder } => {
-                            debug!("[PY_WORKER] received query: {}", query);
+                            debug!("[PY_WORKER] received query: {} -- {}", connection_id, query);
                             let cb_opt = Python::with_gil(|py| {
                                 query_cb
                                     .lock()
@@ -399,6 +399,7 @@ impl PythonWorker {
                                     kwargs.set_item("do_describe", do_describe).unwrap();
 
                                     // Connection identifier
+                                    println!("to python connection_id: {}", connection_id);
                                     kwargs.set_item("connection_id", connection_id).unwrap();                                    
 
                                     // Add query_args if present
@@ -540,7 +541,7 @@ impl PythonWorker {
     ) -> QueryResult {
         let (tx, rx) = oneshot::channel::<QueryResult>();
         debug!("[RUST] Sending query to worker: {}", query);
-
+        println!("[RUST] Sending query to worker: {} - {}", connection_id, query);
         self.sender
             .send(WorkerMessage::Query {
                 query,
@@ -657,7 +658,7 @@ impl QueryRunner for RouterQueryRunner {
                 match py_worker
                     .on_query(sql_owned, p, t, do_describe, connection_id)
                     .await
-                {
+                {                    
                     QueryResult::Arrow(b, s) => Ok((b, s)),
                     QueryResult::Tag(tag) => {
                         *tag_store.lock().unwrap() = Some(tag);
@@ -667,6 +668,7 @@ impl QueryRunner for RouterQueryRunner {
             }
         };
 
+        println!("running query --- {}", query);
         let (batches, schema) =
             dispatch_query(&ctx, &query, params, param_types, handler).await?;
 
@@ -1021,6 +1023,7 @@ impl SimpleQueryHandler for RiffqProcessor {
             .get("connection_id")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
+        println!("running query with connection_id: {}", connection_id);
 
         let result = self
             .query_runner
@@ -1403,17 +1406,23 @@ impl Server {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
             let mut ctx_map: HashMap<String, Arc<SessionContext>> = HashMap::new();
             if self.databases.is_empty() {
+                println!("1.0 databases empty !?");
                 let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
                 ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
             } else {
+                
                 for db in &self.databases {
-                    let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
+                    println!("1.1 registering {}", db);
+                    let (raw_ctx, _) = get_base_session_context(None, 
+                                                                                db.to_string(), 
+                                                                                "main".to_string()).await.unwrap();
                     ctx_map.insert(db.clone(), Arc::new(raw_ctx));
                 }
             }
 
             for ctx in ctx_map.values() {
                 for db in &self.databases {
+                    println!("1.2 registering {}", db);
                     register_user_database(ctx, db).await.unwrap();
                 }
             }

@@ -67,30 +67,34 @@ class RiffqServer:
 
         self._server.set_tls(crt, key)
 
-    def get_connection(self, conn_id) -> BaseConnection:
-        conn = self.connections.get(conn_id, None)
+    def get_connection(self, connection_id) -> BaseConnection:
+        conn = self.connections.get(connection_id, None)
         if not conn:
-            conn = self.connection_cls(conn_id, self.executor)
-            self.connections[conn_id] = conn
+            conn = self.connection_cls(connection_id, self.executor)
+            self.connections[connection_id] = conn
         return conn
 
-    def handle_auth(self, conn_id, user, password, host, database=None, callback=callable):
-        conn = self.get_connection(conn_id=conn_id)
+    def handle_auth(self, connection_id, user, password, host, database=None, callback=callable):
+        print("new auth", connection_id, user, host, database)
+        conn = self.get_connection(connection_id=connection_id)
         conn.handle_auth(user, password, host, database=database, callback=callback)
 
-    def handle_connect(self, conn_id, ip, port, callback=callable):
-        conn = self.get_connection(conn_id=conn_id)
+    def handle_connect(self, connection_id, ip, port, callback=callable):
+        print("new connnection", connection_id, ip, port)
+        conn = self.get_connection(connection_id=connection_id)
         conn.handle_connect(ip, port, callback=callback)
 
-    def handle_query(self, sql, callback, conn_id=None, **kwargs):
-        conn = self.get_connection(conn_id=conn_id)
+    def handle_query(self, sql, callback, connection_id=None, **kwargs):
+        print("python query", connection_id, sql)
+        conn = self.get_connection(connection_id=connection_id)
         conn.handle_query(sql, callback=callback, **kwargs)
 
-    def handle_disconnect(self, conn_id, ip, port, callback=callable):
-        conn = self.get_connection(conn_id=conn_id)
+    def handle_disconnect(self, connection_id, ip, port, callback=callable):
+        print("python on disconnect", connection_id)
+        conn = self.get_connection(connection_id=connection_id)
         conn.handle_disconnect(ip, port, callback=callback)
         try:
-            del self.connections[conn_id]
+            del self.connections[connection_id]
         except KeyError:
             logger.exception("Connection disconnected but not in self.connections")
 

@@ -85,8 +85,14 @@ pub fn arrow_type_to_pgwire(dt: &DataType) -> Type {
         // | RunEndEncoded(_, _)
         // | Null                      => Type::VARCHAR,
 
+        /* ── arrays ─────────────────────────────── */
+        List(field) | LargeList(field) | FixedSizeList(field, _) => match field.data_type() {
+            DataType::Utf8 | DataType::LargeUtf8 => Type::VARCHAR_ARRAY,
+            _ => Type::VARCHAR,
+        },
+
         /* ── everything complex / unsupported ─── */
-        _=> Type::VARCHAR,
+        _ => Type::VARCHAR,
     }
 }
 

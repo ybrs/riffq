@@ -699,6 +699,7 @@ impl PythonWorker {
         host: String,
         password: String,
     ) -> bool {
+        // info!("new authentication {} {}", connection_id, database.clone().unwrap_or_default());
         let (tx, rx) = oneshot::channel();
         let _ = self
             .sender
@@ -1131,13 +1132,13 @@ impl SimpleQueryHandler for RiffqProcessor {
             return Ok(vec![Response::Execution(Tag::new(""))]);
         }
 
-        debug!("[PGWIRE] do_query called with: {}", query);
+        debug!("[PGWIRE] do_query called with: connection_id:{} query:{}", connection_id, query);
         let connection_id = _client
             .metadata()
             .get("connection_id")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
-        println!("running query with connection_id: {}", connection_id);
+        // println!("running query with connection_id: {}", connection_id);
 
         let result = self
             .query_runner
@@ -1520,13 +1521,11 @@ impl Server {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
             let mut ctx_map: HashMap<String, Arc<SessionContext>> = HashMap::new();
             if self.databases.is_empty() {
-                println!("1.0 databases empty !?");
                 let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
                 ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
             } else {
                 
                 for db in &self.databases {
-                    println!("1.1 registering {}", db);
                     let (raw_ctx, _) = get_base_session_context(None, 
                                                                                 db.to_string(), 
                                                                                 "main".to_string()).await.unwrap();
@@ -1536,7 +1535,6 @@ impl Server {
 
             for ctx in ctx_map.values() {
                 for db in &self.databases {
-                    println!("1.2 registering {}", db);
                     register_user_database(ctx, db).await.unwrap();
                 }
             }

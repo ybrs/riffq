@@ -75,22 +75,22 @@ class RiffqServer:
         return conn
 
     def handle_auth(self, connection_id, user, password, host, database=None, callback=callable):
-        print("new auth", connection_id, user, host, database)
+        # logger.info(f"new auth {connection_id} {user} {host} {database}")
         conn = self.get_connection(connection_id=connection_id)
         conn.handle_auth(user, password, host, database=database, callback=callback)
 
     def handle_connect(self, connection_id, ip, port, callback=callable):
-        print("new connnection", connection_id, ip, port)
+        # logger.info(f"new connnection {connection_id} {ip} {port}")
         conn = self.get_connection(connection_id=connection_id)
         conn.handle_connect(ip, port, callback=callback)
 
     def handle_query(self, sql, callback, connection_id=None, **kwargs):
-        print("python query", connection_id, sql)
+        # logger.debug(f"python query {connection_id} {sql}")
         conn = self.get_connection(connection_id=connection_id)
         conn.handle_query(sql, callback=callback, **kwargs)
 
     def handle_disconnect(self, connection_id, ip, port, callback=callable):
-        print("python on disconnect", connection_id)
+        # logger.info(f"python on disconnect {connection_id}")
         conn = self.get_connection(connection_id=connection_id)
         conn.handle_disconnect(ip, port, callback=callback)
         try:

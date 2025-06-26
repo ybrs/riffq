@@ -185,7 +185,7 @@ def run_server(
         server._server.register_database(database_name)
         register_schemas_and_tables_in_database(database_name)
     
-    server.start(catalog_emulation=True)
+    server.start(catalog_emulation=True, tls=True)
 
 if __name__ == "__main__":
     import click

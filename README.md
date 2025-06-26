@@ -67,7 +67,7 @@ def main():
     )
     server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
     server.set_tls("certs/server.crt", "certs/server.key")
-    server.start()
+    server.start(tls=True)
 
 if __name__ == "__main__":
     main()

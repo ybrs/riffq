@@ -655,7 +655,6 @@ impl PythonWorker {
     ) -> QueryResult {
         let (tx, rx) = oneshot::channel::<QueryResult>();
         debug!("[RUST] Sending query to worker: {}", query);
-        println!("[RUST] Sending query to worker: {} - {}", connection_id, query);
         self.sender
             .send(WorkerMessage::Query {
                 query,
@@ -1132,7 +1131,7 @@ impl SimpleQueryHandler for RiffqProcessor {
             return Ok(vec![Response::Execution(Tag::new(""))]);
         }
 
-        debug!("[PGWIRE] do_query called with: connection_id:{} query:{}", connection_id, query);
+        debug!("[PGWIRE] do_query called with: {}", query);
         let connection_id = _client
             .metadata()
             .get("connection_id")

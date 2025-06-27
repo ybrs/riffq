@@ -26,7 +26,7 @@ class Connection(riffq.BaseConnection):
         sql = sql.strip().lower().split(';')[0]
         if sql == "":
             return callback("OK", is_tag=True)
-        print("hello ", sql)
+
         if "current_schemas(" in sql:
             batch = self.arrow_batch(
                 [pa.array(["main"])],
@@ -125,7 +125,6 @@ def run_server(
     sql:
         Iterable of SQL statements to execute before the server starts.
     """
-
     global duckdb_con
     duckdb_con = duckdb.connect(db_file)
 
@@ -157,7 +156,6 @@ def run_server(
         ).fetchall()
 
         for schema_name, table_name in tbls:
-            print("registering table", database_name, schema_name, table_name)
             server._server.register_schema(database_name, schema_name)
             cols_info = duckdb_con.execute(
                 "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
@@ -178,7 +176,7 @@ def run_server(
 
 
     databases = duckdb_con.execute(
-        "SELECT database_name, path, type FROM duckdb_databases()"
+        "SELECT database_name, path, type FROM duckdb_databases() where internal=false"
     ).fetchall()
 
     for database_name, path, type in databases:
@@ -186,7 +184,7 @@ def run_server(
         register_schemas_and_tables_in_database(database_name)
     
     server.start(catalog_emulation=True, tls=True)
-
+    
 if __name__ == "__main__":
     import click
 

@@ -37,7 +37,7 @@ class SqlInitTest(unittest.TestCase):
         )
         cls.proc.start()
         start = time.time()
-        while time.time() - start < 10:
+        while time.time() - start < 60:
             with socket.socket() as sock:
                 if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
                     break

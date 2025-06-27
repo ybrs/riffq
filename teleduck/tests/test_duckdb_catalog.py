@@ -21,17 +21,21 @@ class DuckDbCatalogTest(unittest.TestCase):
         cls.port = 55441
         fd, cls.db_file = tempfile.mkstemp(suffix=".db")
         Path(cls.db_file).unlink()  # remove so DuckDB can create it
-        con = duckdb.connect(cls.db_file)
-        con.execute("CREATE TABLE users(id INTEGER, name VARCHAR)")
-        con.execute("CREATE TABLE projects(id INTEGER, name VARCHAR)")
-        con.execute("CREATE TABLE tasks(id INTEGER, project_id INTEGER, description VARCHAR)")
-        con.close()
+        with duckdb.connect(cls.db_file) as con:
+            con.execute("CREATE TABLE users(id INTEGER, name VARCHAR)")
+            con.execute("CREATE TABLE projects(id INTEGER, name VARCHAR)")
+            con.execute("CREATE TABLE tasks(id INTEGER, project_id INTEGER, description VARCHAR)")
+            
+            cls.database_name = con.execute(
+            "SELECT database_name, path, type FROM duckdb_databases() where internal=false"
+            ).fetchall()[0][0]
+
         cls.proc = multiprocessing.Process(
             target=_run_server, args=(cls.db_file, cls.port), daemon=True
         )
         cls.proc.start()
         start = time.time()
-        while time.time() - start < 10:
+        while time.time() - start < 60:
             with socket.socket() as sock:
                 if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
                     break
@@ -50,8 +54,8 @@ class DuckDbCatalogTest(unittest.TestCase):
     def test_catalog_entries(self):
         conn = psycopg.connect(f"postgresql://user:123@127.0.0.1:{self.port}/db")
         with conn.cursor() as cur:
-            cur.execute("SELECT datname FROM pg_catalog.pg_database WHERE datname='duckdb'")
-            self.assertEqual(cur.fetchone()[0], "duckdb")
+            cur.execute(f"SELECT datname FROM pg_catalog.pg_database WHERE datname ='{self.database_name}' ")
+            self.assertEqual(cur.fetchone()[0], self.database_name)
             cur.execute("SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname='main'")
             self.assertEqual(cur.fetchone()[0], "main")
             for table in ("users", "projects", "tasks"):

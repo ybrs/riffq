@@ -9,3 +9,6 @@ src/teleduck.egg-info/dependency_links.txt
 src/teleduck.egg-info/entry_points.txt
 src/teleduck.egg-info/requires.txt
 src/teleduck.egg-info/top_level.txt
+tests/test_cli.py
+tests/test_duckdb_catalog.py
+tests/test_sql_init.py

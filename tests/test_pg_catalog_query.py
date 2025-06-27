@@ -97,6 +97,15 @@ class PgCatalogEnabledTest(unittest.TestCase):
             self.assertEqual(cur.fetchone()[0], 42)
         conn.close()
 
+    def test_current_schemas(self):
+        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
+        with conn.cursor() as cur:
+            cur.execute("SELECT current_schemas(true)")
+            row = cur.fetchone()
+            self.assertIsInstance(row[0], list)
+            self.assertGreater(len(row[0]), 0)
+        conn.close()
+
 
 class PgCatalogDisabledTest(unittest.TestCase):
     @classmethod

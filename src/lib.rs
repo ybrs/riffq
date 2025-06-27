@@ -513,7 +513,7 @@ impl PythonWorker {
                                     kwargs.set_item("do_describe", do_describe).unwrap();
 
                                     // Connection identifier
-                                    println!("to python connection_id: {}", connection_id);
+                                    // println!("to python connection_id: {}", connection_id);
                                     kwargs.set_item("connection_id", connection_id).unwrap();                                    
 
                                     // Add query_args if present
@@ -781,8 +781,7 @@ impl QueryRunner for RouterQueryRunner {
                 }
             }
         };
-
-        println!("running query --- {}", query);
+        
         let (batches, schema) =
             dispatch_query(&ctx, &query, params, param_types, handler).await?;
 
@@ -1520,14 +1519,14 @@ impl Server {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
             let mut ctx_map: HashMap<String, Arc<SessionContext>> = HashMap::new();
             if self.databases.is_empty() {
-                let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string()).await.unwrap();
+                let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string(), None).await.unwrap();
                 ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
             } else {
                 
                 for db in &self.databases {
                     let (raw_ctx, _) = get_base_session_context(None, 
                                                                                 db.to_string(), 
-                                                                                "main".to_string()).await.unwrap();
+                                                                                "main".to_string(), None).await.unwrap();
                     ctx_map.insert(db.clone(), Arc::new(raw_ctx));
                 }
             }

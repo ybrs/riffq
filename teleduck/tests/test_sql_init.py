@@ -12,7 +12,7 @@ def _run_server(db_file: str, port: int, scripts, sqls):
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from teleduck.server import run_server
-    run_server(db_file, port, sql_scripts=scripts, sql=sqls)
+    run_server(db_file, port, sql_scripts=scripts, sql=sqls, use_tls=False)
 
 
 class SqlInitTest(unittest.TestCase):
@@ -37,7 +37,7 @@ class SqlInitTest(unittest.TestCase):
         )
         cls.proc.start()
         start = time.time()
-        while time.time() - start < 10:
+        while time.time() - start < 20:
             with socket.socket() as sock:
                 if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
                     break

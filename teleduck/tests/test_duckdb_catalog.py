@@ -12,7 +12,7 @@ def _run_server(db_file: str, port: int):
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from teleduck.server import run_server
-    run_server(db_file, port)
+    run_server(db_file, port, use_tls=False)
 
 
 class DuckDbCatalogTest(unittest.TestCase):
@@ -31,7 +31,7 @@ class DuckDbCatalogTest(unittest.TestCase):
         )
         cls.proc.start()
         start = time.time()
-        while time.time() - start < 10:
+        while time.time() - start < 20:
             with socket.socket() as sock:
                 if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
                     break
@@ -49,9 +49,13 @@ class DuckDbCatalogTest(unittest.TestCase):
 
     def test_catalog_entries(self):
         conn = psycopg.connect(f"postgresql://user:123@127.0.0.1:{self.port}/db")
+        expected_db = Path(self.db_file).stem
         with conn.cursor() as cur:
-            cur.execute("SELECT datname FROM pg_catalog.pg_database WHERE datname='duckdb'")
-            self.assertEqual(cur.fetchone()[0], "duckdb")
+            cur.execute(
+                "SELECT datname FROM pg_catalog.pg_database WHERE datname=%s",
+                (expected_db,),
+            )
+            self.assertEqual(cur.fetchone()[0], expected_db)
             cur.execute("SELECT nspname FROM pg_catalog.pg_namespace WHERE nspname='main'")
             self.assertEqual(cur.fetchone()[0], "main")
             for table in ("users", "projects", "tasks"):

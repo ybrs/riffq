@@ -108,6 +108,9 @@ def run_server(
     host: str = "127.0.0.1",
     sql_scripts: Optional[Iterable[str]] = None,
     sql: Optional[Iterable[str]] = None,
+    use_tls: bool = True,
+    tls_cert_file: Optional[str] = None,
+    tls_key_file: Optional[str] = None,
 ):
     """Start the teleduck server using the given DuckDB database file.
 
@@ -124,6 +127,14 @@ def run_server(
         order before the server starts.
     sql:
         Iterable of SQL statements to execute before the server starts.
+    use_tls:
+        Whether to enable TLS. Use ``False`` to start the server without TLS.
+    tls_cert_file:
+        Path to the TLS certificate file. If not provided, a default bundled
+        certificate is used.
+    tls_key_file:
+        Path to the TLS key file. If not provided, a default bundled key is
+        used.
     """
 
     global duckdb_con
@@ -140,8 +151,11 @@ def run_server(
             duckdb_con.execute(statement)
 
     server = riffq.RiffqServer(f"{host}:{port}", connection_cls=Connection)
-    cert_dir = Path(__file__).parent / "certs"
-    server.set_tls(str(cert_dir / "server.crt"), str(cert_dir / "server.key"))
+    if use_tls:
+        cert_dir = Path(__file__).parent / "certs"
+        cert = tls_cert_file or str(cert_dir / "server.crt")
+        key = tls_key_file or str(cert_dir / "server.key")
+        server.set_tls(cert, key)
 
 
     def register_schemas_and_tables_in_database(database_name):
@@ -185,7 +199,7 @@ def run_server(
         server._server.register_database(database_name)
         register_schemas_and_tables_in_database(database_name)
     
-    server.start(catalog_emulation=True, tls=True)
+    server.start(catalog_emulation=True, tls=use_tls)
 
 if __name__ == "__main__":
     import click

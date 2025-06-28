@@ -6,7 +6,7 @@ all-tests:
 	python -m unittest discover -s tests && \
 	python -m unittest discover -s test_concurrency && \
 	cd teleduck && pip install -e . && \
-	python -m unittest discover -s teleduck/tests
+	python -m unittest discover -s tests
 
 
 dev-build:

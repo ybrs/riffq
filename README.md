@@ -133,6 +133,20 @@ class Connection(riffq.BaseConnection):
 
 ```
 
+### Returning Errors from Python
+
+If a query fails you can report the error back to the client by sending
+an Arrow batch that describes the problem:
+
+```python
+except Exception as exc:
+    batch = self.arrow_batch(
+        [pa.array(["ERROR"]), pa.array([str(exc)])],
+        ["error", "message"],
+    )
+    self.send_reader(batch, callback)
+```
+
 ### Start the server
 
 ```python

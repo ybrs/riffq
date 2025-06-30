@@ -108,6 +108,9 @@ def run_server(
     host: str = "127.0.0.1",
     sql_scripts: Optional[Iterable[str]] = None,
     sql: Optional[Iterable[str]] = None,
+    use_tls: bool = True,
+    tls_cert_file: Optional[str] = None,
+    tls_key_file: Optional[str] = None,
 ):
     """Start the teleduck server using the given DuckDB database file.
 
@@ -124,6 +127,13 @@ def run_server(
         order before the server starts.
     sql:
         Iterable of SQL statements to execute before the server starts.
+    use_tls:
+        Whether to use TLS for the server.
+    tls_cert_file:
+        Path to the TLS certificate. If not provided, the built-in certificate
+        will be used.
+    tls_key_file:
+        Path to the TLS key. If not provided, the built-in key will be used.
     """
     global duckdb_con
     duckdb_con = duckdb.connect(db_file)
@@ -140,7 +150,10 @@ def run_server(
 
     server = riffq.RiffqServer(f"{host}:{port}", connection_cls=Connection)
     cert_dir = Path(__file__).parent / "certs"
-    server.set_tls(str(cert_dir / "server.crt"), str(cert_dir / "server.key"))
+    cert_path = tls_cert_file or str(cert_dir / "server.crt")
+    key_path = tls_key_file or str(cert_dir / "server.key")
+    if use_tls:
+        server.set_tls(cert_path, key_path)
 
 
     def register_schemas_and_tables_in_database(database_name):
@@ -183,7 +196,7 @@ def run_server(
         server._server.register_database(database_name)
         register_schemas_and_tables_in_database(database_name)
     
-    server.start(catalog_emulation=True, tls=True)
+    server.start(catalog_emulation=True, tls=use_tls)
     
 if __name__ == "__main__":
     import click
@@ -191,7 +204,10 @@ if __name__ == "__main__":
     @click.command()
     @click.argument("db_file", type=click.Path())
     @click.option("--port", default=5433, show_default=True, help="Port to listen on.")
-    def _main(db_file: str, port: int):
-        run_server(db_file, port)
+    @click.option("--use-tls/--no-use-tls", "use_tls", default=True, show_default=True, help="Use TLS for the server")
+    @click.option("--tls-cert-file", default=None, type=click.Path(), help="Path to TLS certificate")
+    @click.option("--tls-key-file", default=None, type=click.Path(), help="Path to TLS key")
+    def _main(db_file: str, port: int, use_tls: bool, tls_cert_file: str | None, tls_key_file: str | None):
+        run_server(db_file, port, use_tls=use_tls, tls_cert_file=tls_cert_file, tls_key_file=tls_key_file)
 
     _main()

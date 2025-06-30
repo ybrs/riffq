@@ -18,14 +18,29 @@ import click
     multiple=True,
     help="SQL statement to run before starting the server",
 )
+@click.option("--use-tls/--no-use-tls", "use_tls", default=True, show_default=True, help="Use TLS for the server")
+@click.option("--tls-cert-file", default=None, type=click.Path(), help="Path to TLS certificate")
+@click.option("--tls-key-file", default=None, type=click.Path(), help="Path to TLS key")
 def main(
     db_file: str,
     host: str,
     port: int,
     sql_scripts: tuple[str, ...],
     sqls: tuple[str, ...],
+    use_tls: bool,
+    tls_cert_file: str | None,
+    tls_key_file: str | None,
 ):
-    run_server(db_file, port, host=host, sql_scripts=list(sql_scripts), sql=list(sqls))
+    run_server(
+        db_file,
+        port,
+        host=host,
+        sql_scripts=list(sql_scripts),
+        sql=list(sqls),
+        use_tls=use_tls,
+        tls_cert_file=tls_cert_file,
+        tls_key_file=tls_key_file,
+    )
 
 if __name__ == "__main__":
     main()

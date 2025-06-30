@@ -11,7 +11,14 @@ class CliTest(unittest.TestCase):
             result = runner.invoke(main, ['my.db', '--host', '127.0.0.1', '--port', '9999'])
             self.assertEqual(result.exit_code, 0)
             mock_run_server.assert_called_once_with(
-                'my.db', 9999, host='127.0.0.1', sql_scripts=[], sql=[]
+                'my.db',
+                9999,
+                host='127.0.0.1',
+                sql_scripts=[],
+                sql=[],
+                use_tls=True,
+                tls_cert_file=None,
+                tls_key_file=None,
             )
 
     def test_cli_sql_options(self):
@@ -33,6 +40,33 @@ class CliTest(unittest.TestCase):
                 host='127.0.0.1',
                 sql_scripts=['init.sql', 'data.sql'],
                 sql=['INSERT INTO t VALUES (1)'],
+                use_tls=True,
+                tls_cert_file=None,
+                tls_key_file=None,
+            )
+
+    def test_cli_tls_options(self):
+        runner = CliRunner()
+        with patch('teleduck.__main__.run_server') as mock_run_server:
+            result = runner.invoke(
+                main,
+                [
+                    'my.db',
+                    '--no-use-tls',
+                    '--tls-cert-file', 'c.crt',
+                    '--tls-key-file', 'k.key',
+                ],
+            )
+            self.assertEqual(result.exit_code, 0)
+            mock_run_server.assert_called_once_with(
+                'my.db',
+                5433,
+                host='127.0.0.1',
+                sql_scripts=[],
+                sql=[],
+                use_tls=False,
+                tls_cert_file='c.crt',
+                tls_key_file='k.key',
             )
 
 if __name__ == '__main__':

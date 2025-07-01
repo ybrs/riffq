@@ -135,8 +135,8 @@ impl BoolCallbackWrapper {
 
 #[pymethods]
 impl CallbackWrapper {
-    #[pyo3(signature = (result, *, is_tag=false))]
-    fn __call__(&self, result: PyObject, is_tag: bool) {
+    #[pyo3(signature = (result, *, is_tag=false, is_error=false))]
+    fn __call__(&self, result: PyObject, is_tag: bool, is_error: bool) {
         if let Some(sender) = self.responder.lock().unwrap().take() {
             Python::with_gil(|py| {
                 if is_tag {
@@ -145,6 +145,22 @@ impl CallbackWrapper {
                     if ret.is_err() {
                         error!("return for tag errored");
                     }
+                    return;
+                }
+                if is_error {
+                    let err_tuple = result
+                        .extract::<(String, String, String)>(py)
+                        .unwrap_or_else(|_| (
+                            "ERROR".to_string(),
+                            "XX000".to_string(),
+                            "unknown error".to_string(),
+                        ));
+                    let err_info = ErrorInfo::new(
+                        err_tuple.0,
+                        err_tuple.1,
+                        err_tuple.2,
+                    );
+                    let _ = sender.send(QueryResult::Error(Box::new(err_info)));
                     return;
                 }
                 // Try Arrow C stream pointer first
@@ -741,7 +757,19 @@ trait QueryRunner: Send + Sync {
 pub enum QueryResult {
     Arrow(Vec<RecordBatch>, Arc<Schema>),
     Tag(String),
+    Error(Box<ErrorInfo>),
 }
+
+#[derive(Debug)]
+struct UserQueryError(Box<ErrorInfo>);
+
+impl std::fmt::Display for UserQueryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for UserQueryError {}
 
 struct RouterQueryRunner {
     py_worker: Arc<PythonWorker>,
@@ -772,18 +800,27 @@ impl QueryRunner for RouterQueryRunner {
                 match py_worker
                     .on_query(sql_owned, p, t, do_describe, connection_id)
                     .await
-                {                    
+                {
                     QueryResult::Arrow(b, s) => Ok((b, s)),
                     QueryResult::Tag(tag) => {
                         *tag_store.lock().unwrap() = Some(tag);
                         Ok((Vec::new(), Arc::new(Schema::empty())))
                     }
+                    QueryResult::Error(e) => Err(datafusion::error::DataFusionError::External(Box::new(UserQueryError(e))))
                 }
             }
         };
-        
-        let (batches, schema) =
-            dispatch_query(&ctx, &query, params, param_types, handler).await?;
+
+        let (batches, schema) = match dispatch_query(&ctx, &query, params, param_types, handler).await {
+            Ok(v) => v,
+            Err(datafusion::error::DataFusionError::External(e)) => {
+                match e.downcast::<UserQueryError>() {
+                    Ok(user_err) => return Ok(QueryResult::Error(user_err.0)),
+                    Err(e) => return Err(datafusion::error::DataFusionError::External(e)),
+                }
+            }
+            Err(e) => return Err(e),
+        };
 
         if let Some(tag) = tag_holder.lock().unwrap().take() {
             Ok(QueryResult::Tag(tag))
@@ -1150,6 +1187,7 @@ impl SimpleQueryHandler for RiffqProcessor {
                 Ok(vec![Response::Query(QueryResponse::new(schema, data_row_stream))])
             }
             QueryResult::Tag(tag) => Ok(vec![Response::Execution(Tag::new(&tag))]),
+            QueryResult::Error(e) => Err(PgWireError::UserError(e)),
         }
     }
 }
@@ -1249,6 +1287,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
                 Ok(Response::Query(QueryResponse::new(schema, data_row_stream)))
             }
             QueryResult::Tag(tag) => Ok(Response::Execution(Tag::new(&tag))),
+            QueryResult::Error(e) => Err(PgWireError::UserError(e)),
         }
     }
 
@@ -1298,6 +1337,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
         let schema = match result {
             QueryResult::Arrow(_, schema) => schema,
             QueryResult::Tag(_) => Arc::new(Schema::empty()),
+            QueryResult::Error(e) => return Err(PgWireError::UserError(e)),
         };
         let fields: Vec<FieldInfo> = schema
             .fields()

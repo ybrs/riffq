@@ -3,7 +3,7 @@ name: release-teleduck
 on:
   push:
     tags:
-      - 'release-teleduck-*'
+      - 'rl-teleduck-*'
 
 jobs:
   build-and-publish:

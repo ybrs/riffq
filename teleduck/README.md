@@ -20,3 +20,15 @@ control TLS behaviour using the following options:
   built in certificate is used.
 * `--tls-key-file` – path to the TLS private key file. If not provided the
   built in key is used.
+
+## Authentication
+
+Teleduck accepts any username and password by default. Set the following
+environment variables to enable credential checks:
+
+* `TELEDUCK_USERNAME` – expected username
+* `TELEDUCK_PASSWORD` – expected password
+* `TELEDUCK_PASSWORD_SHA1` – SHA1 hash of the expected password
+
+If none of these variables are defined, authentication succeeds for any
+credentials.

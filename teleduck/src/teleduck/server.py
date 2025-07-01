@@ -5,6 +5,8 @@ from riffq.helpers import to_arrow
 import logging
 from pathlib import Path
 from typing import Iterable, Optional
+import os
+import hashlib
 
 def map_type(data_type: str) -> str:
     dt = data_type.upper()
@@ -99,8 +101,31 @@ class Connection(riffq.BaseConnection):
         self.executor.submit(self._handle_query, sql, callback, **kwargs)
 
     def handle_auth(self, user, password, host, database=None, callback=callable):
-        # return callback(user == "user" and password == "secret")
-        callback(True)
+        """Handle authentication for incoming connections.
+
+        If the environment variables ``TELEDUCK_USERNAME`` and/or ``TELEDUCK_PASSWORD``
+        are set, the given credentials must match them.  Alternatively a hashed
+        password can be specified via ``TELEDUCK_PASSWORD_SHA1``.  When none of
+        these variables are defined, any credentials are accepted.
+        """
+
+        env_user = os.getenv("TELEDUCK_USERNAME")
+        env_password = os.getenv("TELEDUCK_PASSWORD")
+        env_password_sha1 = os.getenv("TELEDUCK_PASSWORD_SHA1")
+
+        if env_user is None and env_password is None and env_password_sha1 is None:
+            return callback(True)
+
+        ok = True
+        if env_user is not None:
+            ok = ok and user == env_user
+        if env_password is not None:
+            ok = ok and password == env_password
+        if env_password_sha1 is not None:
+            hashed = hashlib.sha1(password.encode()).hexdigest()
+            ok = ok and hashed == env_password_sha1
+
+        callback(ok)
 
 def run_server(
     db_file: str,

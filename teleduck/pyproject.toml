@@ -17,3 +17,11 @@ dependencies = [
 
 [project.scripts]
 teleduck = "teleduck.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["teleduck"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+teleduck = ["certs/*"]

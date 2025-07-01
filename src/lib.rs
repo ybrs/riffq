@@ -94,7 +94,7 @@ pub enum WorkerMessage {
         connection_id: u64,
         ip: String,
         port: u16,
-        responder: oneshot::Sender<bool>,
+        responder: oneshot::Sender<BoolCallbackResult>,
     },
     Disconnect {
         connection_id: u64,
@@ -107,8 +107,13 @@ pub enum WorkerMessage {
         database: Option<String>,
         host: String,
         password: String,
-        responder: oneshot::Sender<bool>,
+        responder: oneshot::Sender<BoolCallbackResult>,
     },
+}
+
+pub struct BoolCallbackResult {
+    pub allowed: bool,
+    pub error: Option<Box<ErrorInfo>>,
 }
 
 #[pyclass]
@@ -118,16 +123,35 @@ struct CallbackWrapper {
 
 #[pyclass]
 struct BoolCallbackWrapper {
-    responder: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+    responder: Arc<Mutex<Option<oneshot::Sender<BoolCallbackResult>>>>,
 }
 
 #[pymethods]
 impl BoolCallbackWrapper {
-    fn __call__(&self, result: PyObject) {
+    #[pyo3(signature = (result, message=None, severity=None, sqlstate=None))]
+    fn __call__(
+        &self,
+        result: PyObject,
+        message: Option<String>,
+        severity: Option<String>,
+        sqlstate: Option<String>,
+    ) {
         if let Some(sender) = self.responder.lock().unwrap().take() {
             Python::with_gil(|py| {
                 let val: bool = result.extract(py).unwrap_or(false);
-                let _ = sender.send(val);
+                if val {
+                    let _ = sender.send(BoolCallbackResult { allowed: true, error: None });
+                } else {
+                    let err = if message.is_some() || severity.is_some() || sqlstate.is_some() {
+                        let sev = severity.unwrap_or_else(|| "FATAL".to_string());
+                        let state = sqlstate.unwrap_or_else(|| "XX000".to_string());
+                        let msg = message.unwrap_or_else(|| "rejected".to_string());
+                        Some(Box::new(ErrorInfo::new(sev, state, msg)))
+                    } else {
+                        None
+                    };
+                    let _ = sender.send(BoolCallbackResult { allowed: false, error: err });
+                }
             });
         }
     }
@@ -592,7 +616,7 @@ impl PythonWorker {
                                     }
                                 });
                             } else {
-                                let _ = responder.send(true);
+                                let _ = responder.send(BoolCallbackResult { allowed: true, error: None });
                             }
                         }
                         WorkerMessage::Disconnect { connection_id, ip, port } => {
@@ -645,7 +669,7 @@ impl PythonWorker {
                                     }
                                 });
                             } else {
-                                let _ = responder.send(true);
+                                let _ = responder.send(BoolCallbackResult { allowed: true, error: None });
                             }
                         }
                     },
@@ -689,7 +713,7 @@ impl PythonWorker {
     }
 
 
-    pub async fn on_connect(&self, connection_id: u64, ip: String, port: u16) -> bool {
+    pub async fn on_connect(&self, connection_id: u64, ip: String, port: u16) -> BoolCallbackResult {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(WorkerMessage::Connect {
@@ -699,7 +723,7 @@ impl PythonWorker {
                 responder: tx,
             })
             .expect("Send failed!");
-        rx.await.unwrap_or(false)
+        rx.await.unwrap_or(BoolCallbackResult { allowed: false, error: None })
     }
 
     pub fn authentication_enabled(&self) -> bool {
@@ -713,7 +737,7 @@ impl PythonWorker {
         database: Option<String>,
         host: String,
         password: String,
-    ) -> bool {
+    ) -> BoolCallbackResult {
         // info!("new authentication {} {}", connection_id, database.clone().unwrap_or_default());
         let (tx, rx) = oneshot::channel();
         let _ = self
@@ -726,7 +750,7 @@ impl PythonWorker {
                 password,
                 responder: tx,
             });
-        rx.await.unwrap_or(false)
+        rx.await.unwrap_or(BoolCallbackResult { allowed: false, error: None })
     }
 
     pub async fn on_disconnect(&self, connection_id: u64, ip: String, port: u16) {
@@ -1048,12 +1072,13 @@ impl StartupHandler for RiffqProcessor {
                         .py_worker
                         .on_connect(id, addr.ip().to_string(), addr.port())
                         .await;
-                    if !allowed {
-                        let error = ErrorResponse::from(ErrorInfo::new(
+                    if !allowed.allowed {
+                        let err_info = allowed.error.unwrap_or_else(|| Box::new(ErrorInfo::new(
                             "FATAL".to_string(),
                             "28000".to_string(),
                             "Connection rejected".to_string(),
-                        ));
+                        )));
+                        let error = ErrorResponse::from(*err_info);
                         client.feed(PgWireBackendMessage::ErrorResponse(error)).await?;
                         client.close().await?;
                         return Ok(());
@@ -1082,13 +1107,13 @@ impl StartupHandler for RiffqProcessor {
                         pwd.password,
                     )
                     .await;
-                if !allowed {
-                    let error_info = ErrorInfo::new(
+                if !allowed.allowed {
+                    let err_info = allowed.error.unwrap_or_else(|| Box::new(ErrorInfo::new(
                         "FATAL".to_string(),
                         "28P01".to_string(),
                         "Authentication failed".to_string(),
-                    );
-                    let error = ErrorResponse::from(error_info);
+                    )));
+                    let error = ErrorResponse::from(*err_info);
                     client.feed(PgWireBackendMessage::ErrorResponse(error)).await?;
                     client.close().await?;
                     return Ok(());
@@ -1099,12 +1124,13 @@ impl StartupHandler for RiffqProcessor {
                     .py_worker
                     .on_connect(id, addr.ip().to_string(), addr.port())
                     .await;
-                if !allowed {
-                    let error = ErrorResponse::from(ErrorInfo::new(
+                if !allowed.allowed {
+                    let err_info = allowed.error.unwrap_or_else(|| Box::new(ErrorInfo::new(
                         "FATAL".to_string(),
                         "28000".to_string(),
                         "Connection rejected".to_string(),
-                    ));
+                    )));
+                    let error = ErrorResponse::from(*err_info);
                     client.feed(PgWireBackendMessage::ErrorResponse(error)).await?;
                     client.close().await?;
                     return Ok(());

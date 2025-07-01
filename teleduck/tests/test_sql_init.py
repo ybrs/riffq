@@ -10,7 +10,11 @@ import unittest
 
 def _run_server(db_file: str, port: int, scripts, sqls):
     import sys
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    repo_root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(repo_root / "src"))
+    for mod in ["teleduck.server", "teleduck"]:
+        if mod in sys.modules:
+            del sys.modules[mod]
     from teleduck.server import run_server
     run_server(db_file, port, sql_scripts=scripts, sql=sqls)
 

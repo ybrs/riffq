@@ -16,7 +16,7 @@ def _run_server(db_file: str, port: int):
         if mod in sys.modules:
             del sys.modules[mod]
     from teleduck.server import run_server
-    run_server(db_file, port)
+    run_server(db_file, port, read_only=False)
 
 
 class DuckDbCatalogTest(unittest.TestCase):

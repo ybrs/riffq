@@ -31,6 +31,8 @@ teleduck [OPTIONS] DB_FILE
   in certificate is used.
 * `--tls-key-file` – path to the TLS private key file. If not provided the built
   in key is used.
+* `--read-only/--no-read-only` – open the database in read-only mode
+  (default: disabled).
 
 ### Generating certificates
 

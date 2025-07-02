@@ -136,6 +136,7 @@ def run_server(
     use_tls: bool = True,
     tls_cert_file: Optional[str] = None,
     tls_key_file: Optional[str] = None,
+    read_only: bool = False,
 ):
     """Start the teleduck server using the given DuckDB database file.
 
@@ -159,9 +160,11 @@ def run_server(
         will be used.
     tls_key_file:
         Path to the TLS key. If not provided, the built-in key will be used.
+    read_only:
+        Open the DuckDB database in read-only mode.
     """
     global duckdb_con
-    duckdb_con = duckdb.connect(db_file)
+    duckdb_con = duckdb.connect(db_file, read_only=read_only)
 
     # execute initialization SQL before starting the server
     if sql_scripts:
@@ -232,7 +235,8 @@ if __name__ == "__main__":
     @click.option("--use-tls/--no-use-tls", "use_tls", default=True, show_default=True, help="Use TLS for the server")
     @click.option("--tls-cert-file", default=None, type=click.Path(), help="Path to TLS certificate")
     @click.option("--tls-key-file", default=None, type=click.Path(), help="Path to TLS key")
-    def _main(db_file: str, port: int, use_tls: bool, tls_cert_file: str | None, tls_key_file: str | None):
-        run_server(db_file, port, use_tls=use_tls, tls_cert_file=tls_cert_file, tls_key_file=tls_key_file)
+    @click.option("--read-only/--no-read-only", "read_only", default=False, show_default=True, help="Open database in read-only mode")
+    def _main(db_file: str, port: int, use_tls: bool, tls_cert_file: str | None, tls_key_file: str | None, read_only: bool):
+        run_server(db_file, port, use_tls=use_tls, tls_cert_file=tls_cert_file, tls_key_file=tls_key_file, read_only=read_only)
 
     _main()

@@ -39,9 +39,25 @@ import riffq
 logging.basicConfig(level=logging.DEBUG)
 
 class Connection(riffq.BaseConnection):
+    def handle_auth(self, user, password, host, database=None, callback=callable):
+        # simple username/password check
+        callback(user == "user" and password == "secret")
+
+    def handle_connect(self, ip, port, callback=callable):
+        # allow every incoming connection
+        callback(True)
+
+    def handle_disconnect(self, ip, port, callback=callable):
+        # invoked when client disconnects
+        callback(True)
+
     def _handle_query(self, sql, callback, **kwargs):
         cur = duckdb_con.cursor()
         try:
+            if sql.strip().lower() == "select err":
+                # custom error returned to client
+                callback(("ERROR", "42846", "bad type"), is_error=True)
+                return
             reader = cur.execute(sql).fetch_record_batch()
             self.send_reader(reader, callback)
         except Exception as exc:
@@ -115,9 +131,25 @@ You can extend the base class for
 
 ```python
 class Connection(riffq.BaseConnection):
+    def handle_auth(self, user, password, host, database=None, callback=callable):
+        # simple username/password check
+        callback(user == "user" and password == "secret")
+
+    def handle_connect(self, ip, port, callback=callable):
+        # allow every incoming connection
+        callback(True)
+
+    def handle_disconnect(self, ip, port, callback=callable):
+        # invoked when client disconnects
+        callback(True)
+
     def _handle_query(self, sql, callback, **kwargs):
         cur = duckdb_con.cursor()
         try:
+            if sql.strip().lower() == "select err":
+                # custom error returned to client
+                callback(("ERROR", "42846", "bad type"), is_error=True)
+                return
             reader = cur.execute(sql).fetch_record_batch()
             self.send_reader(reader, callback)
         except Exception as exc:

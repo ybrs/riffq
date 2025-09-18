@@ -52,5 +52,5 @@ jobs:
       - name: Run concurrency unit tests
         run: python -m unittest discover -s test_concurrency
       - name: Run teleduck unit tests
-        run: python -m unittest discover -s teleduck -p 'test_*.py'
+        run: python -m unittest discover -s teleduck/tests -p 'test_*.py'
 

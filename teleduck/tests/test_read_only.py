@@ -10,7 +10,7 @@ from teleduck.server import run_server
 class ReadOnlyTest(unittest.TestCase):
     def test_duckdb_connection_read_only(self):
         with patch('duckdb.connect') as mock_connect:
-            with patch('riffq.RiffqServer.start'):
+            with patch('teleduck.server.riffq.RiffqServer.start'):
                 run_server('db.db', port=1111, read_only=True)
                 mock_connect.assert_called_once_with('db.db', read_only=True)
 

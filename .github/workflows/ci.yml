@@ -8,6 +8,7 @@ on:
 
 jobs:
   unit-tests:
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

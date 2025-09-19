@@ -1,8 +1,8 @@
 name: CI
 
 on:
-  # push:
-  #   branches: ["**"]
+  push:
+    branches: ["**"]
   pull_request: 
     branches: ["**"]
 
@@ -32,6 +32,7 @@ jobs:
           toolchain: stable
           profile: minimal
           override: true
+      - uses: Swatinem/rust-cache@v2
       - name: Run Rust tests
         run: cargo test --verbose
       - name: Cache pip

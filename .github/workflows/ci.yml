@@ -8,6 +8,7 @@ on:
 
 jobs:
   unit-tests:
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -16,21 +17,13 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - name: Cache cargo registry
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           profile: minimal
           override: true
+      - uses: Swatinem/rust-cache@v2
       - name: Run Rust tests
         run: cargo test --verbose
       - name: Cache pip
@@ -52,5 +45,5 @@ jobs:
       - name: Run concurrency unit tests
         run: python -m unittest discover -s test_concurrency
       - name: Run teleduck unit tests
-        run: python -m unittest discover -s teleduck -p 'test_*.py'
+        run: python -m unittest discover -s teleduck/tests -p 'test_*.py'
 

@@ -11,6 +11,7 @@ import sqlparse
 from pygments import highlight
 from pygments.lexers import get_lexer_by_name
 from pygments.formatters import Terminal256Formatter
+import time
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -31,7 +32,13 @@ class Connection(riffq.BaseConnection):
         callback(True)
 
     def _handle_query(self, sql, callback, **kwargs):
-        print("===" * 5)
+        print(time.time(), "---" * 5)
+        sql = sql.strip().lower().split(';')[0]
+        if sql == "":
+            print("empty query returning OK")
+            return callback("OK", is_tag=True)
+
+
         try:
             formatted_sql = sqlparse.format(
                 sql,
@@ -47,9 +54,14 @@ class Connection(riffq.BaseConnection):
         except Exception as e:
             print(e)
 
+        print("kw", kwargs)
+
         try:
             cursor = upstream_conn.cursor()
-            cursor.execute(sql)
+            if kwargs.get('query_args', None):
+                cursor.execute(sql, kwargs['query_args'])
+            else:
+                cursor.execute(sql)
 
             # If no resultset (e.g., DML/DDL), return status tag
             if cursor.description is None:
@@ -109,12 +121,10 @@ def main():
         password=args.password,
         dbname=args.dbname,
     )
-    print(upstream_conn.get_parameter_status("server_version"))
-    print(upstream_conn.get_parameter_status("server_version_num"))
-    print(upstream_conn.server_version) 
-    
+    server_version = upstream_conn.get_parameter_status("server_version")
+
     server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
-    server.start(tls=False, catalog_emulation=False)
+    server.start(tls=False, catalog_emulation=False, server_version=server_version)
 
 if __name__ == "__main__":
     main()

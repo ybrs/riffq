@@ -890,6 +890,7 @@ pub struct RiffqProcessor {
     query_runner: Arc<dyn QueryRunner>,
     ctx_map: Arc<HashMap<String, Arc<SessionContext>>>,
     ctx: Arc<Mutex<Arc<SessionContext>>>,
+    server_version: String,
 }
 
 use datafusion::{
@@ -1005,6 +1006,7 @@ impl RiffqProcessor {
             "application_name" => opts.application_name.as_str(),
             "datestyle" => opts.datestyle.as_str(),
             "search_path" => opts.search_path.as_str(),
+            "server_version" => self.server_version.as_str(),
             _ => return None,
         };
 
@@ -1047,9 +1049,9 @@ impl StartupHandler for RiffqProcessor {
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        // We set server version here. We also should make it optional in future. 
+        // Set server version here using configured value (defaults to SERVER_VERSION)
         let mut params = DefaultServerParameterProvider::default();
-        params.server_version = SERVER_VERSION.to_string();
+        params.server_version = self.server_version.clone();
 
         match message {
             PgWireFrontendMessage::Startup(ref startup) => {
@@ -1558,19 +1560,20 @@ impl Server {
     }
 
 
-    #[pyo3(signature = (tls=false, catalog_emulation=false))]
-    fn start(&self, py: Python, tls: bool, catalog_emulation: bool) {
+    #[pyo3(signature = (tls=false, catalog_emulation=false, server_version=None))]
+    fn start(&self, py: Python, tls: bool, catalog_emulation: bool, server_version: Option<String>) {
         py.allow_threads(|| {
-            self.run_server(tls, catalog_emulation);
+            self.run_server(tls, catalog_emulation, server_version);
         });
     }
 
-    fn run_server(&self, tls: bool, catalog_emulation: bool) {
+    fn run_server(&self, tls: bool, catalog_emulation: bool, server_version: Option<String>) {
         let addr = self.addr.clone();
         let query_cb = self.on_query_cb.clone();
         let connect_cb = self.on_connect_cb.clone();
         let disconnect_cb = self.on_disconnect_cb.clone();
         let auth_cb = self.on_authentication_cb.clone();
+        let server_version = server_version.unwrap_or_else(|| SERVER_VERSION.to_string());
 
         if query_cb.lock().unwrap().is_none() {
             panic!("No callback set. Use on_query() before starting the server.");
@@ -1626,6 +1629,7 @@ impl Server {
                 let py_worker = py_worker.clone();
                 let ctx_map = ctx_map.clone();
                 let default_ctx = default_ctx.clone();
+                let server_version = server_version.clone();
                 async move {
                     loop {
                         let (socket, addr) = listener.accept().await.unwrap();
@@ -1650,6 +1654,7 @@ impl Server {
                                 py_worker: py_worker.clone(),
                                 conn_id_sender: Arc::new(Mutex::new(Some(id_tx))),
                                 query_runner: query_runner.clone(),
+                                server_version: server_version.clone(),
                             });
                             let factory = Arc::new(RiffqProcessorFactory {
                                 handler: handler.clone(),

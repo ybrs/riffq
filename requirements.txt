@@ -7,3 +7,4 @@ pandas
 pyarrow
 psycopg2
 polars
+sqlparse==0.5.3

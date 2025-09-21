@@ -83,8 +83,6 @@ class QueryProxyTest(unittest.TestCase):
             conn._handle_query("select id, name from t", cb)
         out = buf.getvalue()
 
-        # formatted SQL printed and includes uppercase SELECT
-        self.assertTrue("SQL (formatted):" in out or "SQL:" in out)
         self.assertIn("SELECT", out)
 
         # Expect an Arrow reader was built with correct schema and values

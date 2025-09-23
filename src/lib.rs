@@ -34,8 +34,9 @@ use futures::stream::{self, BoxStream};
 
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::array::{
-    Array, RecordBatch, ListArray, LargeListArray, FixedSizeListArray,
+    Array, RecordBatch, ListArray, LargeListArray, FixedSizeListArray, BinaryArray, LargeBinaryArray, FixedSizeBinaryArray, Decimal128Array, Decimal256Array,
 };
+// no explicit import of i256 required; we only use to_string() on values
 use arrow::array::cast::AsArray;
 use arrow::record_batch::RecordBatchReader;
 use arrow::datatypes::{DataType, Field, Schema, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
@@ -385,6 +386,28 @@ fn arrow_value_to_string(array: &dyn Array, row: usize) -> Option<String> {
             let dt = DateTime::from_timestamp(secs, nsec).unwrap();
             Some(dt.to_string())
         }
+        DataType::Decimal128(_p, scale) => {
+            let arr = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+            let raw: i128 = arr.value(row);
+            Some(format_decimal_i128(raw, *scale as u32))
+        }
+        DataType::Decimal256(_p, scale) => {
+            let arr = array.as_any().downcast_ref::<Decimal256Array>().unwrap();
+            let s = arr.value(row).to_string();
+            Some(insert_decimal_point(&s, *scale as usize))
+        }
+        DataType::Binary => {
+            let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+            Some(hex_bytea(arr.value(row)))
+        }
+        DataType::LargeBinary => {
+            let arr = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
+            Some(hex_bytea(arr.value(row)))
+        }
+        DataType::FixedSizeBinary(_) => {
+            let arr = array.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+            Some(hex_bytea(arr.value(row)))
+        }
         DataType::List(_) => {
             let list = array.as_any().downcast_ref::<ListArray>().unwrap();
             let values = list.value(row);
@@ -461,6 +484,32 @@ fn encode_arrow_value(
         return encoder.encode_field(&Option::<i32>::None); // type will be ignored
     }
     match array.data_type() {
+        DataType::Decimal128(_p, scale) => {
+            let arr = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+            let raw: i128 = arr.value(row);
+            let s = format_decimal_i128(raw, *scale as u32);
+            encoder.encode_field(&Some(s))
+        }
+        DataType::Decimal256(_p, scale) => {
+            let arr = array.as_any().downcast_ref::<Decimal256Array>().unwrap();
+            let s = insert_decimal_point(&arr.value(row).to_string(), *scale as usize);
+            encoder.encode_field(&Some(s))
+        }
+        DataType::Binary => {
+            let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+            let s = hex_bytea(arr.value(row));
+            encoder.encode_field(&Some(s))
+        }
+        DataType::LargeBinary => {
+            let arr = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
+            let s = hex_bytea(arr.value(row));
+            encoder.encode_field(&Some(s))
+        }
+        DataType::FixedSizeBinary(_) => {
+            let arr = array.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+            let s = hex_bytea(arr.value(row));
+            encoder.encode_field(&Some(s))
+        }
         DataType::Int8 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int8Type>().value(row) as i16)),
         DataType::Int16 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int16Type>().value(row))),
         DataType::Int32 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int32Type>().value(row))),
@@ -501,6 +550,82 @@ fn encode_arrow_value(
             encoder.encode_field(&vec)
         }
         _ => encoder.encode_field(&Option::<&str>::None),
+    }
+}
+
+// helper: format i128 with given scale into decimal string (handles sign)
+fn format_decimal_i128(val: i128, scale: u32) -> String {
+    if scale == 0 {
+        return val.to_string();
+    }
+    let neg = val < 0;
+    let mut abs = if neg { -val } else { val };
+    let ten_pow = 10i128.pow(scale);
+    let int_part = abs / ten_pow;
+    let frac_part = abs % ten_pow;
+    let s = format!("{}.{:0width$}", int_part, frac_part, width = scale as usize);
+    if neg { format!("-{}", s) } else { s }
+}
+
+// helper: insert decimal point into a (possibly signed) integer string
+fn insert_decimal_point(s: &str, scale: usize) -> String {
+    let mut neg = false;
+    let mut digits = s.to_string();
+    if let Some(first) = digits.chars().next() {
+        if first == '-' {
+            neg = true;
+            digits.remove(0);
+        }
+    }
+    let len = digits.len();
+    let result = if scale == 0 { digits } else if len > scale {
+        format!("{}.{:0width$}", &digits[..len - scale], digits[len - scale..].to_string(), width = scale)
+    } else {
+        // pad with leading zeros
+        let mut tmp = String::from("0.");
+        tmp.push_str(&"0".repeat(scale - len));
+        tmp.push_str(&digits);
+        tmp
+    };
+    if neg { format!("-{}", result) } else { result }
+}
+
+// helper: format bytea as Postgres hex text (\x...) lowercased
+fn hex_bytea(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(2 + bytes.len() * 2);
+    out.push_str("\\x");
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{:02x}", b);
+    }
+    out
+}
+
+#[cfg(test)]
+mod encode_tests {
+    use super::*;
+    use arrow::array::{ArrayRef};
+    use std::sync::Arc;
+
+    #[test]
+    fn test_decimal128_to_string() {
+        let dt = DataType::Decimal128(16, 6);
+        let arr = Decimal128Array::from(vec![Some(123456789i128), Some(-42i128), None]).with_data_type(dt.clone());
+        let a: &dyn Array = &arr;
+        assert_eq!(arrow_value_to_string(a, 0).as_deref(), Some("123.456789"));
+        assert_eq!(arrow_value_to_string(a, 1).as_deref(), Some("-0.000042"));
+        assert_eq!(arrow_value_to_string(a, 2), None);
+    }
+
+    #[test]
+    fn test_binary_to_hex_text() {
+        let arr = BinaryArray::from(vec![
+            Some(&[0xab][..]),
+            Some(&[0xde, 0xad, 0xbe, 0xef][..])
+        ]);
+        let a: &dyn Array = &arr;
+        assert_eq!(arrow_value_to_string(a, 0).as_deref(), Some("\\xab"));
+        assert_eq!(arrow_value_to_string(a, 1).as_deref(), Some("\\xdeadbeef"));
     }
 }
 
@@ -1419,10 +1544,9 @@ impl ExtendedQueryHandler for RiffqProcessor {
                 )
             })
             .collect();
+        info!("sending back the describe portal {:?}", fields);
         Ok(DescribePortalResponse::new(fields))
     }
-
-
 
 }
 

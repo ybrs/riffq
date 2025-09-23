@@ -3,7 +3,7 @@ This is for simply printing out queries coming from postgresl client and sending
 postgresql server.
 """
 import logging
-import psycopg2
+import psycopg
 import pyarrow as pa
 import riffq
 import argparse
@@ -12,6 +12,8 @@ from pygments import highlight
 from pygments.lexers import get_lexer_by_name
 from pygments.formatters import Terminal256Formatter
 import time
+from psycopg import RawCursor
+
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -58,6 +60,7 @@ class Connection(riffq.BaseConnection):
 
         try:
             cursor = upstream_conn.cursor()
+
             if kwargs.get('query_args', None):
                 cursor.execute(sql, kwargs['query_args'])
             else:
@@ -71,7 +74,7 @@ class Connection(riffq.BaseConnection):
             # Build Arrow arrays column-wise to preserve types
             column_names = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
-
+            print("rows", rows)
             # Transpose rows into columns and let pyarrow infer types
             columns = list(zip(*rows)) if rows else [[] for _ in column_names]
             arrays = [pa.array(list(col)) for col in columns]
@@ -87,6 +90,7 @@ class Connection(riffq.BaseConnection):
             # Forward upstream errors to the client
             sqlstate = getattr(exc, "pgcode", None) or "XX000"
             message = getattr(exc, "pgerror", None) or str(exc)
+            print("-> error in query", message)
             try:
                 # reset aborted transaction state so subsequent queries work
                 if hasattr(upstream_conn, "rollback"):
@@ -114,17 +118,18 @@ def main():
     args = parser.parse_args()
 
     global upstream_conn
-    upstream_conn = psycopg2.connect(
+    upstream_conn = psycopg.connect(
         host=args.host,
         port=args.port,
         user=args.user,
         password=args.password,
         dbname=args.dbname,
+        cursor_factory=RawCursor
     )
-    server_version = upstream_conn.get_parameter_status("server_version")
+    # server_version = upstream_conn.get_parameter_status("server_version")
 
     server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
-    server.start(tls=False, catalog_emulation=False, server_version=server_version)
+    server.start(tls=False, catalog_emulation=False, server_version="17.02")
 
 if __name__ == "__main__":
     main()

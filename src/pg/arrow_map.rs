@@ -2,6 +2,7 @@
 //!
 //! Keep this in one place so the encoder, DESCRIBE-only execution
 //! and any future planner code all agree on column OIDs.
+use log::{debug, error, info};
 
 use arrow::datatypes::DataType;
 use pgwire::api::Type;
@@ -28,7 +29,7 @@ use pgwire::api::Type;
 /// extend this function – **never** add ad-hoc matches elsewhere.
 pub fn arrow_type_to_pgwire(dt: &DataType) -> Type {
     use DataType::*;
-
+    info!("Datatype -> {:?}", dt);
     match dt {
         /* ── integers ───────────────────────────── */
         Int8 | UInt8                   => Type::INT2,   // SMALLINT
@@ -84,7 +85,7 @@ pub fn arrow_type_to_pgwire(dt: &DataType) -> Type {
         // | Dictionary(_, _)
         // | RunEndEncoded(_, _)
         // | Null                      => Type::VARCHAR,
-
+        
         /* ── arrays ─────────────────────────────── */
         List(field) | LargeList(field) | FixedSizeList(field, _) => match field.data_type() {
             DataType::Utf8 | DataType::LargeUtf8 => Type::VARCHAR_ARRAY,
@@ -127,6 +128,8 @@ mod tests {
         assert_eq!(arrow_type_to_pgwire(&DataType::LargeUtf8), Type::VARCHAR);
         assert_eq!(arrow_type_to_pgwire(&DataType::Date32), Type::DATE);
         assert_eq!(arrow_type_to_pgwire(&DataType::Date64), Type::DATE);
+        assert_eq!(arrow_type_to_pgwire(&DataType::Decimal128(16, 6)), Type::NUMERIC);
+        assert_eq!(arrow_type_to_pgwire(&DataType::Decimal256(38, 10)), Type::NUMERIC);
         assert_eq!(
             arrow_type_to_pgwire(&DataType::Timestamp(TimeUnit::Second, None)),
             Type::TIMESTAMP

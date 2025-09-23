@@ -115,6 +115,7 @@ def main():
     parser.add_argument("--user", required=True)
     parser.add_argument("--password", required=False)
     parser.add_argument("--dbname", default="postgres")
+    # TODO: add listen host and listen port
     args = parser.parse_args()
 
     global upstream_conn
@@ -128,7 +129,7 @@ def main():
     )
     # server_version = upstream_conn.get_parameter_status("server_version")
 
-    server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
+    server = riffq.RiffqServer("0.0.0.0:5433", connection_cls=Connection)
     server.start(tls=False, catalog_emulation=False, server_version="17.02")
 
 if __name__ == "__main__":

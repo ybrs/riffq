@@ -553,7 +553,6 @@ impl PythonWorker {
                                     kwargs.set_item("do_describe", do_describe).unwrap();
 
                                     // Connection identifier
-                                    // println!("to python connection_id: {}", connection_id);
                                     kwargs.set_item("connection_id", connection_id).unwrap();                                    
 
                                     // Add query_args if present
@@ -1201,7 +1200,6 @@ impl SimpleQueryHandler for RiffqProcessor {
             .get("connection_id")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
-        // println!("running query with connection_id: {}", connection_id);
 
         let result = self
             .query_runner
@@ -1329,7 +1327,48 @@ impl ExtendedQueryHandler for RiffqProcessor {
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        Ok(DescribeStatementResponse::new(vec![], vec![]))
+        // Build response similar to do_describe_portal, but using the stored statement
+        let connection_id = _client
+            .metadata()
+            .get("connection_id")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let query = &_statement.statement.query;
+        let param_types = _statement.parameter_types.clone();
+
+        let result = self
+            .query_runner
+            .execute(
+                query.to_string(),
+                None,                         // no parameter values at statement describe
+                Some(param_types.clone()),    // but pass parameter type hints
+                true,                         // describe mode to get only schema
+                connection_id,
+            )
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+        let schema = match result {
+            QueryResult::Arrow(_, schema) => schema,
+            QueryResult::Tag(_) => Arc::new(Schema::empty()),
+            QueryResult::Error(e) => return Err(PgWireError::UserError(e)),
+        };
+
+        let fields: Vec<FieldInfo> = schema
+            .fields()
+            .iter()
+            .map(|f| {
+                FieldInfo::new(
+                    f.name().clone().into(),
+                    None,
+                    None,
+                    arrow_type_to_pgwire(f.data_type()),
+                    FieldFormat::Text,
+                )
+            })
+            .collect();
+        Ok(DescribeStatementResponse::new(param_types, fields))
     }
 
 
@@ -1587,11 +1626,17 @@ impl Server {
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
             let mut ctx_map: HashMap<String, Arc<SessionContext>> = HashMap::new();
+            
             if self.databases.is_empty() {
-                let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string(), None).await.unwrap();
-                ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
+                if catalog_emulation {
+                    let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string(), None).await.unwrap();
+                    ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
+                } else {
+                    let raw_ctx = SessionContext::new();
+                    ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
+
+                }
             } else {
-                
                 for db in &self.databases {
                     let (raw_ctx, _) = get_base_session_context(None, 
                                                                                 db.to_string(), 
@@ -1599,7 +1644,7 @@ impl Server {
                     ctx_map.insert(db.clone(), Arc::new(raw_ctx));
                 }
             }
-
+            
             for ctx in ctx_map.values() {
                 for db in &self.databases {
                     register_user_database(ctx, db).await.unwrap();

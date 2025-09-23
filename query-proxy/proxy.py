@@ -40,6 +40,9 @@ class Connection(riffq.BaseConnection):
             print("empty query returning OK")
             return callback("OK", is_tag=True)
 
+        if sql.lower() == "discard all":
+            print("discard all returning OK")
+            return callback("OK", is_tag=True)
 
         try:
             formatted_sql = sqlparse.format(

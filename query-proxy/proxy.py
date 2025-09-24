@@ -40,10 +40,6 @@ class Connection(riffq.BaseConnection):
             print("empty query returning OK")
             return callback("OK", is_tag=True)
 
-        if sql.lower() == "discard all":
-            print("discard all returning OK")
-            return callback("OK", is_tag=True)
-
         try:
             formatted_sql = sqlparse.format(
                 sql,
@@ -108,7 +104,8 @@ class Connection(riffq.BaseConnection):
                 pass
 
     def handle_query(self, sql, callback=callable, **kwargs):
-        self.executor.submit(self._handle_query, sql, callback, **kwargs)
+        self._handle_query(sql, callback, **kwargs)
+        # self.executor.submit(self._handle_query, sql, callback, **kwargs)
 
 def main():
 

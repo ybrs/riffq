@@ -1758,7 +1758,6 @@ impl Server {
                 } else {
                     let raw_ctx = SessionContext::new();
                     ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
-
                 }
             } else {
                 for db in &self.databases {

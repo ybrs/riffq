@@ -34,8 +34,9 @@ use futures::stream::{self, BoxStream};
 
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::array::{
-    Array, RecordBatch, ListArray, LargeListArray, FixedSizeListArray,
+    Array, RecordBatch, ListArray, LargeListArray, FixedSizeListArray, BinaryArray, LargeBinaryArray, FixedSizeBinaryArray, Decimal128Array, Decimal256Array,
 };
+// no explicit import of i256 required; we only use to_string() on values
 use arrow::array::cast::AsArray;
 use arrow::record_batch::RecordBatchReader;
 use arrow::datatypes::{DataType, Field, Schema, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
@@ -385,6 +386,28 @@ fn arrow_value_to_string(array: &dyn Array, row: usize) -> Option<String> {
             let dt = DateTime::from_timestamp(secs, nsec).unwrap();
             Some(dt.to_string())
         }
+        DataType::Decimal128(_p, scale) => {
+            let arr = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+            let raw: i128 = arr.value(row);
+            Some(format_decimal_i128(raw, *scale as u32))
+        }
+        DataType::Decimal256(_p, scale) => {
+            let arr = array.as_any().downcast_ref::<Decimal256Array>().unwrap();
+            let s = arr.value(row).to_string();
+            Some(insert_decimal_point(&s, *scale as usize))
+        }
+        DataType::Binary => {
+            let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+            Some(hex_bytea(arr.value(row)))
+        }
+        DataType::LargeBinary => {
+            let arr = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
+            Some(hex_bytea(arr.value(row)))
+        }
+        DataType::FixedSizeBinary(_) => {
+            let arr = array.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+            Some(hex_bytea(arr.value(row)))
+        }
         DataType::List(_) => {
             let list = array.as_any().downcast_ref::<ListArray>().unwrap();
             let values = list.value(row);
@@ -461,6 +484,32 @@ fn encode_arrow_value(
         return encoder.encode_field(&Option::<i32>::None); // type will be ignored
     }
     match array.data_type() {
+        DataType::Decimal128(_p, scale) => {
+            let arr = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+            let raw: i128 = arr.value(row);
+            let s = format_decimal_i128(raw, *scale as u32);
+            encoder.encode_field(&Some(s))
+        }
+        DataType::Decimal256(_p, scale) => {
+            let arr = array.as_any().downcast_ref::<Decimal256Array>().unwrap();
+            let s = insert_decimal_point(&arr.value(row).to_string(), *scale as usize);
+            encoder.encode_field(&Some(s))
+        }
+        DataType::Binary => {
+            let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+            let s = hex_bytea(arr.value(row));
+            encoder.encode_field(&Some(s))
+        }
+        DataType::LargeBinary => {
+            let arr = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
+            let s = hex_bytea(arr.value(row));
+            encoder.encode_field(&Some(s))
+        }
+        DataType::FixedSizeBinary(_) => {
+            let arr = array.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+            let s = hex_bytea(arr.value(row));
+            encoder.encode_field(&Some(s))
+        }
         DataType::Int8 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int8Type>().value(row) as i16)),
         DataType::Int16 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int16Type>().value(row))),
         DataType::Int32 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int32Type>().value(row))),
@@ -501,6 +550,82 @@ fn encode_arrow_value(
             encoder.encode_field(&vec)
         }
         _ => encoder.encode_field(&Option::<&str>::None),
+    }
+}
+
+// helper: format i128 with given scale into decimal string (handles sign)
+fn format_decimal_i128(val: i128, scale: u32) -> String {
+    if scale == 0 {
+        return val.to_string();
+    }
+    let neg = val < 0;
+    let mut abs = if neg { -val } else { val };
+    let ten_pow = 10i128.pow(scale);
+    let int_part = abs / ten_pow;
+    let frac_part = abs % ten_pow;
+    let s = format!("{}.{:0width$}", int_part, frac_part, width = scale as usize);
+    if neg { format!("-{}", s) } else { s }
+}
+
+// helper: insert decimal point into a (possibly signed) integer string
+fn insert_decimal_point(s: &str, scale: usize) -> String {
+    let mut neg = false;
+    let mut digits = s.to_string();
+    if let Some(first) = digits.chars().next() {
+        if first == '-' {
+            neg = true;
+            digits.remove(0);
+        }
+    }
+    let len = digits.len();
+    let result = if scale == 0 { digits } else if len > scale {
+        format!("{}.{:0width$}", &digits[..len - scale], digits[len - scale..].to_string(), width = scale)
+    } else {
+        // pad with leading zeros
+        let mut tmp = String::from("0.");
+        tmp.push_str(&"0".repeat(scale - len));
+        tmp.push_str(&digits);
+        tmp
+    };
+    if neg { format!("-{}", result) } else { result }
+}
+
+// helper: format bytea as Postgres hex text (\x...) lowercased
+fn hex_bytea(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(2 + bytes.len() * 2);
+    out.push_str("\\x");
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{:02x}", b);
+    }
+    out
+}
+
+#[cfg(test)]
+mod encode_tests {
+    use super::*;
+    use arrow::array::{ArrayRef};
+    use std::sync::Arc;
+
+    #[test]
+    fn test_decimal128_to_string() {
+        let dt = DataType::Decimal128(16, 6);
+        let arr = Decimal128Array::from(vec![Some(123456789i128), Some(-42i128), None]).with_data_type(dt.clone());
+        let a: &dyn Array = &arr;
+        assert_eq!(arrow_value_to_string(a, 0).as_deref(), Some("123.456789"));
+        assert_eq!(arrow_value_to_string(a, 1).as_deref(), Some("-0.000042"));
+        assert_eq!(arrow_value_to_string(a, 2), None);
+    }
+
+    #[test]
+    fn test_binary_to_hex_text() {
+        let arr = BinaryArray::from(vec![
+            Some(&[0xab][..]),
+            Some(&[0xde, 0xad, 0xbe, 0xef][..])
+        ]);
+        let a: &dyn Array = &arr;
+        assert_eq!(arrow_value_to_string(a, 0).as_deref(), Some("\\xab"));
+        assert_eq!(arrow_value_to_string(a, 1).as_deref(), Some("\\xdeadbeef"));
     }
 }
 
@@ -553,7 +678,6 @@ impl PythonWorker {
                                     kwargs.set_item("do_describe", do_describe).unwrap();
 
                                     // Connection identifier
-                                    // println!("to python connection_id: {}", connection_id);
                                     kwargs.set_item("connection_id", connection_id).unwrap();                                    
 
                                     // Add query_args if present
@@ -890,6 +1014,7 @@ pub struct RiffqProcessor {
     query_runner: Arc<dyn QueryRunner>,
     ctx_map: Arc<HashMap<String, Arc<SessionContext>>>,
     ctx: Arc<Mutex<Arc<SessionContext>>>,
+    server_version: String,
 }
 
 use datafusion::{
@@ -1005,6 +1130,7 @@ impl RiffqProcessor {
             "application_name" => opts.application_name.as_str(),
             "datestyle" => opts.datestyle.as_str(),
             "search_path" => opts.search_path.as_str(),
+            "server_version" => self.server_version.as_str(),
             _ => return None,
         };
 
@@ -1047,9 +1173,9 @@ impl StartupHandler for RiffqProcessor {
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        // We set server version here. We also should make it optional in future. 
+        // Set server version here using configured value (defaults to SERVER_VERSION)
         let mut params = DefaultServerParameterProvider::default();
-        params.server_version = SERVER_VERSION.to_string();
+        params.server_version = self.server_version.clone();
 
         match message {
             PgWireFrontendMessage::Startup(ref startup) => {
@@ -1199,7 +1325,6 @@ impl SimpleQueryHandler for RiffqProcessor {
             .get("connection_id")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
-        // println!("running query with connection_id: {}", connection_id);
 
         let result = self
             .query_runner
@@ -1327,7 +1452,48 @@ impl ExtendedQueryHandler for RiffqProcessor {
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        Ok(DescribeStatementResponse::new(vec![], vec![]))
+        // Build response similar to do_describe_portal, but using the stored statement
+        let connection_id = _client
+            .metadata()
+            .get("connection_id")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let query = &_statement.statement.query;
+        let param_types = _statement.parameter_types.clone();
+
+        let result = self
+            .query_runner
+            .execute(
+                query.to_string(),
+                None,                         // no parameter values at statement describe
+                Some(param_types.clone()),    // but pass parameter type hints
+                true,                         // describe mode to get only schema
+                connection_id,
+            )
+            .await
+            .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+        let schema = match result {
+            QueryResult::Arrow(_, schema) => schema,
+            QueryResult::Tag(_) => Arc::new(Schema::empty()),
+            QueryResult::Error(e) => return Err(PgWireError::UserError(e)),
+        };
+
+        let fields: Vec<FieldInfo> = schema
+            .fields()
+            .iter()
+            .map(|f| {
+                FieldInfo::new(
+                    f.name().clone().into(),
+                    None,
+                    None,
+                    arrow_type_to_pgwire(f.data_type()),
+                    FieldFormat::Text,
+                )
+            })
+            .collect();
+        Ok(DescribeStatementResponse::new(param_types, fields))
     }
 
 
@@ -1378,10 +1544,9 @@ impl ExtendedQueryHandler for RiffqProcessor {
                 )
             })
             .collect();
+        info!("sending back the describe portal {:?}", fields);
         Ok(DescribePortalResponse::new(fields))
     }
-
-
 
 }
 
@@ -1558,19 +1723,20 @@ impl Server {
     }
 
 
-    #[pyo3(signature = (tls=false, catalog_emulation=false))]
-    fn start(&self, py: Python, tls: bool, catalog_emulation: bool) {
+    #[pyo3(signature = (tls=false, catalog_emulation=false, server_version=None))]
+    fn start(&self, py: Python, tls: bool, catalog_emulation: bool, server_version: Option<String>) {
         py.allow_threads(|| {
-            self.run_server(tls, catalog_emulation);
+            self.run_server(tls, catalog_emulation, server_version);
         });
     }
 
-    fn run_server(&self, tls: bool, catalog_emulation: bool) {
+    fn run_server(&self, tls: bool, catalog_emulation: bool, server_version: Option<String>) {
         let addr = self.addr.clone();
         let query_cb = self.on_query_cb.clone();
         let connect_cb = self.on_connect_cb.clone();
         let disconnect_cb = self.on_disconnect_cb.clone();
         let auth_cb = self.on_authentication_cb.clone();
+        let server_version = server_version.unwrap_or_else(|| SERVER_VERSION.to_string());
 
         if query_cb.lock().unwrap().is_none() {
             panic!("No callback set. Use on_query() before starting the server.");
@@ -1584,11 +1750,16 @@ impl Server {
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
             let mut ctx_map: HashMap<String, Arc<SessionContext>> = HashMap::new();
+            
             if self.databases.is_empty() {
-                let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string(), None).await.unwrap();
-                ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
+                if catalog_emulation {
+                    let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string(), None).await.unwrap();
+                    ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
+                } else {
+                    let raw_ctx = SessionContext::new();
+                    ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
+                }
             } else {
-                
                 for db in &self.databases {
                     let (raw_ctx, _) = get_base_session_context(None, 
                                                                                 db.to_string(), 
@@ -1596,7 +1767,7 @@ impl Server {
                     ctx_map.insert(db.clone(), Arc::new(raw_ctx));
                 }
             }
-
+            
             for ctx in ctx_map.values() {
                 for db in &self.databases {
                     register_user_database(ctx, db).await.unwrap();
@@ -1626,6 +1797,7 @@ impl Server {
                 let py_worker = py_worker.clone();
                 let ctx_map = ctx_map.clone();
                 let default_ctx = default_ctx.clone();
+                let server_version = server_version.clone();
                 async move {
                     loop {
                         let (socket, addr) = listener.accept().await.unwrap();
@@ -1650,6 +1822,7 @@ impl Server {
                                 py_worker: py_worker.clone(),
                                 conn_id_sender: Arc::new(Mutex::new(Some(id_tx))),
                                 query_runner: query_runner.clone(),
+                                server_version: server_version.clone(),
                             });
                             let factory = Arc::new(RiffqProcessorFactory {
                                 handler: handler.clone(),

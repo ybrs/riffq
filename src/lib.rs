@@ -30,7 +30,7 @@ static CONNECTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 use bytes::Bytes;
 use std::ffi::c_void;
 use std::pin::Pin;
-use futures::stream::{self, BoxStream};
+use futures::stream;
 
 use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::array::{
@@ -58,11 +58,10 @@ use arrow::datatypes::TimeUnit;
 
 use pgwire::api::auth::{finish_authentication, DefaultServerParameterProvider, StartupHandler};
 use pgwire::api::PgWireConnectionState;
-use pgwire::api::copy::NoopCopyHandler;
-use pgwire::api::query::{SimpleQueryHandler, ExtendedQueryHandler};
+use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::results::{DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
 use pgwire::messages::data::DataRow;
-use pgwire::api::{ClientInfo, NoopErrorHandler, PgWireServerHandlers, Type};
+use pgwire::api::{ClientInfo, NoopHandler, PgWireServerHandlers, Type};
 use pgwire::api::portal::Portal;
 use pgwire::error::{PgWireError, PgWireResult, ErrorInfo};
 use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
@@ -559,7 +558,7 @@ fn format_decimal_i128(val: i128, scale: u32) -> String {
         return val.to_string();
     }
     let neg = val < 0;
-    let mut abs = if neg { -val } else { val };
+    let abs = if neg { -val } else { val };
     let ten_pow = 10i128.pow(scale);
     let int_part = abs / ten_pow;
     let frac_part = abs % ten_pow;
@@ -601,14 +600,12 @@ fn hex_bytea(bytes: &[u8]) -> String {
     out
 }
 
-#[cfg(test)]
-mod encode_tests {
-    use super::*;
-    use arrow::array::{ArrayRef};
-    use std::sync::Arc;
+    #[cfg(test)]
+    mod encode_tests {
+        use super::*;
 
-    #[test]
-    fn test_decimal128_to_string() {
+        #[test]
+        fn test_decimal128_to_string() {
         let dt = DataType::Decimal128(16, 6);
         let arr = Decimal128Array::from(vec![Some(123456789i128), Some(-42i128), None]).with_data_type(dt.clone());
         let a: &dyn Array = &arr;
@@ -1118,7 +1115,7 @@ impl RiffqProcessor {
         Ok(())
     }
 
-    fn show_variable_response<'a>(&self, name: &str, format: FieldFormat) -> Option<Response<'a>> {
+    fn show_variable_response(&self, name: &str, format: FieldFormat) -> Option<Response> {
         let ctx = self.get_ctx();
         let state = ctx.state();
         let opts = state
@@ -1142,7 +1139,6 @@ impl RiffqProcessor {
         encoder.encode_field(&Some(value)).ok()?;
         let row = encoder.finish().ok()?;
         let rows = stream::iter(vec![Ok(row)]);
-        let rows: BoxStream<'a, PgWireResult<DataRow>> = Box::pin(rows);
         Some(Response::Query(QueryResponse::new(fields, rows)))
     }
 
@@ -1283,11 +1279,11 @@ impl StartupHandler for RiffqProcessor {
 
 #[async_trait]
 impl SimpleQueryHandler for RiffqProcessor {
-    async fn do_query<'a, C>(
+    async fn do_query<C>(
         &self,
-        _client: &mut C,
-        query: &'a str,
-    ) -> PgWireResult<Vec<Response<'a>>>
+        client: &mut C,
+        query: &str,
+    ) -> PgWireResult<Vec<Response>>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: std::fmt::Debug,
@@ -1320,7 +1316,7 @@ impl SimpleQueryHandler for RiffqProcessor {
         }
 
         debug!("[PGWIRE] do_query called with: {}", query);
-        let connection_id = _client
+        let connection_id = client
             .metadata()
             .get("connection_id")
             .and_then(|v| v.parse::<u64>().ok())
@@ -1356,7 +1352,15 @@ pub struct MyQueryParser;
 impl pgwire::api::stmt::QueryParser for MyQueryParser {
     type Statement = MyStatement;
 
-    async fn parse_sql(&self, sql: &str, _types: &[Type]) -> PgWireResult<Self::Statement> {
+    async fn parse_sql<C>(
+        &self,
+        _client: &C,
+        sql: &str,
+        _types: &[Type],
+    ) -> PgWireResult<Self::Statement>
+    where
+        C: ClientInfo + Unpin + Send + Sync,
+    {
         Ok(MyStatement {
             query: sql.to_string(),
         })
@@ -1374,19 +1378,23 @@ impl ExtendedQueryHandler for RiffqProcessor {
     }
 
 
-    async fn do_query<'a, 'b: 'a, C>(
-        &'b self,
-        _client: &mut C,
-        portal: &'a Portal<Self::Statement>,
-        _max_rows: usize,
-    ) -> PgWireResult<Response<'a>>
+    async fn do_query<C>(
+        &self,
+        client: &mut C,
+        portal: &Portal<Self::Statement>,
+        max_rows: usize,
+    ) -> PgWireResult<Response>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         let query = &portal.statement.statement.query;
-        debug!("[PGWIRE EXTENDED] do_query: {} {}", portal.statement.statement.query, _debug_parameters(&portal.parameters, &portal.statement.parameter_types));
+        debug!(
+            "[PGWIRE EXTENDED] do_query: {} {}",
+            portal.statement.statement.query,
+            _debug_parameters(&portal.parameters, &portal.statement.parameter_types)
+        );
 
         let query = query.trim().to_lowercase();
 
@@ -1409,12 +1417,16 @@ impl ExtendedQueryHandler for RiffqProcessor {
             let rows = stream::iter(vec![Ok(row)]);
             return Ok(Response::Query(QueryResponse::new(field_infos, rows)));
         } else if let Some(var) = Self::parse_show_variable(query.as_str()) {
-            if let Some(resp) = self.show_variable_response(&var.to_lowercase(), portal.result_column_format.format_for(0)) {
+            if let Some(resp) =
+                self.show_variable_response(&var.to_lowercase(), portal.result_column_format.format_for(0))
+            {
                 return Ok(resp);
             }
         }
 
-        let connection_id = _client
+        let _ = max_rows; // currently unused until partial fetch is supported
+
+        let connection_id = client
             .metadata()
             .get("connection_id")
             .and_then(|v| v.parse::<u64>().ok())
@@ -1444,8 +1456,8 @@ impl ExtendedQueryHandler for RiffqProcessor {
 
     async fn do_describe_statement<C>(
         &self,
-        _client: &mut C,
-        _statement: &StoredStatement<Self::Statement>,
+        client: &mut C,
+        statement: &StoredStatement<Self::Statement>,
     ) -> PgWireResult<DescribeStatementResponse>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
@@ -1453,14 +1465,14 @@ impl ExtendedQueryHandler for RiffqProcessor {
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
         // Build response similar to do_describe_portal, but using the stored statement
-        let connection_id = _client
+        let connection_id = client
             .metadata()
             .get("connection_id")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let query = &_statement.statement.query;
-        let param_types = _statement.parameter_types.clone();
+        let query = &statement.statement.query;
+        let param_types = statement.parameter_types.clone();
 
         let result = self
             .query_runner
@@ -1499,7 +1511,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
 
     async fn do_describe_portal<C>(
         &self,
-        _client: &mut C,
+        client: &mut C,
         portal: &Portal<Self::Statement>,
     ) -> PgWireResult<DescribePortalResponse>
     where
@@ -1507,9 +1519,9 @@ impl ExtendedQueryHandler for RiffqProcessor {
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let query = &portal.statement.statement.query;        
+        let query = &portal.statement.statement.query;
 
-        let connection_id = _client
+        let connection_id = client
             .metadata()
             .get("connection_id")
             .and_then(|v| v.parse::<u64>().ok())
@@ -1556,30 +1568,24 @@ struct RiffqProcessorFactory {
 }
 
 impl PgWireServerHandlers for RiffqProcessorFactory {
-    type StartupHandler = RiffqProcessor;
-    type SimpleQueryHandler = RiffqProcessor;
-    type ExtendedQueryHandler = RiffqProcessor;
-    type CopyHandler = NoopCopyHandler;
-    type ErrorHandler = NoopErrorHandler;
-
-    fn simple_query_handler(&self) -> Arc<Self::SimpleQueryHandler> {
+    fn simple_query_handler(&self) -> Arc<impl SimpleQueryHandler> {
         self.handler.clone()
     }
 
-    fn extended_query_handler(&self) -> Arc<Self::ExtendedQueryHandler> {
+    fn extended_query_handler(&self) -> Arc<impl ExtendedQueryHandler> {
         self.extended_handler.clone()
     }
 
-    fn startup_handler(&self) -> Arc<Self::StartupHandler> {
+    fn startup_handler(&self) -> Arc<impl StartupHandler> {
         self.handler.clone()
     }
 
-    fn copy_handler(&self) -> Arc<Self::CopyHandler> {
-        Arc::new(NoopCopyHandler)
+    fn copy_handler(&self) -> Arc<impl pgwire::api::copy::CopyHandler> {
+        Arc::new(NoopHandler)
     }
 
-    fn error_handler(&self) -> Arc<Self::ErrorHandler> {
-        Arc::new(NoopErrorHandler)
+    fn error_handler(&self) -> Arc<impl pgwire::api::ErrorHandler> {
+        Arc::new(NoopHandler)
     }
 }
 
@@ -1603,7 +1609,7 @@ async fn detect_gssencmode(mut socket: TcpStream) -> Option<TcpStream> {
     Some(socket)
 }
 
-fn setup_tls(cert_path: &str, key_path: &str) -> Result<Arc<TlsAcceptor>, IOError> {
+fn setup_tls(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, IOError> {
     let cert = certs(&mut BufReader::new(File::open(cert_path)?))
         .collect::<Result<Vec<CertificateDer>, IOError>>()?;
 
@@ -1619,7 +1625,7 @@ fn setup_tls(cert_path: &str, key_path: &str) -> Result<Arc<TlsAcceptor>, IOErro
 
     config.alpn_protocols = vec![b"postgresql".to_vec()];
 
-    Ok(Arc::new(TlsAcceptor::from(Arc::new(config))))
+    Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
 #[pyclass]
@@ -1629,7 +1635,7 @@ pub struct Server {
     on_connect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_authentication_cb: Arc<Mutex<Option<Py<PyAny>>>>,
-    tls_acceptor: Arc<Mutex<Option<Arc<TlsAcceptor>>>>,
+    tls_acceptor: Arc<Mutex<Option<TlsAcceptor>>>,
     databases: Vec<String>,
     schemas: Vec<(String, String)>,
     tables: Vec<(String, String, String, Vec<BTreeMap<String, ColumnDef>>)>,

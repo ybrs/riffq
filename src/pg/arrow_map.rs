@@ -2,7 +2,7 @@
 //!
 //! Keep this in one place so the encoder, DESCRIBE-only execution
 //! and any future planner code all agree on column OIDs.
-use log::{debug, error, info};
+use log::info;
 
 use arrow::datatypes::DataType;
 use pgwire::api::Type;

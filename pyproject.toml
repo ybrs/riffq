@@ -10,6 +10,9 @@ classifiers = ["Programming Language :: Rust"]
 packages = [{ include = "riffq", from = "pysrc" }] 
 description = "riffq is a toolkit for building PostgreSQL wire-compatible databases. Think exposing pandas/polars dataframe or duckdb with PostgreSQL wire protocol with pg_catalog compatibility."
 readme = "README.md"
+dependencies = [
+    "pyarrow",
+]
 
 [tool.maturin]
 module-name = "riffq._riffq"

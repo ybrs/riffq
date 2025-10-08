@@ -8,8 +8,9 @@ dynamic = ["version"]
 requires-python = ">=3.8"
 classifiers = ["Programming Language :: Rust"]
 packages = [{ include = "riffq", from = "pysrc" }] 
+description = "riffq is a toolkit for building PostgreSQL wire-compatible databases. Think exposing pandas/polars dataframe or duckdb with PostgreSQL wire protocol with pg_catalog compatibility."
+readme = "README.md"
 
 [tool.maturin]
 module-name = "riffq._riffq"
 python-source = "pysrc"
-

@@ -81,6 +81,37 @@ use helpers::_debug_parameters;
 /// PostgreSQL version reported to clients during startup and via `SHOW server_version`.
 pub const SERVER_VERSION: &str = "17.4.0";
 
+fn extract_hostname_from_metadata<C: ClientInfo>(client: &C) -> Option<String> {
+    // Try direct keys first
+    for k in ["sni_hostname", "target_hostname", "host", "hostname"] {
+        if let Some(v) = client.metadata().get(k) {
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    // Try to parse libpq options string (e.g., "-c key=val -c sni_hostname=name")
+    if let Some(opts) = client.metadata().get("options") {
+        let parts = opts.split_whitespace().collect::<Vec<_>>();
+        let mut i = 0usize;
+        while i < parts.len() {
+            let p = parts[i];
+            if p == "-c" && i + 1 < parts.len() {
+                let kv = parts[i + 1];
+                if let Some((k, v)) = kv.split_once('=') {
+                    if matches!(k, "sni_hostname" | "target_hostname" | "hostname") && !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
 pub enum WorkerMessage {
     Query {
         query: String,
@@ -94,6 +125,7 @@ pub enum WorkerMessage {
         connection_id: u64,
         ip: String,
         port: u16,
+        hostname: Option<String>,
         responder: oneshot::Sender<BoolCallbackResult>,
     },
     Disconnect {
@@ -712,7 +744,7 @@ impl PythonWorker {
                                 });
                             }
                         }
-                        WorkerMessage::Connect { connection_id, ip, port, responder } => {
+                        WorkerMessage::Connect { connection_id, ip, port, hostname, responder } => {
                             let cb_opt = Python::with_gil(|py| {
                                 connect_cb
                                     .lock()
@@ -732,6 +764,9 @@ impl PythonWorker {
                                     ]).unwrap();
                                     let kwargs = PyDict::new(py);
                                     kwargs.set_item("callback", wrapper.clone_ref(py)).unwrap();
+                                    if let Some(hn) = hostname.clone() {
+                                        kwargs.set_item("hostname", hn).unwrap();
+                                    }
                                     if let Err(e) = cb.call(py, args, Some(&kwargs)) {
                                         e.print(py);
                                     }
@@ -834,13 +869,14 @@ impl PythonWorker {
     }
 
 
-    pub async fn on_connect(&self, connection_id: u64, ip: String, port: u16) -> BoolCallbackResult {
+    pub async fn on_connect(&self, connection_id: u64, ip: String, port: u16, hostname: Option<String>) -> BoolCallbackResult {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(WorkerMessage::Connect {
                 connection_id,
                 ip,
                 port,
+                hostname,
                 responder: tx,
             })
             .expect("Send failed!");
@@ -1190,9 +1226,10 @@ impl StartupHandler for RiffqProcessor {
                         let _ = sender.send(id);
                     }
                     let addr = client.socket_addr();
+                    let hostname = extract_hostname_from_metadata(client);
                     let allowed = self
                         .py_worker
-                        .on_connect(id, addr.ip().to_string(), addr.port())
+                        .on_connect(id, addr.ip().to_string(), addr.port(), hostname)
                         .await;
                     if !allowed.allowed {
                         let err_info = allowed.error.unwrap_or_else(|| Box::new(ErrorInfo::new(
@@ -1242,9 +1279,10 @@ impl StartupHandler for RiffqProcessor {
                 }
 
                 let addr = client.socket_addr();
+                let hostname = extract_hostname_from_metadata(client);
                 let allowed = self
                     .py_worker
-                    .on_connect(id, addr.ip().to_string(), addr.port())
+                    .on_connect(id, addr.ip().to_string(), addr.port(), hostname)
                     .await;
                 if !allowed.allowed {
                     let err_info = allowed.error.unwrap_or_else(|| Box::new(ErrorInfo::new(

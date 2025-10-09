@@ -25,7 +25,7 @@ class Connection(riffq.BaseConnection):
         # simple username/password check
         callback(True)
 
-    def handle_connect(self, ip, port, callback=callable):
+    def handle_connect(self, ip, port, hostname=None, callback=callable):
         # allow every incoming connection
         callback(True)
 

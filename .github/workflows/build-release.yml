@@ -9,7 +9,9 @@ jobs:
   build:
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # Build on both Intel and Apple Silicon macOS runners to produce
+        # separate x86_64 and arm64 wheels, alongside Linux and Windows.
+        os: [ubuntu-latest, windows-latest, macos-13, macos-14]
     runs-on: ${{ matrix.os }}
     steps:
     - uses: actions/checkout@v4

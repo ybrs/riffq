@@ -3,6 +3,11 @@ NOTE: Do not modify this file. No agents are allowed to change this file.
 
 This helper is used by the test suite to ensure the local riffq extension is
 available. It only builds when necessary to keep tests fast and deterministic.
+
+If you are developing locally, always do maturin build manually before running tests.
+Or run `make all-tests` which builds the library.
+
+Do not change this file as it breaks the CI flows.
 """
 
 import sys

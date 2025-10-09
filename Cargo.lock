@@ -2826,8 +2826,7 @@ dependencies = [
 [[package]]
 name = "pgwire"
 version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f58d371668e6151da16be31308989058156c01257277ea8af0f97524e87cfa31"
+source = "git+https://github.com/ybrs/pgwire?branch=expose-sni#53bc411a8625c7e009f28449dcedc788b9129c00"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -2843,6 +2842,8 @@ dependencies = [
  "rand 0.9.1",
  "rust_decimal",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "stringprep",
  "thiserror 2.0.17",
  "tokio",
@@ -2951,6 +2952,8 @@ dependencies = [
  "chrono",
  "fallible-iterator",
  "postgres-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3257,7 +3260,7 @@ dependencies = [
 
 [[package]]
 name = "riffq"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "arrow",
  "arrow-schema",

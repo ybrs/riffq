@@ -1197,9 +1197,14 @@ impl StartupHandler for RiffqProcessor {
                         let _ = sender.send(id);
                     }
                     let addr = client.socket_addr();
+                    // Obtain server_name (SNI) if provided by pgwire client metadata
+                    let server_name = client
+                        .metadata()
+                        .get("server_name")
+                        .cloned();
                     let allowed = self
                         .py_worker
-                        .on_connect(id, addr.ip().to_string(), addr.port())
+                        .on_connect(id, addr.ip().to_string(), addr.port(), server_name)
                         .await;
                     if !allowed.allowed {
                         let err_info = allowed.error.unwrap_or_else(|| Box::new(ErrorInfo::new(

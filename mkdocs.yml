@@ -1,0 +1,35 @@
+site_name: Riffq Docs
+site_description: Documentation for the Riffq project.
+site_url: https://riffle-io.github.io/riffq/
+docs_dir: docs
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - API Reference: api-reference.md
+  - FAQ: faq.md
+  - Changelog: changelog.md
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          setup_commands:
+            - import sys
+            - sys.path.append('pysrc')
+          options:
+            show_source: false
+            show_root_heading: true
+            summary: true
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/riffle-io/riffq
+watch:
+  - pysrc
+  - docs

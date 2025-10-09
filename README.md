@@ -204,7 +204,7 @@ openssl req -newkey rsa:2048 -nodes -keyout server.key -x509 -days 1 -out server
 
 Postgresql clients sends queries to pg_catalog schema to find out databases, schemas, tables, columns.
 
-We have this (datafusion_pg_catalog)[https://github.com/ybrs/pg_catalog] for this purpose.
+We have this [`pg_catalog_rs`](https://github.com/ybrs/pg_catalog) for this purpose.
 
 You can register your own database and your tables. 
 

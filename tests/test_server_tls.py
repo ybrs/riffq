@@ -46,7 +46,10 @@ class ServerTLSTest(unittest.TestCase):
         subprocess.check_call([
             "openssl", "req", "-newkey", "rsa:2048", "-nodes",
             "-keyout", str(key), "-x509", "-days", "1",
-            "-out", str(cert), "-subj", "/CN=localhost"
+            "-out", str(cert), "-subj", "/CN=localhost",
+            "-addext", "subjectAltName=DNS:localhost",
+            "-addext", "basicConstraints=CA:false",
+            "-addext", "keyUsage=digitalSignature,keyEncipherment"
         ])
         cls.proc = multiprocessing.Process(target=_run_server_tls, args=(cls.port, str(cert), str(key)), daemon=True)
         cls.proc.start()

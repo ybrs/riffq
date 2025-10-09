@@ -127,6 +127,10 @@ class Connection(riffq.BaseConnection):
 
         callback(ok)
 
+    def handle_connect(self, ip, port, hostname=None, callback=callable):
+        # accept connection; hostname may be None or a string
+        callback(True)
+
 def run_server(
     db_file: str,
     port: int = 5433,

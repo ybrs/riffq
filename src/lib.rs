@@ -76,10 +76,79 @@ use pg::arrow_type_to_pgwire;
 use sqlparser::parser::Parser;
 use sqlparser::ast::Statement;
 use helpers::_debug_parameters;
+use std::net::SocketAddr;
+use std::sync::OnceLock;
 
 
 /// PostgreSQL version reported to clients during startup and via `SHOW server_version`.
 pub const SERVER_VERSION: &str = "17.4.0";
+
+// Stores parsed TLS SNI hostnames by the remote address. We peek ClientHello
+// before passing the socket to pgwire, then remove it during on_startup.
+static SNI_MAP: OnceLock<Mutex<HashMap<SocketAddr, String>>> = OnceLock::new();
+
+fn sni_store() -> &'static Mutex<HashMap<SocketAddr, String>> {
+    SNI_MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn parse_sni_from_client_hello(buf: &[u8]) -> Option<String> {
+    if buf.len() < 5 { return None; }
+    // TLS record type 22 (handshake)
+    if buf[0] != 22 { return None; }
+    // record length
+    let rec_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+    let mut off = 5;
+    if buf.len() < off + 4 { return None; }
+    // handshake type 1 (client_hello)
+    if buf[off] != 1 { return None; }
+    let hs_len = ((buf[off+1] as usize) << 16) | ((buf[off+2] as usize) << 8) | (buf[off+3] as usize);
+    off += 4;
+    if buf.len() < off + hs_len { /* continue with partial if present */ }
+    // legacy_version (2) + random (32)
+    if buf.len() < off + 34 { return None; }
+    off += 34;
+    // session id
+    if buf.len() < off + 1 { return None; }
+    let sid_len = buf[off] as usize; off += 1;
+    if buf.len() < off + sid_len { return None; }
+    off += sid_len;
+    // cipher suites
+    if buf.len() < off + 2 { return None; }
+    let cs_len = u16::from_be_bytes([buf[off], buf[off+1]]) as usize; off += 2;
+    if buf.len() < off + cs_len { return None; }
+    off += cs_len;
+    // compression methods
+    if buf.len() < off + 1 { return None; }
+    let comp_len = buf[off] as usize; off += 1;
+    if buf.len() < off + comp_len { return None; }
+    off += comp_len;
+    // extensions
+    if buf.len() < off + 2 { return None; }
+    let ext_total = u16::from_be_bytes([buf[off], buf[off+1]]) as usize; off += 2;
+    if buf.len() < off + ext_total { return None; }
+    let mut eoff = off;
+    while eoff + 4 <= off + ext_total {
+        let etype = u16::from_be_bytes([buf[eoff], buf[eoff+1]]); eoff += 2;
+        let elen = u16::from_be_bytes([buf[eoff], buf[eoff+1]]) as usize; eoff += 2;
+        if eoff + elen > off + ext_total { break; }
+        if etype == 0 { // server_name
+            if elen < 2 { break; }
+            let list_len = u16::from_be_bytes([buf[eoff], buf[eoff+1]]) as usize;
+            let mut loff = eoff + 2;
+            if loff + list_len > eoff + elen { break; }
+            if loff + 3 > buf.len() { break; }
+            let name_type = buf[loff]; loff += 1;
+            let name_len = u16::from_be_bytes([buf[loff], buf[loff+1]]) as usize; loff += 2;
+            if name_type != 0 { break; }
+            if loff + name_len > buf.len() { break; }
+            let sni_bytes = &buf[loff..loff+name_len];
+            if let Ok(sni) = std::str::from_utf8(sni_bytes) { return Some(sni.to_string()); }
+            break;
+        }
+        eoff += elen;
+    }
+    None
+}
 
 fn extract_hostname_from_metadata<C: ClientInfo>(client: &C) -> Option<String> {
     // Try direct keys first
@@ -90,6 +159,16 @@ fn extract_hostname_from_metadata<C: ClientInfo>(client: &C) -> Option<String> {
             }
         }
     }
+    // Try application_name e.g. "sni_hostname=name" or "sni:name"
+    if let Some(app) = client.metadata().get("application_name") {
+        if let Some(v) = app.strip_prefix("sni_hostname=") {
+            if !v.is_empty() { return Some(v.to_string()); }
+        }
+        if let Some(v) = app.strip_prefix("sni:") {
+            if !v.is_empty() { return Some(v.to_string()); }
+        }
+    }
+
     // Try to parse libpq options string (e.g., "-c key=val -c sni_hostname=name")
     if let Some(opts) = client.metadata().get("options") {
         let parts = opts.split_whitespace().collect::<Vec<_>>();
@@ -1212,6 +1291,13 @@ impl StartupHandler for RiffqProcessor {
         match message {
             PgWireFrontendMessage::Startup(ref startup) => {
                 pgwire::api::auth::save_startup_parameters_to_metadata(client, startup);
+                {
+                    // Debug: log startup metadata keys for troubleshooting
+                    let md = client.metadata();
+                    let mut items: Vec<String> = md.iter().map(|(k,v)| format!("{}={}", k, v)).collect();
+                    items.sort();
+                    info!("startup metadata: {}", items.join(", "));
+                }
                 if self.py_worker.authentication_enabled() {
                     client.set_state(PgWireConnectionState::AuthenticationInProgress);
                     client
@@ -1226,7 +1312,18 @@ impl StartupHandler for RiffqProcessor {
                         let _ = sender.send(id);
                     }
                     let addr = client.socket_addr();
-                    let hostname = extract_hostname_from_metadata(client);
+                    {
+                        let md = client.metadata();
+                        let mut items: Vec<String> = md.iter().map(|(k,v)| format!("{}={}", k, v)).collect();
+                        items.sort();
+                        info!("metadata before on_connect: {}", items.join(", "));
+                    }
+                    let mut hostname = extract_hostname_from_metadata(client);
+                    if hostname.is_none() {
+                        if let Some(sni) = sni_store().lock().unwrap().remove(&client.socket_addr()) {
+                            hostname = Some(sni);
+                        }
+                    }
                     let allowed = self
                         .py_worker
                         .on_connect(id, addr.ip().to_string(), addr.port(), hostname)
@@ -1279,7 +1376,18 @@ impl StartupHandler for RiffqProcessor {
                 }
 
                 let addr = client.socket_addr();
-                let hostname = extract_hostname_from_metadata(client);
+                {
+                    let md = client.metadata();
+                    let mut items: Vec<String> = md.iter().map(|(k,v)| format!("{}={}", k, v)).collect();
+                    items.sort();
+                    info!("metadata before on_connect: {}", items.join(", "));
+                }
+                let mut hostname = extract_hostname_from_metadata(client);
+                if hostname.is_none() {
+                    if let Some(sni) = sni_store().lock().unwrap().remove(&client.socket_addr()) {
+                        hostname = Some(sni);
+                    }
+                }
                 let allowed = self
                     .py_worker
                     .on_connect(id, addr.ip().to_string(), addr.port(), hostname)
@@ -1846,6 +1954,18 @@ impl Server {
                     loop {
                         let (socket, addr) = listener.accept().await.unwrap();
                         if let Some(socket) = detect_gssencmode(socket).await {
+                            // If TLS is enabled, peek the ClientHello to extract SNI before handing
+                            // off to pgwire. This does not consume bytes; handshake proceeds normally.
+                            if tls_acceptor.is_some() {
+                                let mut peek_buf = vec![0u8; 4096];
+                                if let Ok(n) = socket.peek(&mut peek_buf).await {
+                                    if n > 0 {
+                                        if let Some(sni) = parse_sni_from_client_hello(&peek_buf[..n]) {
+                                            sni_store().lock().unwrap().insert(addr, sni);
+                                        }
+                                    }
+                                }
+                            }
                             let conn_ctx = SessionContext::new_with_state(
                                 default_ctx.state().clone(),
                             );

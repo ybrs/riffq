@@ -94,6 +94,7 @@ pub enum WorkerMessage {
         connection_id: u64,
         ip: String,
         port: u16,
+        server_name: Option<String>,
         responder: oneshot::Sender<BoolCallbackResult>,
     },
     Disconnect {
@@ -712,7 +713,7 @@ impl PythonWorker {
                                 });
                             }
                         }
-                        WorkerMessage::Connect { connection_id, ip, port, responder } => {
+                        WorkerMessage::Connect { connection_id, ip, port, server_name, responder } => {
                             let cb_opt = Python::with_gil(|py| {
                                 connect_cb
                                     .lock()
@@ -732,6 +733,11 @@ impl PythonWorker {
                                     ]).unwrap();
                                     let kwargs = PyDict::new(py);
                                     kwargs.set_item("callback", wrapper.clone_ref(py)).unwrap();
+                                    if let Some(name) = server_name.clone() {
+                                        let _ = kwargs.set_item("server_name", name);
+                                    } else {
+                                        let _ = kwargs.set_item("server_name", py.None());
+                                    }
                                     if let Err(e) = cb.call(py, args, Some(&kwargs)) {
                                         e.print(py);
                                     }
@@ -834,13 +840,14 @@ impl PythonWorker {
     }
 
 
-    pub async fn on_connect(&self, connection_id: u64, ip: String, port: u16) -> BoolCallbackResult {
+    pub async fn on_connect(&self, connection_id: u64, ip: String, port: u16, server_name: Option<String>) -> BoolCallbackResult {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(WorkerMessage::Connect {
                 connection_id,
                 ip,
                 port,
+                server_name,
                 responder: tx,
             })
             .expect("Send failed!");
@@ -1242,9 +1249,14 @@ impl StartupHandler for RiffqProcessor {
                 }
 
                 let addr = client.socket_addr();
+                // Try to get TLS SNI server_name (if any) from client metadata
+                let server_name = client
+                    .metadata()
+                    .get("server_name")
+                    .cloned();
                 let allowed = self
                     .py_worker
-                    .on_connect(id, addr.ip().to_string(), addr.port())
+                    .on_connect(id, addr.ip().to_string(), addr.port(), server_name)
                     .await;
                 if !allowed.allowed {
                     let err_info = allowed.error.unwrap_or_else(|| Box::new(ErrorInfo::new(

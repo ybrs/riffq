@@ -15,7 +15,7 @@ def _run_server(port: int):
     def handle_query(sql, callback, **kwargs):
         callback(([{"name": "val", "type": "int"}], [[1]]))
 
-    def handle_connect(conn_id, ip, port, *, callback):
+    def handle_connect(conn_id, ip, port, *, callback, server_name=None):
         callback(False)
 
     server = riffq.Server(f"127.0.0.1:{port}")

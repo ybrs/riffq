@@ -1601,7 +1601,7 @@ dependencies = [
 [[package]]
 name = "datafusion_pg_catalog"
 version = "0.1.0"
-source = "git+https://github.com/ybrs/pg_catalog?branch=register_to_inf_schema#5e5666e5dd5f0cfd23e8800e44c2d67b3e33d15f"
+source = "git+https://github.com/ybrs/pg_catalog?branch=main#ef13b875148b6909ef731c272abb4e068f29a08a"
 dependencies = [
  "anyhow",
  "arrow",
@@ -1615,7 +1615,7 @@ dependencies = [
  "futures",
  "log",
  "once_cell",
- "pgwire 0.28.0",
+ "pgwire 0.33.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "regex",
  "serde",
  "serde_json",
@@ -2480,12 +2480,6 @@ dependencies = [
 
 [[package]]
 name = "md5"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
-
-[[package]]
-name = "md5"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae960838283323069879657ca3de837e9f7bbb4c7bf6ea7f1b290d5e9476d2e0"
@@ -2801,32 +2795,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c84e671791f3a354f265e55e400be8bb4b6262c1ec04fac4289e710ccf22ab43"
-dependencies = [
- "async-trait",
- "aws-lc-rs",
- "bytes",
- "chrono",
- "derive-new",
- "futures",
- "hex",
- "lazy-regex",
- "md5 0.7.0",
- "postgres-types",
- "rand 0.8.5",
- "rust_decimal",
- "thiserror 2.0.17",
- "tokio",
- "tokio-rustls",
- "tokio-util",
-]
-
-[[package]]
-name = "pgwire"
 version = "0.33.0"
-source = "git+https://github.com/ybrs/pgwire?branch=expose-sni#53bc411a8625c7e009f28449dcedc788b9129c00"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f58d371668e6151da16be31308989058156c01257277ea8af0f97524e87cfa31"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -2837,7 +2808,34 @@ dependencies = [
  "futures",
  "hex",
  "lazy-regex",
- "md5 0.8.0",
+ "md5",
+ "postgres-types",
+ "rand 0.9.1",
+ "rust_decimal",
+ "rustls-pki-types",
+ "stringprep",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "x509-certificate",
+]
+
+[[package]]
+name = "pgwire"
+version = "0.33.0"
+source = "git+https://github.com/ybrs/pgwire?branch=expose-sni#0e3d9197631109d98d73a16ad644d7c0e3a11d54"
+dependencies = [
+ "async-trait",
+ "aws-lc-rs",
+ "base64",
+ "bytes",
+ "chrono",
+ "derive-new",
+ "futures",
+ "hex",
+ "lazy-regex",
+ "md5",
  "postgres-types",
  "rand 0.9.1",
  "rust_decimal",
@@ -3273,7 +3271,7 @@ dependencies = [
  "futures",
  "hex",
  "log",
- "pgwire 0.33.0",
+ "pgwire 0.33.0 (git+https://github.com/ybrs/pgwire?branch=expose-sni)",
  "postgres-types",
  "pyo3",
  "rustls-pemfile",

@@ -18,7 +18,9 @@ codegen-units = 4
 [dependencies]
 pyo3 = { version = "0.25", features = ["extension-module"] }
 
-pgwire = "0.33.0"
+# pgwire = "0.33.0"
+pgwire = { git = "https://github.com/ybrs/pgwire", branch = "expose-sni", package = "pgwire" }
+
 bytes = "1.5"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
@@ -35,7 +37,7 @@ sqlparser = "0.55.0"
 chrono = "0.4.41"
 log = "0.4"
 datafusion = "47.0.0"
-datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", branch = "register_to_inf_schema", package = "datafusion_pg_catalog" }
+datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", branch = "main", package = "datafusion_pg_catalog" }
 # datafusion_pg_catalog = { path = "../pg_catalog" }
 
 env_logger = "0.11.8"

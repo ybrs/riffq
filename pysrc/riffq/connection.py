@@ -34,7 +34,7 @@ class BaseConnection(metaclass=ABCMeta):
     def handle_auth(self, user, password, host, database=None, callback=callable):
         return callback(user == "user" and password == "secret")
 
-    def handle_connect(self, ip, port, callback=callable):
+    def handle_connect(self, ip, port, callback=callable, server_name=None):
         return callback(True)
     
     @abstractmethod
@@ -79,10 +79,10 @@ class RiffqServer:
         conn = self.get_connection(connection_id=connection_id)
         conn.handle_auth(user, password, host, database=database, callback=callback)
 
-    def handle_connect(self, connection_id, ip, port, callback=callable):
+    def handle_connect(self, connection_id, ip, port, callback=callable, server_name=None):
         # logger.info(f"new connnection {connection_id} {ip} {port}")
         conn = self.get_connection(connection_id=connection_id)
-        conn.handle_connect(ip, port, callback=callback)
+        conn.handle_connect(ip, port, callback=callback, server_name=server_name)
 
     def handle_query(self, sql, callback, connection_id=None, **kwargs):
         # logger.debug(f"python query {connection_id} {sql}")

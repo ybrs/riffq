@@ -81,6 +81,7 @@ use helpers::_debug_parameters;
 /// PostgreSQL version reported to clients during startup and via `SHOW server_version`.
 pub const SERVER_VERSION: &str = "17.4.0";
 
+
 pub enum WorkerMessage {
     Query {
         query: String,
@@ -94,6 +95,7 @@ pub enum WorkerMessage {
         connection_id: u64,
         ip: String,
         port: u16,
+        server_name: Option<String>,
         responder: oneshot::Sender<BoolCallbackResult>,
     },
     Disconnect {
@@ -601,8 +603,8 @@ fn hex_bytea(bytes: &[u8]) -> String {
 }
 
     #[cfg(test)]
-    mod encode_tests {
-        use super::*;
+mod encode_tests {
+    use super::*;
 
         #[test]
         fn test_decimal128_to_string() {
@@ -625,6 +627,7 @@ fn hex_bytea(bytes: &[u8]) -> String {
         assert_eq!(arrow_value_to_string(a, 1).as_deref(), Some("\\xdeadbeef"));
     }
 }
+
 
 
 pub struct PythonWorker {
@@ -712,7 +715,7 @@ impl PythonWorker {
                                 });
                             }
                         }
-                        WorkerMessage::Connect { connection_id, ip, port, responder } => {
+                        WorkerMessage::Connect { connection_id, ip, port, server_name, responder } => {
                             let cb_opt = Python::with_gil(|py| {
                                 connect_cb
                                     .lock()
@@ -732,6 +735,11 @@ impl PythonWorker {
                                     ]).unwrap();
                                     let kwargs = PyDict::new(py);
                                     kwargs.set_item("callback", wrapper.clone_ref(py)).unwrap();
+                                    if let Some(name) = server_name.clone() {
+                                        let _ = kwargs.set_item("server_name", name);
+                                    } else {
+                                        let _ = kwargs.set_item("server_name", py.None());
+                                    }
                                     if let Err(e) = cb.call(py, args, Some(&kwargs)) {
                                         e.print(py);
                                     }
@@ -834,13 +842,14 @@ impl PythonWorker {
     }
 
 
-    pub async fn on_connect(&self, connection_id: u64, ip: String, port: u16) -> BoolCallbackResult {
+    pub async fn on_connect(&self, connection_id: u64, ip: String, port: u16, server_name: Option<&str>) -> BoolCallbackResult {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(WorkerMessage::Connect {
                 connection_id,
                 ip,
                 port,
+                server_name: server_name.map(|s| s.to_string()),
                 responder: tx,
             })
             .expect("Send failed!");
@@ -1190,9 +1199,10 @@ impl StartupHandler for RiffqProcessor {
                         let _ = sender.send(id);
                     }
                     let addr = client.socket_addr();
+                    // Obtain server_name (SNI) via pgwire ClientInfo helper
                     let allowed = self
                         .py_worker
-                        .on_connect(id, addr.ip().to_string(), addr.port())
+                        .on_connect(id, addr.ip().to_string(), addr.port(), client.sni_server_name())
                         .await;
                     if !allowed.allowed {
                         let err_info = allowed.error.unwrap_or_else(|| Box::new(ErrorInfo::new(
@@ -1244,7 +1254,7 @@ impl StartupHandler for RiffqProcessor {
                 let addr = client.socket_addr();
                 let allowed = self
                     .py_worker
-                    .on_connect(id, addr.ip().to_string(), addr.port())
+                    .on_connect(id, addr.ip().to_string(), addr.port(), client.sni_server_name())
                     .await;
                 if !allowed.allowed {
                     let err_info = allowed.error.unwrap_or_else(|| Box::new(ErrorInfo::new(

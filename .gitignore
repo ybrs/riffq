@@ -10,3 +10,4 @@ venv/
 duckdata.*
 example/data/*
 +riffq/_riffq*.so
+docs-site/

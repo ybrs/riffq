@@ -9,3 +9,7 @@ psycopg2
 polars
 sqlparse==0.5.3
 pygments
+mkdocs>=1.6
+mkdocs-material
+mkdocstrings[python]
+mkdocs-shadcn

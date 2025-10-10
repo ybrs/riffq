@@ -15,5 +15,5 @@ Use the navigation on the left to explore the guides:
 
 ## Quick links
 
-- [Project repository](https://github.com/riffle-io/riffq)
-- [Issue tracker](https://github.com/riffle-io/riffq/issues)
+- [Project repository](https://github.com/ybrs/riffq)
+- [Issue tracker](https://github.com/ybrs/riffq/issues)

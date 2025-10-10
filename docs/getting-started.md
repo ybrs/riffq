@@ -13,7 +13,7 @@ This guide walks you through installing dependencies and bootstrapping a local d
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/riffle-io/riffq.git
+   git clone https://github.com/ybrs/riffq.git
    cd riffq
    ```
 2. **Install Python dependencies**

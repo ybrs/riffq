@@ -1,6 +1,6 @@
 site_name: Riffq Docs
 site_description: Documentation for the Riffq project.
-site_url: https://riffle-io.github.io/riffq/
+site_url: https://riffq.github.io/riffq/
 docs_dir: docs
 nav:
   - Home: index.md
@@ -14,9 +14,8 @@ plugins:
       default_handler: python
       handlers:
         python:
-          setup_commands:
-            - import sys
-            - sys.path.append('pysrc')
+          paths:
+            - pysrc
           options:
             show_source: false
             show_root_heading: true
@@ -29,7 +28,7 @@ theme:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/riffle-io/riffq
+      link: https://github.com/ybrs/riffq
 watch:
   - pysrc
   - docs

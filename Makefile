@@ -1,3 +1,5 @@
+.PHONY: docs
+
 test:
 	python -m unittest discover -s tests
 
@@ -14,5 +16,5 @@ dev-build:
 docs:
 	mkdocs build
 
-server-docs:
+docs-serve:
 	mkdocs serve -a 0.0.0.0:8000

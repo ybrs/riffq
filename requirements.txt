@@ -12,3 +12,4 @@ pygments
 mkdocs>=1.6
 mkdocs-material
 mkdocstrings[python]
+mkdocs-shadcn

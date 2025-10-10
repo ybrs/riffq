@@ -12,3 +12,23 @@ make docs
       show_root_heading: true
       show_source: false
       summary: true
+
+## Modules
+
+### riffq.connection
+
+::: riffq.connection
+    handler: python
+    options:
+      show_root_heading: true
+      show_source: false
+      summary: true
+
+### riffq.helpers
+
+::: riffq.helpers
+    handler: python
+    options:
+      show_root_heading: true
+      show_source: false
+      summary: true

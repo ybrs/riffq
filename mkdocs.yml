@@ -2,6 +2,7 @@ site_name: Riffq Docs
 site_description: Documentation for the Riffq project.
 site_url: https://riffq.github.io/riffq/
 docs_dir: docs
+site_dir: docs-site
 nav:
   - Home: index.md
   - Getting Started: getting-started.md
@@ -21,10 +22,7 @@ plugins:
             show_root_heading: true
             summary: true
 theme:
-  name: material
-  features:
-    - navigation.sections
-    - content.code.copy
+  name: shadcn
 extra:
   social:
     - icon: fontawesome/brands/github
@@ -32,3 +30,4 @@ extra:
 watch:
   - pysrc
   - docs
+# Remove custom CSS to avoid conflicts with shadcn theme; file retained.

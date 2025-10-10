@@ -57,6 +57,9 @@ select 1;
 select 'ok' as status;
 ```
 
+RiffqServer creates a new instance from `connection_cls` class, so for each connected client/user you will have another instance.  
+
+
 ## Using a real engine (DuckDB example)
 
 For non‑trivial SQL, delegate to your favorite engine. This version runs queries in a thread pool and returns Arrow results directly.
@@ -76,8 +79,7 @@ class Connection(riffq.BaseConnection):
             self.send_reader(reader, callback)
         except Exception as exc:
             logging.exception("query error")
-            batch = self.arrow_batch([pa.array(["ERROR"]), pa.array([str(exc)])], ["error","message"])
-            self.send_reader(batch, callback)
+            callback(("ERROR", "XX000", str(exc)), is_error=True)
 
     def handle_query(self, sql, callback=callable, **kwargs):
         self.executor.submit(self._exec, sql, callback)
@@ -87,10 +89,119 @@ server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
 server.start()
 ```
 
+## Returning errors 
+
+If you call the `callback` on handle_query with is_error=True, the client will receive an error. 
+
+Error codes are defined on here https://www.postgresql.org/docs/current/errcodes-appendix.html
+
+For quick ref.
+
+| error code | description          |
+| -----------|--------------------- |
+| 3D000      | invalid catalog name |
+| 3F000      | invalid schema name  |
+| 42601      | syntax_error         |
+| 42P01      | undefined_table      |
+| 42703      | undefined_column     |
+| XX000      | internal error       |
+
+Although these error codes don't show up on psql and various clients, some clients might be using these codes.
+
 ## Extra callbacks
 
-- `handle_connect(ip, port, callback)`: admit/deny connections (e.g., IP allowlist). Call `callback(True)` to accept.
-- `handle_disconnect(ip, port, callback)`: cleanup on client disconnect.
+### handle_connect 
+
+Admit/deny connections (e.g., IP allowlist). Call `callback(True)` to accept.
+
+```python
+def handle_connect(ip, port, callback):
+    return callback(True)
+```  
+
+For example you can blacklist an ip address here.
+
+### handle_disconnect
+
+cleanup on client disconnect.
+
+```python
+def handle_disconnect(ip, port, callback):
+   # close open files etc.
+   return callback()
+```
+
+## Context and Connection Id
+
+As mentioned in each connection, we create a new `Connection` instance.
+
+This creates a context. For example you'd want to direct queries by "current database"
+
+```python
+from sqlglot import parse_one, exp
+
+class Connection(riffq.BaseConnection):
+   database = None
+
+   def handle_auth(self, user, password, host, database=None, callback=callable):
+        # Accept a single demo user
+        self.database = database
+        callback(user == "user" and password == "secret")
+
+   def handle_query(self, sql, callback=callable, **kwargs):
+        # check if "use databasename" statement is coming
+        sql_ast = parse_one(sql, read="postgres")
+        if isinstance(sql_ast, exp.Use):
+            target_database = e.this.name
+            self.database = target_database
+            # when switching a database, we don't return data, just a tag
+            return callback("OK", is_tag=True)
+
+        # now you can dispatch by current user's database name
+        if self.database == "main":
+            ...
+        elif self.database = "remote":
+            ...
+        else:
+            callback(("ERROR", "3D000", "unknown database"), is_error=True)
+
+
+server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
+server.start()
+
+``` 
+
+### Connection id
+
+Sometimes this encapsulation may not be enough. So we also have an auto incrementing `conn_id` for each new connection. 
+
+One example for this using external resources with one-on-one mapping. Say you build a postgresql frontend for redis
+
+```python
+import redis
+from sqlglot import parse_one, exp
+
+redis_connections = defaultdict(lambda: redis.Redis(host="localhost", port=6379, db=0, password=None))
+
+class Connection(riffq.BaseConnection):
+    
+    def handle_query(self, sql, callback=callable, **kwargs):
+        # get the existing or a new connection to redis for this conn_id
+        redis_conn = redis_connections[self.conn_id]
+
+        parsed = sql
+        if isinstance(parsed, exp.Select):
+            # get which hashset from "select key, value from hashset" pattern
+            # we can use tablename as hashset key           
+            tables = list(parsed.find_all(exp.Table))
+            if len(tables) != 1:
+                return callback(..., is_error=True)
+
+            batch = self.arrow_batch([pa.array([1])], ["key", "value"])
+            return self.send_reader(batch, callback)
+```
+
+For a more complete example of accessing redis with postgresql protocol see
 
 ## TLS (SSL)
 

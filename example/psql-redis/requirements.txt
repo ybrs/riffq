@@ -1,2 +1,2 @@
-redis=6.4.0
-riffq
+redis>=5
+sqlglot>=23

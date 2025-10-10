@@ -1,10 +1,15 @@
-# Riffq Documentation
+# Riffq 
 
-Welcome to the Riffq documentation site. This guide provides an overview of the project, explains how to get started, and highlights the key concepts behind the data pipeline.
+**riffq** is a toolkit in python for building PostgreSQL wire-compatible databases.  
+It allows you to serve data from Python over the PostgreSQL protocol. 
 
 ## About the project
 
-Riffq combines Rust and Python components to deliver fast, reliable data processing. The Python package lives under [`pysrc/riffq`](../pysrc/riffq), while the Rust crate powers performance-critical features.
+So in other words `riffq` is postgresql wire compatible frontend layer for your databases/data in python.
+
+We also have a catalog emulation system in rust with datafusion.
+
+The Python package lives under [`pysrc/riffq`](../pysrc/riffq), while the Rust crate powers performance-critical features [`src/`](../src/).
 
 Use the navigation on the left to explore the guides:
 

@@ -23,6 +23,14 @@ plugins:
             summary: true
 theme:
   name: shadcn
+markdown_extensions:
+  - pymdownx.highlight:
+      use_pygments: true
+      noclasses: true
+      anchor_linenums: false
+      linenums: false
+      pygments_lang_class: true
+  - pymdownx.superfences
 extra:
   social:
     - icon: fontawesome/brands/github
@@ -30,4 +38,7 @@ extra:
 watch:
   - pysrc
   - docs
+# Add theme-safe styles for code blocks
+extra_css:
+  - stylesheets/code-bg.css
 # Remove custom CSS to avoid conflicts with shadcn theme; file retained.

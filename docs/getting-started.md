@@ -204,14 +204,15 @@ class Connection(riffq.BaseConnection):
 
 For a more complete example of accessing Redis with the PostgreSQL protocol, see the Redis example:
 
-- https://github.com/ybrs/riffq/blob/main/example/psql-redis/psql_redis.py
+- [psql_redis.py](https://github.com/ybrs/riffq/blob/main/example/psql-redis/psql_redis.py)
 
 ## TLS (SSL)
 
 Enable TLS with a certificate and key:
 
 ```bash
-openssl req -newkey rsa:2048 -nodes -keyout server.key -x509 -days 1 -out server.crt -subj "/CN=localhost"
+openssl req -newkey rsa:2048 -nodes -keyout server.key \
+ -x509 -days 1 -out server.crt -subj "/CN=localhost"
 ```
 
 ```python

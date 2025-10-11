@@ -234,7 +234,7 @@ server.register_table(
 server.start(catalog_emulation=True)
 ```
 
-For a full walkthrough, see [Catalog Emulation](catalog.md).
+For a full walkthrough, see [Catalog Emulation](catalog.md). For a runnable example of registering databases, schemas, and tables, see the test: [tests/test_register_catalog.py](https://github.com/ybrs/riffq/blob/main/tests/test_register_catalog.py).
 
 
 ## TLS (SSL)
@@ -259,4 +259,3 @@ server.start(tls=True)
 - The server creates one `Connection` instance per client and reuses it.
 
 See the README for a fuller example and more context.
-

@@ -78,6 +78,83 @@ for schema_name, table_name in list_tables_from_duckdb():
 server.start(catalog_emulation=True)
 ```
 
+## Examples
+
+For a minimal end-to-end example that registers a database, schema, and table and asserts they appear via `pg_catalog`, see:
+
+- [tests/test_register_catalog.py](https://github.com/ybrs/riffq/blob/main/tests/test_register_catalog.py)
+
+```python
+def main():
+    server = riffq.RiffqServer("127.0.0.1:5444", connection_cls=Connection)
+
+    # Register catalog: logical databases redis0..redis2 (limited for illustration).
+    # Under each, register schema "public" and expose each Redis hash key as a
+    # table with (key,value). Increase the range below in real deployments.
+    # schema "public" and expose each Redis hash key as a table with (key,value).
+    try:
+        for db_index in range(3):
+            db_name = f"redis{db_index}"
+            try:
+                r = redis.Redis(host="localhost", port=6379, db=db_index, password=None, decode_responses=True)
+                server.register_database(db_name)
+                server.register_schema(db_name, "public")
+                # Discover only hash keys. Uses SCAN TYPE hash (server-side filter)
+                # so we don't issue a TYPE per key. Still a best-effort scan.
+                for k in r.scan_iter(match="*", _type="hash"):
+                    try:
+                        server.register_table(
+                            db_name,
+                            "public",
+                            str(k),
+                            [
+                                {"key": {"type": "string", "nullable": False}},
+                                {"value": {"type": "string", "nullable": True}},
+                            ],
+                        )
+                    except Exception:
+                        # Skip keys that disappear during scan
+                        continue
+            except Exception:
+                # Skip registration for this DB index if not accessible
+                continue
+    except Exception:
+        # Catalog registration is optional; proceed even if Redis is unreachable
+        pass
+```        
+
+When you start the server and connect with psql you can see the tables
+
+```sql
+user=> \l
+                                List of databases
+   Name    |  Owner   | Encoding |   Collate   |    Ctype    | Access privileges
+-----------+----------+----------+-------------+-------------+-------------------
+ postgres  | postgres | UTF8     | nl_NL.UTF-8 | nl_NL.UTF-8 |
+ redis0    | postgres | UTF8     | C           | C           | 
+ redis1    | postgres | UTF8     | C           | C           | 
+ redis2    | postgres | UTF8     | C           | C           | 
+ template0 | postgres | UTF8     | nl_NL.UTF-8 | nl_NL.UTF-8 | 
+ template1 | postgres | UTF8     | nl_NL.UTF-8 | nl_NL.UTF-8 | 
+(6 rows)
+
+user=> \c redis0
+Password:
+psql (14.17 (Homebrew), server 17.4.0)
+WARNING: psql major version 14, server major version 17.
+         Some psql features might not work.
+You are now connected to database "redis0" as user "user".
+redis0=> \dt
+         List of relations
+ Schema |  Name  | Type  |  Owner
+--------+--------+-------+----------
+ public | myhash | table | postgres
+ public | test   | table | postgres
+ public | test2  | table | postgres
+ public | test3  | table | postgres
+(4 rows)
+```
+
 ## API Reference
 
 ### Register a logical database name 
@@ -103,4 +180,3 @@ RiffqServer.register_table(database_name: str,
 
 
 [pg_catalog_rs]: https://github.com/ybrs/pg_catalog
-

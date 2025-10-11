@@ -46,9 +46,9 @@ class Connection(riffq.BaseConnection):
         callback(user == "user" and password == "secret")
 
     def handle_insert(self, ast, callback):
-        """INSERT INTO <table> (id, value) VALUES (...)
+        """INSERT INTO <table> (key, value) VALUES (...)
 
-        Supports only columns [id, value]. Multiple VALUES tuples allowed.
+        Supports only columns [key, value]. Multiple VALUES tuples allowed.
         """
         table = next(ast.find_all(exp.Table)).name
         cols_exp = ast.args.get("columns") or []
@@ -60,8 +60,8 @@ class Connection(riffq.BaseConnection):
                 cols.append(c.name)
             else:
                 cols.append(str(c))
-        if cols and cols != ["id", "value"]:
-            return callback(("ERROR", "42601", "only columns (id, value) are supported"), is_error=True)
+        if cols and cols != ["key", "value"]:
+            return callback(("ERROR", "42601", "only columns (key, value) are supported"), is_error=True)
 
         rows = []
         values_node = ast.args.get("expression")
@@ -86,15 +86,15 @@ class Connection(riffq.BaseConnection):
         for values in rows:
             if cols:
                 try:
-                    idx_id = cols.index("id")
+                    idx_id = cols.index("key")
                     idx_val = cols.index("value")
                 except ValueError:
-                    return callback(("ERROR", "42601", "(id, value) must be provided"), is_error=True)
+                    return callback(("ERROR", "42601", "(key, value) must be provided"), is_error=True)
                 row_id = str(values[idx_id])
                 row_val = str(values[idx_val])
             else:
                 if len(values) != 2:
-                    return callback(("ERROR", "42601", "expected 2 values: (id, value)"), is_error=True)
+                    return callback(("ERROR", "42601", "expected 2 values: (key, value)"), is_error=True)
                 row_id, row_val = map(str, values)
             affected += int(r.hset(key, row_id, row_val))
 
@@ -103,7 +103,7 @@ class Connection(riffq.BaseConnection):
         return callback(f"INSERT 0 {affected}", is_tag=True)
 
     def handle_update(self, ast, callback):
-        """UPDATE <table> SET value = <expr> WHERE id = <literal>"""
+        """UPDATE <table> SET value = <expr> WHERE key = <literal>"""
         table = next(ast.find_all(exp.Table)).name
         set_expr = ast.args.get("expressions") or []
         if not set_expr:
@@ -118,13 +118,13 @@ class Connection(riffq.BaseConnection):
 
         new_value = _expr_to_scalar(assignment.right)
 
-        # WHERE id = <literal>
+        # WHERE key = <literal>
         where = ast.args.get("where")
         if not where or not isinstance(where.this, exp.EQ):
-            return callback(("ERROR", "42601", "UPDATE requires WHERE id = ..."), is_error=True)
+            return callback(("ERROR", "42601", "UPDATE requires WHERE key = ..."), is_error=True)
         cond = where.this
-        if not isinstance(cond.left, exp.Column) or cond.left.name != "id":
-            return callback(("ERROR", "42601", "only WHERE id = ... is supported"), is_error=True)
+        if not isinstance(cond.left, exp.Column) or cond.left.name != "key":
+            return callback(("ERROR", "42601", "only WHERE key = ... is supported"), is_error=True)
         # WHERE id = <literal or identifier>
         row_id = _expr_to_scalar(cond.right)
 
@@ -140,14 +140,14 @@ class Connection(riffq.BaseConnection):
         return callback(f"UPDATE {affected}", is_tag=True)
 
     def handle_delete(self, ast, callback):
-        """DELETE FROM <table> WHERE id = <literal>"""
+        """DELETE FROM <table> WHERE key = <literal>"""
         table = next(ast.find_all(exp.Table)).name
         where = ast.args.get("where")
         if not where or not isinstance(where.this, exp.EQ):
-            return callback(("ERROR", "42601", "DELETE requires WHERE id = ..."), is_error=True)
+            return callback(("ERROR", "42601", "DELETE requires WHERE key = ..."), is_error=True)
         cond = where.this
-        if not isinstance(cond.left, exp.Column) or cond.left.name != "id":
-            return callback(("ERROR", "42601", "only WHERE id = ... is supported"), is_error=True)
+        if not isinstance(cond.left, exp.Column) or cond.left.name != "key":
+            return callback(("ERROR", "42601", "only WHERE key = ... is supported"), is_error=True)
         row_id = _expr_to_scalar(cond.right)
 
         r = redis_connections[self.conn_id]
@@ -156,7 +156,7 @@ class Connection(riffq.BaseConnection):
         return callback(f"DELETE {affected}", is_tag=True)
 
     def handle_select(self, ast, callback):
-        """SELECT [id, value | *] FROM <table> [WHERE id = <literal>]"""
+        """SELECT [key, value | *] FROM <table> [WHERE key = <literal>]"""
         table = next(ast.find_all(exp.Table)).name
 
         # Determine selected columns
@@ -164,21 +164,21 @@ class Connection(riffq.BaseConnection):
         want_cols = []
         for s in selects:
             if isinstance(s, exp.Star):
-                want_cols = ["id", "value"]
+                want_cols = ["key", "value"]
                 break
             if isinstance(s, exp.Column):
                 want_cols.append(s.name)
             elif isinstance(s, exp.Alias) and isinstance(s.this, exp.Column):
                 want_cols.append(s.this.name)
         if not want_cols:
-            want_cols = ["id", "value"]
+            want_cols = ["key", "value"]
 
-        # WHERE id = ... (optional)
+        # WHERE key = ... (optional)
         where = ast.args.get("where")
         only_id = None
         if where and isinstance(where.this, exp.EQ):
             cond = where.this
-            if isinstance(cond.left, exp.Column) and cond.left.name == "id":
+            if isinstance(cond.left, exp.Column) and cond.left.name == "key":
                 only_id = cond.right.this if isinstance(cond.right, exp.Literal) else cond.right.sql()
 
         r = redis_connections[self.conn_id]
@@ -197,9 +197,9 @@ class Connection(riffq.BaseConnection):
 
         cols = []
         names = []
-        if "id" in want_cols:
+        if "key" in want_cols:
             cols.append(pa.array(ids))
-            names.append("id")
+            names.append("key")
             
         if "value" in want_cols:
             cols.append(pa.array(values))
@@ -209,9 +209,10 @@ class Connection(riffq.BaseConnection):
         return self.send_reader(batch, callback)
 
     def handle_switch_database(self, ast, callback):
-        """USE <db_index>
+        """USE redisN or USE N
 
-        Switch Redis logical database by numeric index.
+        Switch Redis logical database by index. Accepts either a bare number
+        (e.g. ``USE 2``) or a name like ``USE redis2``.
         """
         ident = ast.this
         db_token = None
@@ -223,7 +224,7 @@ class Connection(riffq.BaseConnection):
         try:
             db_index = int(db_token)
         except ValueError:
-            # Try suffix like "db2"
+            # Try names like "redis2" -> 2
             digits = "".join(ch for ch in db_token if ch.isdigit())
             if not digits:
                 return callback(("ERROR", "3D000", "USE expects numeric db index"), is_error=True)
@@ -280,7 +281,42 @@ class Connection(riffq.BaseConnection):
 
 def main():
     server = riffq.RiffqServer("127.0.0.1:5444", connection_cls=Connection)
-    server.start()
+
+    # Register catalog: logical databases redis0..redis2 (limited for illustration).
+    # Under each, register schema "public" and expose each Redis hash key as a
+    # table with (key,value). Increase the range below in real deployments.
+    # schema "public" and expose each Redis hash key as a table with (key,value).
+    try:
+        for db_index in range(3):
+            db_name = f"redis{db_index}"
+            try:
+                r = redis.Redis(host="localhost", port=6379, db=db_index, password=None, decode_responses=True)
+                server.register_database(db_name)
+                server.register_schema(db_name, "public")
+                # Discover only hash keys. Uses SCAN TYPE hash (server-side filter)
+                # so we don't issue a TYPE per key. Still a best-effort scan.
+                for k in r.scan_iter(match="*", _type="hash"):
+                    try:
+                        server.register_table(
+                            db_name,
+                            "public",
+                            str(k),
+                            [
+                                {"key": {"type": "string", "nullable": False}},
+                                {"value": {"type": "string", "nullable": True}},
+                            ],
+                        )
+                    except Exception:
+                        # Skip keys that disappear during scan
+                        continue
+            except Exception:
+                # Skip registration for this DB index if not accessible
+                continue
+    except Exception:
+        # Catalog registration is optional; proceed even if Redis is unreachable
+        pass
+
+    server.start(catalog_emulation=True)
 
 
 if __name__ == "__main__":

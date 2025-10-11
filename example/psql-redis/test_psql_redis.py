@@ -83,7 +83,7 @@ def make_conn():
         import pyarrow as pa
         batches = list(reader)
         if not batches:
-            cb(([{"name": "id", "type": "string"}], []))
+            cb(([{"name": "key", "type": "string"}], []))
             return
         table = pa.Table.from_batches(batches)
         schema_desc = [{"name": f.name, "type": "string"} for f in table.schema]
@@ -102,11 +102,11 @@ class TestRedisExample(unittest.TestCase):
         mod, conn = make_conn()
         cap = Capture()
 
-        conn._handle_query('INSERT INTO items (id, value) VALUES ("foo", 1)', cap.callback)
+        conn._handle_query('INSERT INTO items (key, value) VALUES ("foo", 1)', cap.callback)
         self.assertIn(cap.tag, ("INSERT 0 1", "INSERT 0 0"))
 
         cap2 = Capture()
-        conn._handle_query('INSERT INTO items (id, value) VALUES (foo, 1)', cap2.callback)
+        conn._handle_query('INSERT INTO items (key, value) VALUES (foo, 1)', cap2.callback)
         # second may be update of same id -> affected can be 0 or 1 depending on semantics
         self.assertIn(cap2.tag, ("INSERT 0 1", "INSERT 0 0"))
 
@@ -134,12 +134,12 @@ class TestRedisExample(unittest.TestCase):
         r.hset("items", "x", "1")
 
         cap_up = Capture()
-        conn._handle_query("UPDATE items SET value = '2' WHERE id = 'x'", cap_up.callback)
+        conn._handle_query("UPDATE items SET value = '2' WHERE key = 'x'", cap_up.callback)
         self.assertEqual(cap_up.tag, "UPDATE 1")
         self.assertEqual(r.hget("items", "x"), "2")
 
         cap_del = Capture()
-        conn._handle_query("DELETE FROM items WHERE id = 'x'", cap_del.callback)
+        conn._handle_query("DELETE FROM items WHERE key = 'x'", cap_del.callback)
         self.assertEqual(cap_del.tag, "DELETE 1")
         self.assertIsNone(r.hget("items", "x"))
 
@@ -147,7 +147,7 @@ class TestRedisExample(unittest.TestCase):
         mod, conn = make_conn()
         before = mod.redis_connections[conn.conn_id].db
         cap = Capture()
-        conn._handle_query("USE db2", cap.callback)
+        conn._handle_query("USE redis2", cap.callback)
         after = mod.redis_connections[conn.conn_id].db
         self.assertEqual(before, 0)
         self.assertEqual(after, 2)

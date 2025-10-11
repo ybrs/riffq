@@ -162,6 +162,44 @@ class RiffqServer:
 
         self._server.set_tls(crt, key)
 
+    def register_database(self, database_name: str) -> None:
+        """Register a logical database for catalog emulation.
+
+        When `start(catalog_emulation=True)` is used, the server responds to
+        client metadata queries (pg_catalog) using entries registered via these
+        helpers.
+
+        Args:
+            database_name: Name of the database to expose via `pg_catalog`.
+        """
+        self._server.register_database(database_name)
+
+    def register_schema(self, database_name: str, schema_name: str) -> None:
+        """Register a schema under a database for catalog emulation.
+
+        Args:
+            database_name: Existing database registered via `register_database`.
+            schema_name: Schema name to add under the database.
+        """
+        self._server.register_schema(database_name, schema_name)
+
+    def register_table(self, database_name: str, schema_name: str, table_name: str, columns: list[dict]) -> None:
+        """Register a table and its columns for catalog emulation.
+
+        The `columns` argument describes each column as a single-key dict mapping
+        the column name to a small descriptor: `{ "name": { "type": <str>, "nullable": <bool> } }`.
+
+        Supported `type` strings are aligned with `riffq.helpers.to_arrow` mapping
+        and include: `int`, `float`, `bool`, `str`/`string`, `date`, `datetime`.
+
+        Args:
+            database_name: Target database name.
+            schema_name: Target schema name.
+            table_name: Table name to register.
+            columns: Column descriptors as described above.
+        """
+        self._server.register_table(database_name, schema_name, table_name, columns)
+
     def get_connection(self, connection_id) -> BaseConnection:
         """Get or create the `BaseConnection` for a given `connection_id`."""
         conn = self.connections.get(connection_id, None)

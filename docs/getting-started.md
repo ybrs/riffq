@@ -206,6 +206,37 @@ For a more complete example of accessing Redis with the PostgreSQL protocol, see
 
 - [psql_redis.py](https://github.com/ybrs/riffq/blob/main/example/psql-redis/psql_redis.py)
 
+## Catalog Emulation
+
+Many PostgreSQL clients discover databases, schemas, and tables by querying `pg_catalog`.
+Riffq can emulate `pg_catalog` and `information_schema` by using `pg_catalog_rs`, so your service can work as a real database server. Eg: you can connect dbeaver to your service.
+
+To use it:
+
+- Call `register_database`, `register_schema`, and `register_table` to declare what you want to expose.
+- Start the server with `catalog_emulation=True`.
+
+Example:
+
+```python
+server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
+server.register_database("mydb")
+server.register_schema("mydb", "public")
+server.register_table(
+    "mydb",
+    "public",
+    "users",
+    [
+        {"id": {"type": "int", "nullable": False}},
+        {"name": {"type": "string", "nullable": True}},
+    ],
+)
+server.start(catalog_emulation=True)
+```
+
+For a full walkthrough, see [Catalog Emulation](catalog.md).
+
+
 ## TLS (SSL)
 
 Enable TLS with a certificate and key:
@@ -228,3 +259,4 @@ server.start(tls=True)
 - The server creates one `Connection` instance per client and reuses it.
 
 See the README for a fuller example and more context.
+

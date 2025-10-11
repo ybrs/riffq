@@ -20,6 +20,27 @@ redis_connections = defaultdict(
     lambda: redis.Redis(host="localhost", port=6379, db=0, password=None, decode_responses=True)
 )
 
+
+def _unquote(text: str) -> str:
+    """Remove one level of matching single or double quotes from both ends."""
+    if not text:
+        return text
+    if (text[0] == text[-1]) and text[0] in ("'", '"'):
+        return text[1:-1]
+    return text
+
+
+def _expr_to_scalar(node: exp.Expression) -> str:
+    """Convert a sqlglot expression node into a plain scalar string.
+
+    Identifiers become their name; all other expressions are rendered to SQL
+    and gently unquoted if they are quoted literals or quoted identifiers.
+    """
+    if isinstance(node, exp.Identifier):
+        return node.name
+    # Render using SQL and then unquote a single pair if present
+    return _unquote(node.sql())
+
 class Connection(riffq.BaseConnection):
     def handle_auth(self, user, password, host, database=None, callback=callable):
         callback(user == "user" and password == "secret")
@@ -52,12 +73,7 @@ class Connection(riffq.BaseConnection):
             values = []
             # row is Tuple of expressions
             for v in getattr(row, "expressions", []):
-                if isinstance(v, exp.Literal):
-                    values.append(v.this)
-                elif isinstance(v, exp.Identifier):
-                    values.append(v.name)
-                else:
-                    values.append(v.sql())
+                values.append(_expr_to_scalar(v))
             rows.append(values)
 
         if not rows:
@@ -82,8 +98,9 @@ class Connection(riffq.BaseConnection):
                 row_id, row_val = map(str, values)
             affected += int(r.hset(key, row_id, row_val))
 
-        batch = self.arrow_batch([pa.array([affected])], ["rows_affected"])
-        return self.send_reader(batch, callback)
+        # Emit a proper Postgres command tag: INSERT <oid> <rows>
+        # OIDs are deprecated/unused -> 0
+        return callback(f"INSERT 0 {affected}", is_tag=True)
 
     def handle_update(self, ast, callback):
         """UPDATE <table> SET value = <expr> WHERE id = <literal>"""
@@ -99,10 +116,7 @@ class Connection(riffq.BaseConnection):
         if not isinstance(assignment.left, exp.Column) or assignment.left.name != "value":
             return callback(("ERROR", "42601", "only SET value = ... is supported"), is_error=True)
 
-        if isinstance(assignment.right, exp.Literal):
-            new_value = assignment.right.this
-        else:
-            new_value = assignment.right.sql()
+        new_value = _expr_to_scalar(assignment.right)
 
         # WHERE id = <literal>
         where = ast.args.get("where")
@@ -111,7 +125,8 @@ class Connection(riffq.BaseConnection):
         cond = where.this
         if not isinstance(cond.left, exp.Column) or cond.left.name != "id":
             return callback(("ERROR", "42601", "only WHERE id = ... is supported"), is_error=True)
-        row_id = cond.right.this if isinstance(cond.right, exp.Literal) else cond.right.sql()
+        # WHERE id = <literal or identifier>
+        row_id = _expr_to_scalar(cond.right)
 
         r = redis_connections[self.conn_id]
         key = table
@@ -122,8 +137,7 @@ class Connection(riffq.BaseConnection):
             affected = 1
         else:
             affected = 0
-        batch = self.arrow_batch([pa.array([affected])], ["rows_affected"])
-        return self.send_reader(batch, callback)
+        return callback(f"UPDATE {affected}", is_tag=True)
 
     def handle_delete(self, ast, callback):
         """DELETE FROM <table> WHERE id = <literal>"""
@@ -134,13 +148,12 @@ class Connection(riffq.BaseConnection):
         cond = where.this
         if not isinstance(cond.left, exp.Column) or cond.left.name != "id":
             return callback(("ERROR", "42601", "only WHERE id = ... is supported"), is_error=True)
-        row_id = cond.right.this if isinstance(cond.right, exp.Literal) else cond.right.sql()
+        row_id = _expr_to_scalar(cond.right)
 
         r = redis_connections[self.conn_id]
         key = table
         affected = int(r.hdel(key, row_id))
-        batch = self.arrow_batch([pa.array([affected])], ["rows_affected"])
-        return self.send_reader(batch, callback)
+        return callback(f"DELETE {affected}", is_tag=True)
 
     def handle_select(self, ast, callback):
         """SELECT [id, value | *] FROM <table> [WHERE id = <literal>]"""
@@ -210,15 +223,18 @@ class Connection(riffq.BaseConnection):
         try:
             db_index = int(db_token)
         except ValueError:
-            return callback(("ERROR", "3D000", "USE expects numeric db index"), is_error=True)
+            # Try suffix like "db2"
+            digits = "".join(ch for ch in db_token if ch.isdigit())
+            if not digits:
+                return callback(("ERROR", "3D000", "USE expects numeric db index"), is_error=True)
+            db_index = int(digits)
 
         # Recreate client with new DB index for this connection
         redis_connections[self.conn_id] = redis.Redis(
             host="localhost", port=6379, db=db_index, password=None, decode_responses=True
         )
-        # Acknowledge with a small result set
-        batch = self.arrow_batch([pa.array([db_index])], ["db"])
-        return self.send_reader(batch, callback)
+        # Acknowledge with a command tag
+        return callback("SET", is_tag=True)
 
     def _handle_query(self, sql, callback=callable, **kwargs):
         logging.info("received query %s", sql)
@@ -262,5 +278,10 @@ class Connection(riffq.BaseConnection):
             del redis_connections[self.conn_id]
         callback(True)
 
-server = riffq.RiffqServer("127.0.0.1:5444", connection_cls=Connection)
-server.start()
+def main():
+    server = riffq.RiffqServer("127.0.0.1:5444", connection_cls=Connection)
+    server.start()
+
+
+if __name__ == "__main__":
+    main()

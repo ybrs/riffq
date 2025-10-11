@@ -181,7 +181,8 @@ One example for this using external resources with one-on-one mapping. Say you b
 import redis
 from sqlglot import parse_one, exp
 
-redis_connections = defaultdict(lambda: redis.Redis(host="localhost", port=6379, db=0, password=None))
+redis_connections = defaultdict(lambda: redis.Redis(host="localhost", 
+            port=6379, db=0, password=None))
 
 class Connection(riffq.BaseConnection):
     
@@ -201,7 +202,9 @@ class Connection(riffq.BaseConnection):
             return self.send_reader(batch, callback)
 ```
 
-For a more complete example of accessing redis with postgresql protocol see
+For a more complete example of accessing Redis with the PostgreSQL protocol, see the Redis example:
+
+- https://github.com/ybrs/riffq/blob/main/example/psql-redis/psql_redis.py
 
 ## TLS (SSL)
 

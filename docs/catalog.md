@@ -92,40 +92,32 @@ def main():
     # Under each, register schema "public" and expose each Redis hash key as a
     # table with (key,value). Increase the range below in real deployments.
     # schema "public" and expose each Redis hash key as a table with (key,value).
-    try:
-        for db_index in range(3):
-            db_name = f"redis{db_index}"
-            try:
-                r = redis.Redis(host="localhost", port=6379, db=db_index, password=None, decode_responses=True)
-                server.register_database(db_name)
-                server.register_schema(db_name, "public")
-                # Discover only hash keys. Uses SCAN TYPE hash (server-side filter)
-                # so we don't issue a TYPE per key. Still a best-effort scan.
-                for k in r.scan_iter(match="*", _type="hash"):
-                    try:
-                        server.register_table(
-                            db_name,
-                            "public",
-                            str(k),
-                            [
-                                {"key": {"type": "string", "nullable": False}},
-                                {"value": {"type": "string", "nullable": True}},
-                            ],
-                        )
-                    except Exception:
-                        # Skip keys that disappear during scan
-                        continue
-            except Exception:
-                # Skip registration for this DB index if not accessible
-                continue
-    except Exception:
-        # Catalog registration is optional; proceed even if Redis is unreachable
-        pass
+    
+    for db_index in range(3):
+        db_name = f"redis{db_index}"
+
+        r = redis.Redis(host="localhost", port=6379, 
+          db=db_index, password=None, decode_responses=True)
+        server.register_database(db_name)
+        server.register_schema(db_name, "public")
+        # Discover only hash keys. Uses SCAN TYPE hash (server-side filter)
+        # so we don't issue a TYPE per key. Still a best-effort scan.
+        for k in r.scan_iter(match="*", _type="hash"):
+          server.register_table(
+              db_name,
+              "public",
+              str(k),
+              [
+                  {"key": {"type": "string", "nullable": False}},
+                  {"value": {"type": "string", "nullable": True}},
+              ],
+          )
+
 ```        
 
 When you start the server and connect with psql you can see the tables
 
-```sql
+```
 user=> \l
                                 List of databases
    Name    |  Owner   | Encoding |   Collate   |    Ctype    | Access privileges
@@ -153,6 +145,57 @@ redis0=> \dt
  public | test2  | table | postgres
  public | test3  | table | postgres
 (4 rows)
+
+redis0=> \d myhash
+             Table "public.myhash"
+ Column | Type | Collation | Nullable | Default
+--------+------+-----------+----------+---------
+ key    | text |           | not null |
+ value  | text |           |          |
+
+
+```
+
+```
+ redis0=> \d myhash
+             Table "public.myhash"
+ Column | Type | Collation | Nullable | Default
+--------+------+-----------+----------+---------
+ key    | text |           | not null |
+ value  | text |           |          |
+```
+
+```
+; pg_catalog_rs has all pg_catalog tables
+; for example you can select tables directly from pg_class 
+
+redis0=> SELECT c.relname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind = 'r'
+  AND n.nspname = 'public';
+ relname
+---------
+ myhash
+ test2
+ test
+ test3
+(4 rows)
+```
+
+```
+; or you can use ::regclass or ::oid type conversions as in 
+; real postgresql pg_catalog
+
+redis0=> SELECT oid,relname,reltype,relnamespace
+FROM pg_class
+WHERE oid = 'myhash'::oid;
+  oid  | relname | reltype | relnamespace
+-------+---------+---------+--------------
+ 50010 | myhash  |   50011 |         2200
+(1 row)
+
+
 ```
 
 ## API Reference

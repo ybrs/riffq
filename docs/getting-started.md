@@ -152,7 +152,7 @@ class Connection(riffq.BaseConnection):
         # check if "use databasename" statement is coming
         sql_ast = parse_one(sql, read="postgres")
         if isinstance(sql_ast, exp.Use):
-            target_database = e.this.name
+            target_database = sql_ast.this.name
             self.database = target_database
             # when switching a database, we don't return data, just a tag
             return callback("OK", is_tag=True)
@@ -190,7 +190,7 @@ class Connection(riffq.BaseConnection):
         # get the existing or a new connection to redis for this conn_id
         redis_conn = redis_connections[self.conn_id]
 
-        parsed = sql
+        parsed = parse_one(sql)
         if isinstance(parsed, exp.Select):
             # get which hashset from "select key, value from hashset" pattern
             # we can use tablename as hashset key           

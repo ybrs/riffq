@@ -1,0 +1,45 @@
+site_name: Riffq Docs
+site_description: Documentation for the Riffq project.
+site_url: https://riffq.github.io/riffq/
+docs_dir: docs
+site_dir: docs-site
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - API Reference: api-reference.md
+  - Catalog Emulation: catalog.md
+  - FAQ: faq.md
+  - Changelog: changelog.md
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths:
+            - pysrc
+          options:
+            show_source: false
+            show_root_heading: true
+            summary: true
+theme:
+  name: shadcn
+markdown_extensions:
+  - pymdownx.highlight:
+      use_pygments: true
+      noclasses: true
+      anchor_linenums: false
+      linenums: false
+      pygments_lang_class: true
+  - pymdownx.superfences
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ybrs/riffq
+watch:
+  - pysrc
+  - docs
+# Add theme-safe styles for code blocks
+extra_css:
+  - stylesheets/code-bg.css
+# Remove custom CSS to avoid conflicts with shadcn theme; file retained.

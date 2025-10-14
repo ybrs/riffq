@@ -1,4 +1,4 @@
-"""Connection primitives and the high level server wrapper.
+"""Connection primitives and the high-level server wrapper.
 
 This module defines two main concepts:
 
@@ -16,7 +16,7 @@ accept an Arrow C Stream capsule for result sets, or an error.
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence, Type
 import pyarrow as pa
 from ._riffq import Server
 from abc import ABCMeta, abstractmethod
@@ -38,11 +38,11 @@ class BaseConnection(metaclass=ABCMeta):
 
     conn_id = None
 
-    def __init__(self, conn_id:int, executor: ThreadPoolExecutor):
+    def __init__(self, conn_id: int, executor: ThreadPoolExecutor) -> None:
         self.conn_id = conn_id
         self.executor = executor
 
-    def send_reader(self, reader, callback):
+    def send_reader(self, reader: Any, callback: Callable[..., None]) -> None:
         """Send a PyArrow reader back to the server.
 
         Converts a `pyarrow.RecordBatchReader` (or compatible) into an Arrow C
@@ -61,7 +61,7 @@ class BaseConnection(metaclass=ABCMeta):
             capsule = export_stream(reader)
         callback(capsule)
 
-    def arrow_batch(self, values: list, names: list) -> pa.RecordBatchReader:
+    def arrow_batch(self, values: Sequence[pa.Array], names: Sequence[str]) -> pa.RecordBatchReader:
         """Create a `RecordBatchReader` from arrays and names.
 
         Args:
@@ -77,7 +77,7 @@ class BaseConnection(metaclass=ABCMeta):
         )
 
     @abstractmethod
-    def handle_auth(self, user:str, password:str, host:str, database=None, callback=callable):
+    def handle_auth(self, user: str, password: str, host: str, database: Optional[str] = None, callback: Callable[..., None] = lambda *a, **k: None) -> None:
         """Authenticate a client.
 
         Args:
@@ -89,7 +89,7 @@ class BaseConnection(metaclass=ABCMeta):
         """
         return callback(user == "user" and password == "secret")
 
-    def handle_connect(self, ip:str, port:int, callback=callable):
+    def handle_connect(self, ip: str, port: int, callback: Callable[..., None] = lambda *a, **k: None) -> None:
         """Handle successful TCP connection establishment.
 
         Args:
@@ -100,7 +100,7 @@ class BaseConnection(metaclass=ABCMeta):
         return callback(True)
 
     @abstractmethod
-    def handle_query(self, sql:str, callback=callable, **kwargs):
+    def handle_query(self, sql: str, callback: Callable[..., None] = lambda *a, **k: None, **kwargs: Any) -> None:
         """Execute a SQL statement and return results.
 
         Implementations should produce a `pyarrow.RecordBatchReader` and pass
@@ -114,7 +114,7 @@ class BaseConnection(metaclass=ABCMeta):
         """
         pass
 
-    def handle_disconnect(self, ip:str, port:int, callback=callable):
+    def handle_disconnect(self, ip: str, port: int, callback: Callable[..., None] = lambda *a, **k: None) -> None:
         """Handle client disconnect cleanup.
 
         Args:
@@ -133,7 +133,7 @@ class RiffqServer:
         connection_cls: Subclass of `BaseConnection` used per client.
     """
 
-    def __init__(self, listen_addr:str, connection_cls=BaseConnection):
+    def __init__(self, listen_addr: str, connection_cls: Type[BaseConnection] = BaseConnection) -> None:
         # we aren't making the server class in rust/pyo3 subclassable
         # this way it's simpler
         self._server = Server(listen_addr)
@@ -143,8 +143,8 @@ class RiffqServer:
         self._server.on_query(self.handle_query)
         self._server.on_connect(self.handle_connect)
         self._server.on_disconnect(self.handle_disconnect)
-        self.connections = {}
-        self.connection_cls = connection_cls
+        self.connections: Dict[int, BaseConnection] = {}
+        self.connection_cls: Type[BaseConnection] = connection_cls
 
     def set_tls(self, crt:str, key:str):
         """Enable TLS with certificate and key files.
@@ -184,7 +184,7 @@ class RiffqServer:
         """
         self._server.register_schema(database_name, schema_name)
 
-    def register_table(self, database_name: str, schema_name: str, table_name: str, columns: list[dict]) -> None:
+    def register_table(self, database_name: str, schema_name: str, table_name: str, columns: List[Dict[str, Dict[str, Any]]]) -> None:
         """Register a table and its columns for catalog emulation.
 
         The `columns` argument describes each column as a single key dict mapping
@@ -201,7 +201,7 @@ class RiffqServer:
         """
         self._server.register_table(database_name, schema_name, table_name, columns)
 
-    def get_connection(self, connection_id:int) -> BaseConnection:
+    def get_connection(self, connection_id: int) -> BaseConnection:
         """Get or create the `BaseConnection` for a given `connection_id`."""
         conn = self.connections.get(connection_id, None)
         if not conn:
@@ -209,7 +209,7 @@ class RiffqServer:
             self.connections[connection_id] = conn
         return conn
 
-    def handle_auth(self, connection_id:int, user:str, password:str, host:str, database=None, callback=callable)-> None:
+    def handle_auth(self, connection_id: int, user: str, password: str, host: str, database: Optional[str] = None, callback: Callable[..., None] = lambda *a, **k: None) -> None:
         """Forward an authentication request to the connection instance.
 
         Args:
@@ -224,7 +224,7 @@ class RiffqServer:
         conn = self.get_connection(connection_id=connection_id)
         conn.handle_auth(user, password, host, database=database, callback=callback)
 
-    def handle_connect(self, connection_id:int, ip:str, port:int, callback=callable) -> None:
+    def handle_connect(self, connection_id: int, ip: str, port: int, callback: Callable[..., None] = lambda *a, **k: None) -> None:
         """Forward a connect notification to the connection instance.
 
         Args:
@@ -237,7 +237,7 @@ class RiffqServer:
         conn = self.get_connection(connection_id=connection_id)
         conn.handle_connect(ip, port, callback=callback)
 
-    def handle_query(self, sql:str, callback:callable, connection_id:int=None, **kwargs:dict) -> None:
+    def handle_query(self, sql: str, callback: Callable[..., None], connection_id: Optional[int] = None, **kwargs: Any) -> None:
         """Forward a query to the connection instance.
 
         Args:
@@ -250,7 +250,7 @@ class RiffqServer:
         conn = self.get_connection(connection_id=connection_id)
         conn.handle_query(sql, callback=callback, **kwargs)
 
-    def handle_disconnect(self, connection_id:int, ip:str, port:int, callback=callable) -> None:
+    def handle_disconnect(self, connection_id: int, ip: str, port: int, callback: Callable[..., None] = lambda *a, **k: None) -> None:
         """Forward a disconnect notification and release the connection.
 
         Args:
@@ -267,7 +267,7 @@ class RiffqServer:
         except KeyError:
             logger.exception("Connection disconnected but not in self.connections")
 
-    def start(self, tls:bool=False, catalog_emulation:bool=False, server_version:Optional[str]=None) -> None:
+    def start(self, tls: bool = False, catalog_emulation: bool = False, server_version: Optional[str] = None) -> None:
         """Start the server event loop.
 
         Args:
@@ -275,6 +275,6 @@ class RiffqServer:
             catalog_emulation: Turn pg_catalog & information_schema query handling by riffq.
             server_version: Server version string eg: "17.6 (Homebrew)" If you omit this, we use hardcoded string in src/lib.rs
         Returns:
-            The return value of the Rust `Server.start` method.
+            None. Starts the underlying Rust server loop.
         """
-        return self._server.start(**kw)
+        return self._server.start(tls=tls, catalog_emulation=catalog_emulation, server_version=server_version)

@@ -18,7 +18,7 @@ _type = {
 }
 
 
-def to_arrow(schema_desc:list[dict], rows:list) -> pa._ffi.lib.PyCapsule:
+def to_arrow(schema_desc:list[dict], rows:list) -> 'pa._ffi.lib.PyCapsule':
     """Build an Arrow C Stream from schema and rows for regular python values
 
     The schema is a list of dicts like `{ "name": str, "type": str }` where

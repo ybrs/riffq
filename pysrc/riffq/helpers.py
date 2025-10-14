@@ -18,13 +18,20 @@ _type = {
 }
 
 
-def to_arrow(schema_desc, rows):
-    """Build an Arrow C Stream from schema and rows.
+def to_arrow(schema_desc:list[dict], rows:list) -> 'pa._ffi.lib.PyCapsule':
+    """Build an Arrow C Stream from schema and rows for regular python values
 
     The schema is a list of dicts like `{ "name": str, "type": str }` where
     `type` is one of: `int`, `float`, `bool`, `str`/`string`, `date`,
     `datetime`. Rows are sequences whose positional items match the schema
     order.
+
+    Example usage:
+    >>> callback(to_arrow([{"name": "val", "type": "int"}], [
+        [1], 
+        [2]
+    ]))
+
 
     Args:
         schema_desc: Column descriptors in display order.

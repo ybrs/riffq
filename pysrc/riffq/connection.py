@@ -224,7 +224,7 @@ class RiffqServer:
         conn = self.get_connection(connection_id=connection_id)
         conn.handle_auth(user, password, host, database=database, callback=callback)
 
-    def handle_connect(self, connection_id: int, ip: str, port: int, server_name:str=None, callback: Callable[..., None] = lambda *a, **k: None) -> None:
+    def handle_connect(self, connection_id: int, ip: str, port: int, server_name:Optional[str]=None, callback: Callable[..., None] = lambda *a, **k: None) -> None:
         """Forward a connect notification to the connection instance.
 
         Args:

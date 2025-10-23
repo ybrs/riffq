@@ -1615,7 +1615,7 @@ dependencies = [
  "futures",
  "log",
  "once_cell",
- "pgwire 0.33.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "pgwire 0.33.0",
  "regex",
  "serde",
  "serde_json",
@@ -2823,8 +2823,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.33.0"
-source = "git+https://github.com/ybrs/pgwire?branch=expose-sni#0e3d9197631109d98d73a16ad644d7c0e3a11d54"
+version = "0.34.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f56a81b4fcc69016028f657a68f9b8e8a2a4b7d07684ca3298f2d3e7ff199ce"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -3271,7 +3272,7 @@ dependencies = [
  "futures",
  "hex",
  "log",
- "pgwire 0.33.0 (git+https://github.com/ybrs/pgwire?branch=expose-sni)",
+ "pgwire 0.34.2",
  "postgres-types",
  "pyo3",
  "rustls-pemfile",

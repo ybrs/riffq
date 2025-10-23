@@ -89,7 +89,7 @@ class BaseConnection(metaclass=ABCMeta):
         """
         return callback(user == "user" and password == "secret")
 
-    def handle_connect(self, ip: str, port: int, callback: Callable[..., None] = lambda *a, **k: None) -> None:
+    def handle_connect(self, ip: str, port: int, server_name:str=None, callback: Callable[..., None] = lambda *a, **k: None) -> None:
         """Handle successful TCP connection establishment.
 
         Args:
@@ -224,7 +224,7 @@ class RiffqServer:
         conn = self.get_connection(connection_id=connection_id)
         conn.handle_auth(user, password, host, database=database, callback=callback)
 
-    def handle_connect(self, connection_id: int, ip: str, port: int, callback: Callable[..., None] = lambda *a, **k: None) -> None:
+    def handle_connect(self, connection_id: int, ip: str, port: int, server_name:Optional[str]=None, callback: Callable[..., None] = lambda *a, **k: None) -> None:
         """Forward a connect notification to the connection instance.
 
         Args:
@@ -235,7 +235,7 @@ class RiffqServer:
         """
         # logger.info(f"new connnection {connection_id} {ip} {port}")
         conn = self.get_connection(connection_id=connection_id)
-        conn.handle_connect(ip, port, callback=callback)
+        conn.handle_connect(ip, port, callback=callback, server_name=server_name)
 
     def handle_query(self, sql: str, callback: Callable[..., None], connection_id: Optional[int] = None, **kwargs: Any) -> None:
         """Forward a query to the connection instance.

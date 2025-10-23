@@ -3,6 +3,8 @@
 **riffq** is a toolkit in python (built in Rust) for building PostgreSQL wire-compatible databases.  
 It allows you to serve data from Python over the PostgreSQL protocol — turning your Python-based logic or in-memory data into a queryable, network-exposed system. We also have a catalog emulation system in rust with datafusion.
 
+Documentation: https://ybrs.github.io/riffq/
+
 ---
 
 ## What It Does
@@ -204,7 +206,7 @@ openssl req -newkey rsa:2048 -nodes -keyout server.key -x509 -days 1 -out server
 
 Postgresql clients sends queries to pg_catalog schema to find out databases, schemas, tables, columns.
 
-We have this (datafusion_pg_catalog)[https://github.com/ybrs/pg_catalog] for this purpose.
+We have this [`pg_catalog_rs`](https://github.com/ybrs/pg_catalog) for this purpose.
 
 You can register your own database and your tables. 
 

@@ -30,18 +30,17 @@ postgres-types = "0.2"
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
 rustls-pki-types = "1"
-arrow = { version = "55.1.0", features = ["ffi", "canonical_extension_types"] }
-sqlparser = "0.55.0"
+arrow = { version = "56.0.0", features = ["ffi", "canonical_extension_types"] }
+sqlparser = "0.58.0"
 
 
 chrono = "0.4.41"
 log = "0.4"
-datafusion = "47.0.0"
+datafusion = "50.2.0"
 datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", branch = "main", package = "datafusion_pg_catalog" }
 # datafusion_pg_catalog = { path = "../pg_catalog" }
 
 env_logger = "0.11.8"
 
 
-arrow-schema  = { version = "55.1.0" }
-
+arrow-schema  = { version = "56.0.0" }

@@ -290,6 +290,7 @@ impl CallbackWrapper {
 fn arrow_to_pg_rows(
     batches: Vec<RecordBatch>,
     schema: Arc<Schema>,
+    formats: &[FieldFormat],
 ) -> (
     Arc<Vec<FieldInfo>>,
     Pin<Box<dyn Stream<Item = PgWireResult<DataRow>> + Send>>,
@@ -299,13 +300,15 @@ fn arrow_to_pg_rows(
         schema
             .fields()
             .iter()
-            .map(|f| {
+            .enumerate()
+            .map(|(idx, f)| {
+                let format = formats.get(idx).copied().unwrap_or(FieldFormat::Text);
                 FieldInfo::new(
                     f.name().clone().into(),
                     None,
                     None,
                     arrow_type_to_pgwire(f.data_type()),
-                    FieldFormat::Text,
+                    format,
                 )
             })
             .collect(),
@@ -330,8 +333,9 @@ fn arrow_to_pg_rows(
 
                     let batch = &remaining_batches[0];
                     let mut enc = DataRowEncoder::new(meta.clone());
-                    for col in batch.columns() {
-                        if let Err(e) = encode_arrow_value(&mut enc, col.as_ref(), row_idx) {
+                    for (col_idx, col) in batch.columns().iter().enumerate() {
+                        let format = meta.get(col_idx).map(|f| f.format()).unwrap_or(FieldFormat::Text);
+                        if let Err(e) = encode_arrow_value(&mut enc, col.as_ref(), row_idx, format) {
                             return Some((Err(e), (row_idx + 1, remaining_batches)));
                         }
                     }
@@ -480,6 +484,7 @@ fn encode_arrow_value(
     encoder: &mut DataRowEncoder,
     array: &dyn Array,
     row: usize,
+    format: FieldFormat,
 ) -> PgWireResult<()> {
     if array.is_null(row) {
         return encoder.encode_field(&Option::<i32>::None); // type will be ignored
@@ -498,18 +503,36 @@ fn encode_arrow_value(
         }
         DataType::Binary => {
             let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
-            let s = hex_bytea(arr.value(row));
-            encoder.encode_field(&Some(s))
+            let bytes = arr.value(row);
+            match format {
+                FieldFormat::Binary => encoder.encode_field(&Some(bytes)),
+                FieldFormat::Text => {
+                    let s = hex_bytea(bytes);
+                    encoder.encode_field(&Some(s))
+                }
+            }
         }
         DataType::LargeBinary => {
             let arr = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
-            let s = hex_bytea(arr.value(row));
-            encoder.encode_field(&Some(s))
+            let bytes = arr.value(row);
+            match format {
+                FieldFormat::Binary => encoder.encode_field(&Some(bytes)),
+                FieldFormat::Text => {
+                    let s = hex_bytea(bytes);
+                    encoder.encode_field(&Some(s))
+                }
+            }
         }
         DataType::FixedSizeBinary(_) => {
             let arr = array.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
-            let s = hex_bytea(arr.value(row));
-            encoder.encode_field(&Some(s))
+            let bytes = arr.value(row);
+            match format {
+                FieldFormat::Binary => encoder.encode_field(&Some(bytes)),
+                FieldFormat::Text => {
+                    let s = hex_bytea(bytes);
+                    encoder.encode_field(&Some(s))
+                }
+            }
         }
         DataType::Int8 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int8Type>().value(row) as i16)),
         DataType::Int16 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int16Type>().value(row))),
@@ -1340,7 +1363,9 @@ impl SimpleQueryHandler for RiffqProcessor {
 
         match result {
             QueryResult::Arrow(batches, schema) => {
-                let (schema, data_row_stream) = arrow_to_pg_rows(batches, schema);
+                // Simple query protocol always uses text format
+                let formats: Vec<FieldFormat> = vec![FieldFormat::Text; schema.fields().len()];
+                let (schema, data_row_stream) = arrow_to_pg_rows(batches, schema, &formats);
                 Ok(vec![Response::Query(QueryResponse::new(schema, data_row_stream))])
             }
             QueryResult::Tag(tag) => Ok(vec![Response::Execution(Tag::new(&tag))]),
@@ -1456,7 +1481,12 @@ impl ExtendedQueryHandler for RiffqProcessor {
 
         match result {
             QueryResult::Arrow(batches, schema) => {
-                let (schema, data_row_stream) = arrow_to_pg_rows(batches, schema);
+                // Extract formats from portal for each column
+                let formats: Vec<FieldFormat> = (0..schema.fields().len())
+                    .map(|i| portal.result_column_format.format_for(i))
+                    .collect();
+
+                let (schema, data_row_stream) = arrow_to_pg_rows(batches, schema, &formats);
                 Ok(Response::Query(QueryResponse::new(schema, data_row_stream)))
             }
             QueryResult::Tag(tag) => Ok(Response::Execution(Tag::new(&tag))),
@@ -1556,13 +1586,15 @@ impl ExtendedQueryHandler for RiffqProcessor {
         let fields: Vec<FieldInfo> = schema
             .fields()
             .iter()
-            .map(|f| {
+            .enumerate()
+            .map(|(idx, f)| {
+                let format = portal.result_column_format.format_for(idx);
                 FieldInfo::new(
                     f.name().clone().into(),
                     None,
                     None,
                     arrow_type_to_pgwire(f.data_type()),
-                    FieldFormat::Text,
+                    format,
                 )
             })
             .collect();

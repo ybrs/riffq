@@ -25,7 +25,7 @@ def map_type(data_type: str) -> str:
 class Connection(riffq.BaseConnection):
     def _handle_query(self, sql, callback, **kwargs):
         cur = duckdb_con.cursor()
-        sql = sql.strip().lower().split(';')[0]
+        sql = sql.strip().split(';')[0]
         if sql == "":
             return callback("OK", is_tag=True)
 
@@ -36,19 +36,20 @@ class Connection(riffq.BaseConnection):
             )
             return self.send_reader(batch, callback)
 
-        if sql.startswith("set"):
+        # TODO: we have to parse
+        if sql.lower().startswith("set "):
             return callback("SET", is_tag=True)
 
-        if sql.startswith("begin"):
+        if sql.lower().startswith("begin"):
             return callback("BEGIN", is_tag=True)
         
-        if sql.startswith("commit"):
+        if sql.lower().startswith("commit"):
             return callback("COMMIT", is_tag=True)
         
-        if sql.startswith("rollback"):
+        if sql.lower().startswith("rollback"):
             return callback("ROLLBACK", is_tag=True)
         
-        if sql.startswith("discard all"):
+        if sql.lower().startswith("discard all"):
             return callback("DISCARD ALL", is_tag=True)
 
         if sql == "select pg_catalog.version()":
@@ -87,6 +88,7 @@ class Connection(riffq.BaseConnection):
             return self.send_reader(batch, callback)
 
         try:
+            print("sending final query:", sql)
             reader = cur.execute(sql).fetch_record_batch()
             self.send_reader(reader, callback)
         except Exception as exc:

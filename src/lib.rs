@@ -1677,6 +1677,7 @@ pub struct Server {
     on_connect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_authentication_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+    on_shutdown_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     tls_acceptor: Arc<Mutex<Option<TlsAcceptor>>>,
     databases: Vec<String>,
     schemas: Vec<(String, String)>,
@@ -1693,6 +1694,7 @@ impl Server {
             on_connect_cb: Arc::new(Mutex::new(None)),
             on_disconnect_cb: Arc::new(Mutex::new(None)),
             on_authentication_cb: Arc::new(Mutex::new(None)),
+            on_shutdown_cb: Arc::new(Mutex::new(None)),
             tls_acceptor: Arc::new(Mutex::new(None)),
             databases: Vec::new(),
             schemas: Vec::new(),
@@ -1714,6 +1716,13 @@ impl Server {
 
     fn on_authentication(&mut self, _py: Python, cb: Py<PyAny>) {
         *self.on_authentication_cb.lock().unwrap() = Some(cb);
+    }
+
+    fn on_shutdown(&mut self, _py: Python, cb: Py<PyAny>) {
+        // Called once, with no arguments, after the server stops accepting
+        // connections on SIGINT or SIGTERM. Lets Python flush/checkpoint state
+        // (e.g. DuckDB) before the process exits.
+        *self.on_shutdown_cb.lock().unwrap() = Some(cb);
     }
 
     fn set_tls(&mut self, cert_path: String, key_path: String) -> PyResult<()> {
@@ -1784,6 +1793,7 @@ impl Server {
         let connect_cb = self.on_connect_cb.clone();
         let disconnect_cb = self.on_disconnect_cb.clone();
         let auth_cb = self.on_authentication_cb.clone();
+        let shutdown_cb = self.on_shutdown_cb.clone();
         let server_version = server_version.unwrap_or_else(|| SERVER_VERSION.to_string());
 
         if query_cb.lock().unwrap().is_none() {
@@ -1893,9 +1903,45 @@ impl Server {
                 }
             });
 
-            signal::ctrl_c().await.expect("Failed to listen for shutdown signal");
+            wait_for_shutdown_signal().await;
             info!("Shutting down server");
             server_task.abort();
+            run_shutdown_callback(&shutdown_cb);
+        });
+    }
+}
+
+async fn wait_for_shutdown_signal() {
+    // Resolves on SIGINT (ctrl-c) or SIGTERM (the signal kill/docker stop/k8s
+    // send for graceful shutdown). tokio drives these through its own reactor,
+    // so they fire even though the python main thread is parked in this runtime.
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .expect("Failed to install SIGTERM handler");
+
+    tokio::select! {
+        result = signal::ctrl_c() => {
+            result.expect("Failed to listen for SIGINT");
+        }
+        _ = sigterm.recv() => {}
+    }
+}
+
+fn run_shutdown_callback(shutdown_cb: &Arc<Mutex<Option<Py<PyAny>>>>) {
+    // Invokes the python on_shutdown callback (if any) with no arguments,
+    // reacquiring the GIL released by start()'s allow_threads. Errors are
+    // logged, not panicked, so a failing callback cannot abort shutdown.
+    let cb = shutdown_cb.lock().unwrap();
+
+    if let Some(callback) = cb.as_ref() {
+        Python::with_gil(|py| {
+            // a SIGINT leaves python's default handler pending, which would
+            // otherwise surface as KeyboardInterrupt on the first bytecode of
+            // the callback. consume it here so the callback runs cleanly.
+            let _ = py.check_signals();
+
+            if let Err(err) = callback.call0(py) {
+                error!("on_shutdown callback failed: {:?}", err);
+            }
         });
     }
 }

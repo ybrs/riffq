@@ -1,8 +1,11 @@
+import atexit
 import duckdb
 import pyarrow as pa
 import riffq
 from riffq.helpers import to_arrow
 import logging
+import signal
+import threading
 from pathlib import Path
 from typing import Iterable, Optional
 import os
@@ -168,6 +171,20 @@ def run_server(
     global duckdb_con
     duckdb_con = duckdb.connect(db_file, read_only=read_only)
 
+    if not read_only:
+        duckdb_con.execute("PRAGMA wal_autocheckpoint='1KB'")
+
+    def _atexit_checkpoint():
+        """Checkpoint DuckDB on interpreter exit."""
+        try:
+            duckdb_con.execute("CHECKPOINT")
+            duckdb_con.close()
+            logging.info("atexit: database checkpointed and closed.")
+        except Exception as exc:
+            logging.error("atexit: checkpoint failed: %s", exc)
+
+    atexit.register(_atexit_checkpoint)
+
     # execute initialization SQL before starting the server
     if sql_scripts:
         for script in sql_scripts:
@@ -226,6 +243,23 @@ def run_server(
         server._server.register_database(database_name)
         register_schemas_and_tables_in_database(database_name)
     
+    def _shutdown(signum, frame):
+        """Checkpoint and close DuckDB on shutdown signal."""
+        logging.info(
+            "Signal %s received, checkpointing and closing db",
+            signum,
+        )
+        try:
+            duckdb_con.execute("CHECKPOINT")
+            duckdb_con.close()
+            logging.info("Database checkpointed and closed.")
+        except Exception as exc:
+            logging.error("Checkpoint failed: %s", exc)
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+
     server.start(catalog_emulation=True, tls=use_tls)
     
 if __name__ == "__main__":

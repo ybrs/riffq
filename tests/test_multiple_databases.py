@@ -3,7 +3,6 @@ import socket
 import time
 import psycopg
 import unittest
-from helpers import _ensure_riffq_built
 
 
 def _run_server(port: int):
@@ -40,7 +39,6 @@ def _run_server(port: int):
 class MultipleDatabaseTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55441
         cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
         cls.proc.start()
@@ -55,6 +53,11 @@ class MultipleDatabaseTest(unittest.TestCase):
             cls.proc.terminate()
             cls.proc.join()
             raise RuntimeError("Server did not start")
+
+        # the TCP port accepts connections before catalog emulation finishes
+        # loading, so the first client would race a half-ready server and hang.
+        # wait for the catalog to settle before the tests connect.
+        time.sleep(10)
 
     @classmethod
     def tearDownClass(cls):

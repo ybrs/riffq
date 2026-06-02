@@ -8,7 +8,6 @@ import tempfile
 
 import psycopg
 import unittest
-from helpers import _ensure_riffq_built
 
 def _run_server_tls(port: int, cert: str, key: str):
     import riffq
@@ -38,7 +37,6 @@ def _run_server_tls(port: int, cert: str, key: str):
 class ServerTLSTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55434
         cls.tmp = tempfile.TemporaryDirectory()
         cert = Path(cls.tmp.name) / "server.crt"

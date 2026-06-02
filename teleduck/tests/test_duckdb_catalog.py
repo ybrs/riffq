@@ -6,6 +6,7 @@ from pathlib import Path
 import psycopg
 import unittest
 import duckdb
+from server_readiness import wait_for_catalog, stop_server
 
 
 def _run_server(db_file: str, port: int):
@@ -49,10 +50,20 @@ class DuckDbCatalogTest(unittest.TestCase):
             cls.proc.join()
             raise RuntimeError("Server did not start")
 
+        # the socket binds before the pg_catalog emulation is query-ready, so
+        # poll the exact entry the tests assert on (the registered database in
+        # pg_database) until it answers instead of sleeping a fixed amount.
+        waited = wait_for_catalog(
+            cls.port,
+            "db",
+            f"SELECT datname FROM pg_catalog.pg_database WHERE datname='{cls.database_name}'",
+            cls.database_name,
+        )
+        print(f"catalog ready after {waited:.2f}s")
+
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.join()
+        stop_server(cls.proc)
         Path(cls.db_file).unlink(missing_ok=True)
 
     def test_catalog_entries(self):

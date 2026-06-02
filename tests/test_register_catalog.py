@@ -3,7 +3,6 @@ import socket
 import time
 import psycopg
 import unittest
-from helpers import _ensure_riffq_built
 import pyarrow as pa
 
 
@@ -30,7 +29,6 @@ def _run_server(port: int):
 class RegisterCatalogTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55440
         cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
         cls.proc.start()

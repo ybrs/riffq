@@ -7,7 +7,6 @@ from pathlib import Path
 
 import psycopg
 import unittest
-from helpers import _ensure_riffq_built
 
 def _run_server(port: int):
     import riffq
@@ -27,7 +26,6 @@ def _run_server(port: int):
 class OnConnectTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55436
         cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
         cls.proc.start()

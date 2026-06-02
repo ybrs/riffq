@@ -3,7 +3,6 @@ import socket
 import time
 import unittest
 import psycopg
-from helpers import _ensure_riffq_built
 
 import pyarrow as pa
 
@@ -54,7 +53,6 @@ def _run_server_catalog(port: int, enabled: bool):
 class PgCatalogEnabledTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55434
         cls.proc = multiprocessing.Process(target=_run_server_catalog, args=(cls.port, True), daemon=True)
         cls.proc.start()
@@ -110,7 +108,6 @@ class PgCatalogEnabledTest(unittest.TestCase):
 class PgCatalogDisabledTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55439
         cls.proc = multiprocessing.Process(target=_run_server_catalog, args=(cls.port, False), daemon=True)
         cls.proc.start()

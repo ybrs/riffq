@@ -7,7 +7,6 @@ import multiprocessing
 
 import psycopg
 import unittest
-from helpers import _ensure_riffq_built
 
 
 def _run_server(port: int, q):
@@ -28,7 +27,6 @@ def _run_server(port: int, q):
 class OnDisconnectTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55437
         cls.queue = multiprocessing.Queue()
         cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port, cls.queue), daemon=True)

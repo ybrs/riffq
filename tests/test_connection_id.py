@@ -8,7 +8,6 @@ from pathlib import Path
 
 import psycopg
 import unittest
-from helpers import _ensure_riffq_built
 
 import pyarrow as pa
 
@@ -37,7 +36,6 @@ def _run_server(port: int):
 class ConnectionIdTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55435
         cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
         cls.proc.start()

@@ -3,7 +3,6 @@ import socket
 import time
 import unittest
 import psycopg
-from helpers import _ensure_riffq_built
 
 
 def _run_server(port: int):
@@ -24,7 +23,6 @@ def _run_server(port: int):
 class OnConnectErrorTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55450
         cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
         cls.proc.start()

@@ -267,17 +267,14 @@ class RiffqServer:
         except KeyError:
             logger.exception("Connection disconnected but not in self.connections")
 
-    def on_shutdown(self, callback: Callable[[], None]) -> None:
-        """Register a zero-argument callback run once on server shutdown.
+    def handle_shutdown(self, callback: Callable[[], None]) -> None:
+        """Run cleanup once when the server shuts down.
 
-        The server invokes `callback` after it stops accepting connections on
+        The callback is invoked after the server stops accepting connections on
         SIGINT or SIGTERM, before `start()` returns. Use it to flush or
         checkpoint state (e.g. close a DuckDB connection) for a clean shutdown.
-
-        Args:
-            callback: Zero-argument callable invoked once at shutdown.
         """
-        self._server.on_shutdown(callback)
+        self._server.handle_shutdown(callback)
 
     def start(self, tls: bool = False, catalog_emulation: bool = False, server_version: Optional[str] = None) -> None:
         """Start the server event loop.

@@ -190,8 +190,8 @@ def run_server(
         except Exception as exc:
             logging.error("Checkpoint failed: %s", exc)
 
-    # atexit is the fallback; riffq's on_shutdown (below) is the primary path
-    # and fires on SIGINT/SIGTERM from inside the rust runtime.
+    # atexit is the fallback; riffq's handle_shutdown (below) is the primary
+    # path and fires on SIGINT/SIGTERM from inside the rust runtime.
     atexit.register(_checkpoint_and_close)
 
     # execute initialization SQL before starting the server
@@ -256,7 +256,7 @@ def run_server(
     # before start() returns. a python signal.signal handler cannot be used
     # here: start() parks the main thread in rust, so a python-level handler
     # would never be dispatched (it would just leave a zombie holding the port).
-    server.on_shutdown(_checkpoint_and_close)
+    server.handle_shutdown(_checkpoint_and_close)
 
     server.start(catalog_emulation=True, tls=use_tls)
     

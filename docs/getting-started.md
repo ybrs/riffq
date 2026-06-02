@@ -131,22 +131,22 @@ def handle_disconnect(ip, port, callback):
    return callback()
 ```
 
-### on_shutdown
+### handle_shutdown
 
 Run cleanup once when the server is shutting down. riffq catches **SIGINT**
 (ctrl-c) and **SIGTERM** (`kill`, `docker stop`, Kubernetes) inside its Rust
-runtime, stops accepting connections, then calls your zero-argument callback
-before `start()` returns. Use it to flush or checkpoint state for a clean exit.
+runtime, stops accepting connections, then calls your callback before `start()`
+returns. Use it to flush or checkpoint state for a clean exit.
 
 ```python
 server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
 
-def on_shutdown():
+def handle_shutdown():
     # checkpoint/close your engine, flush buffers, etc.
     db_connection.execute("CHECKPOINT")
     db_connection.close()
 
-server.on_shutdown(on_shutdown)
+server.handle_shutdown(handle_shutdown)
 server.start()
 ```
 
@@ -154,7 +154,7 @@ Why not a Python `signal.signal(...)` handler? `start()` parks the main thread
 inside the Rust accept loop, so CPython can never dispatch a Python-level signal
 handler — it would be deferred forever, the process would not stop, and it would
 leave a zombie holding the port. Handling the signal inside the Rust runtime via
-`on_shutdown` avoids that entirely.
+`handle_shutdown` avoids that entirely.
 
 ## Context and Connection Id
 

@@ -9,9 +9,9 @@ import unittest
 
 def _run_server(port, sentinel_path):
     """
-    runs a minimal riffq server whose on_shutdown callback writes sentinel_path.
-    the sentinel lets the parent process observe that the callback actually ran
-    before the server exited.
+    runs a minimal riffq server whose handle_shutdown callback writes
+    sentinel_path. the sentinel lets the parent process observe that the
+    callback actually ran before the server exited.
     """
     import riffq
     from riffq.helpers import to_arrow
@@ -19,13 +19,13 @@ def _run_server(port, sentinel_path):
     def handle_query(sql, callback, **kwargs):
         callback(to_arrow([{"name": "val", "type": "int"}], [[1]]))
 
-    def on_shutdown():
+    def handle_shutdown():
         with open(sentinel_path, "w", encoding="utf-8") as handle:
             handle.write("shutdown")
 
     server = riffq.Server(f"127.0.0.1:{port}")
     server.on_query(handle_query)
-    server.on_shutdown(on_shutdown)
+    server.handle_shutdown(handle_shutdown)
     server.start()
 
 
@@ -42,7 +42,7 @@ def _wait_for_socket(port):
 
 
 def _wait_for_sentinel(path):
-    """waits up to 10s for the on_shutdown callback to create path."""
+    """waits up to 10s for the handle_shutdown callback to create path."""
     for _attempt in range(100):
         if os.path.exists(path):
             return True
@@ -52,11 +52,11 @@ def _wait_for_sentinel(path):
     return False
 
 
-class OnShutdownTest(unittest.TestCase):
+class HandleShutdownTest(unittest.TestCase):
     def _run_signal_case(self, port, sig):
         """
-        starts a server, delivers sig, and asserts the on_shutdown callback ran
-        and the process exited gracefully (no force-kill needed).
+        starts a server, delivers sig, and asserts the handle_shutdown callback
+        ran and the process exited gracefully (no force-kill needed).
         """
         fd, sentinel = tempfile.mkstemp(suffix=".shutdown")
         os.close(fd)
@@ -69,7 +69,7 @@ class OnShutdownTest(unittest.TestCase):
             os.kill(proc.pid, sig)
             ran = _wait_for_sentinel(sentinel)
             proc.join(timeout=10)
-            self.assertTrue(ran, "on_shutdown callback did not run")
+            self.assertTrue(ran, "handle_shutdown callback did not run")
             self.assertFalse(proc.is_alive(), "server did not exit after signal")
         finally:
             if proc.is_alive():
@@ -79,12 +79,12 @@ class OnShutdownTest(unittest.TestCase):
             if os.path.exists(sentinel):
                 os.unlink(sentinel)
 
-    def test_on_shutdown_runs_on_sigterm(self):
-        """SIGTERM (kill/docker stop/k8s) triggers the on_shutdown callback."""
+    def test_handle_shutdown_runs_on_sigterm(self):
+        """SIGTERM (kill/docker stop/k8s) triggers the handle_shutdown callback."""
         self._run_signal_case(55461, signal.SIGTERM)
 
-    def test_on_shutdown_runs_on_sigint(self):
-        """SIGINT (ctrl-c) triggers the on_shutdown callback."""
+    def test_handle_shutdown_runs_on_sigint(self):
+        """SIGINT (ctrl-c) triggers the handle_shutdown callback."""
         self._run_signal_case(55462, signal.SIGINT)
 
 

@@ -1677,7 +1677,7 @@ pub struct Server {
     on_connect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_authentication_cb: Arc<Mutex<Option<Py<PyAny>>>>,
-    on_shutdown_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+    handle_shutdown_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     tls_acceptor: Arc<Mutex<Option<TlsAcceptor>>>,
     databases: Vec<String>,
     schemas: Vec<(String, String)>,
@@ -1694,7 +1694,7 @@ impl Server {
             on_connect_cb: Arc::new(Mutex::new(None)),
             on_disconnect_cb: Arc::new(Mutex::new(None)),
             on_authentication_cb: Arc::new(Mutex::new(None)),
-            on_shutdown_cb: Arc::new(Mutex::new(None)),
+            handle_shutdown_cb: Arc::new(Mutex::new(None)),
             tls_acceptor: Arc::new(Mutex::new(None)),
             databases: Vec::new(),
             schemas: Vec::new(),
@@ -1718,11 +1718,10 @@ impl Server {
         *self.on_authentication_cb.lock().unwrap() = Some(cb);
     }
 
-    fn on_shutdown(&mut self, _py: Python, cb: Py<PyAny>) {
-        // Called once, with no arguments, after the server stops accepting
-        // connections on SIGINT or SIGTERM. Lets Python flush/checkpoint state
-        // (e.g. DuckDB) before the process exits.
-        *self.on_shutdown_cb.lock().unwrap() = Some(cb);
+    fn handle_shutdown(&mut self, _py: Python, cb: Py<PyAny>) {
+        // Called once after the server stops accepting connections on SIGINT or
+        // SIGTERM, letting Python flush/checkpoint state (e.g. DuckDB) before exit.
+        *self.handle_shutdown_cb.lock().unwrap() = Some(cb);
     }
 
     fn set_tls(&mut self, cert_path: String, key_path: String) -> PyResult<()> {
@@ -1793,7 +1792,7 @@ impl Server {
         let connect_cb = self.on_connect_cb.clone();
         let disconnect_cb = self.on_disconnect_cb.clone();
         let auth_cb = self.on_authentication_cb.clone();
-        let shutdown_cb = self.on_shutdown_cb.clone();
+        let shutdown_cb = self.handle_shutdown_cb.clone();
         let server_version = server_version.unwrap_or_else(|| SERVER_VERSION.to_string());
 
         if query_cb.lock().unwrap().is_none() {
@@ -1927,9 +1926,9 @@ async fn wait_for_shutdown_signal() {
 }
 
 fn run_shutdown_callback(shutdown_cb: &Arc<Mutex<Option<Py<PyAny>>>>) {
-    // Invokes the python on_shutdown callback (if any) with no arguments,
-    // reacquiring the GIL released by start()'s allow_threads. Errors are
-    // logged, not panicked, so a failing callback cannot abort shutdown.
+    // Invokes the python handle_shutdown callback (if any), reacquiring the GIL
+    // released by start()'s allow_threads. Errors are logged, not panicked, so
+    // a failing callback cannot abort shutdown.
     let cb = shutdown_cb.lock().unwrap();
 
     if let Some(callback) = cb.as_ref() {
@@ -1940,7 +1939,7 @@ fn run_shutdown_callback(shutdown_cb: &Arc<Mutex<Option<Py<PyAny>>>>) {
             let _ = py.check_signals();
 
             if let Err(err) = callback.call0(py) {
-                error!("on_shutdown callback failed: {:?}", err);
+                error!("handle_shutdown callback failed: {:?}", err);
             }
         });
     }

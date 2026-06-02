@@ -59,7 +59,7 @@ class CheckpointOnShutdownTest(unittest.TestCase):
 
     def test_sigterm_checkpoints_and_exits(self):
         """
-        SIGTERM must trigger riffq's on_shutdown, which checkpoints DuckDB and
+        SIGTERM must trigger riffq's handle_shutdown, which checkpoints DuckDB and
         exits cleanly. previously the python signal handler could not run while
         the main thread was parked in rust, so the server zombied and the data
         was never flushed to disk.

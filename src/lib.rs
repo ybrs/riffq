@@ -1781,13 +1781,14 @@ impl Server {
 
 
     #[pyo3(signature = (tls=false, catalog_emulation=false, server_version=None))]
-    fn start(&self, py: Python, tls: bool, catalog_emulation: bool, server_version: Option<String>) {
-        py.allow_threads(|| {
-            self.run_server(tls, catalog_emulation, server_version);
-        });
+    fn start(&self, py: Python, tls: bool, catalog_emulation: bool, server_version: Option<String>) -> PyResult<()> {
+        // surface a failed bind (e.g. the port is taken) as a python OSError
+        // instead of panicking the worker process.
+        py.allow_threads(|| self.run_server(tls, catalog_emulation, server_version))
+            .map_err(|err| pyo3::exceptions::PyOSError::new_err(err.to_string()))
     }
 
-    fn run_server(&self, tls: bool, catalog_emulation: bool, server_version: Option<String>) {
+    fn run_server(&self, tls: bool, catalog_emulation: bool, server_version: Option<String>) -> std::io::Result<()> {
         let addr = self.addr.clone();
         let query_cb = self.on_query_cb.clone();
         let connect_cb = self.on_connect_cb.clone();
@@ -1847,7 +1848,7 @@ impl Server {
             let ctx_map = Arc::new(ctx_map);
             let default_ctx = ctx_map.values().next().unwrap().clone();
 
-            let listener = bind_listener(&addr);
+            let listener = bind_listener(&addr)?;
             info!("Listening on {}", addr);
 
             let server_task = tokio::spawn({
@@ -1907,30 +1908,33 @@ impl Server {
             info!("Shutting down server");
             server_task.abort();
             run_shutdown_callback(&shutdown_cb);
-        });
+            Ok(())
+        })
     }
 }
 
-fn bind_listener(addr: &str) -> TcpListener {
+fn bind_listener(addr: &str) -> std::io::Result<TcpListener> {
     // Bind with SO_REUSEADDR so a port left in TIME_WAIT by a just-stopped
     // server (its closed client connections) can be reused immediately. Without
-    // it, restarting on the same port races "address already in use".
-    let socket_addr: std::net::SocketAddr = addr
-        .parse()
-        .unwrap_or_else(|_| panic!("invalid listen address: {}", addr));
+    // it, restarting on the same port races "address already in use". A genuine
+    // failure (port owned by another process, bad address) returns an Err so
+    // start() can raise it as a python OSError instead of panicking.
+    let socket_addr: std::net::SocketAddr = addr.parse().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid listen address: {}", addr),
+        )
+    })?;
 
     let socket = if socket_addr.is_ipv4() {
-        TcpSocket::new_v4()
+        TcpSocket::new_v4()?
     } else {
-        TcpSocket::new_v6()
-    }
-    .expect("failed to create TCP socket");
+        TcpSocket::new_v6()?
+    };
 
-    socket.set_reuseaddr(true).expect("failed to set SO_REUSEADDR");
-    socket
-        .bind(socket_addr)
-        .unwrap_or_else(|err| panic!("failed to bind {}: {}", addr, err));
-    socket.listen(1024).expect("failed to listen")
+    socket.set_reuseaddr(true)?;
+    socket.bind(socket_addr)?;
+    socket.listen(1024)
 }
 
 async fn wait_for_shutdown_signal() {

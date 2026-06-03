@@ -132,7 +132,7 @@ def main():
         "key": ["alpha", "beta", "gamma"],
         "value": ["value1", "value2", "value3"]
     })
-    server = riffq.Server("127.0.0.1:5434")
+    server = riffq.Server("127.0.0.1:55503")
     server.on_query(handle_query)
     server.start()
 

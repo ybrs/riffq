@@ -2,7 +2,20 @@ from sqlalchemy import create_engine, text
 import time
 from riffq.testing import stop_server  # re-exported for the concurrency tests
 
-__all__ = ["stop_server", "wait_for_server"]
+__all__ = ["stop_server", "wait_for_server", "ensure_started"]
+
+
+def ensure_started(proc, port):
+    """
+    Fails fast if the server process died during startup. The riffq server now
+    raises OSError when its port is already taken (e.g. by a real postgres), so
+    the child exits; without this check the test would silently connect to the
+    stray server on that port and pass against the wrong database.
+    """
+    if not proc.is_alive():
+        raise RuntimeError(
+            f"riffq server exited during startup; is port {port} already in use?"
+        )
 
 
 def wait_for_server(port: int = 5433):

@@ -7,7 +7,7 @@ from multiprocessing import Process
 import riffq
 import logging
 
-from utils import wait_for_server
+from utils import wait_for_server, stop_server
 logging.basicConfig(level=logging.DEBUG)
 
 def start_polars_server():
@@ -32,8 +32,7 @@ class TestPolarsConcurrency(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        cls.server_proc.terminate()
-        cls.server_proc.join()
+        stop_server(cls.server_proc)
 
     def test_concurrent_queries(self):
         engine = wait_for_server(port=5434)

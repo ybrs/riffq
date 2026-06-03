@@ -46,8 +46,7 @@ class DuckDbCatalogTest(unittest.TestCase):
                     break
             time.sleep(0.1)
         else:
-            cls.proc.terminate()
-            cls.proc.join()
+            stop_server(cls.proc)
             raise RuntimeError("Server did not start")
 
         # the socket binds before the pg_catalog emulation is query-ready, so

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import psycopg
 import unittest
+from helpers import stop_server
 
 import pyarrow as pa
 
@@ -46,14 +47,12 @@ class ConnectionIdTest(unittest.TestCase):
                     break
             time.sleep(0.1)
         else:
-            cls.proc.terminate()
-            cls.proc.join()
+            stop_server(cls.proc)
             raise RuntimeError("Server did not start")
 
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.join()
+        stop_server(cls.proc)
 
     def _fetch_id(self):
         conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")

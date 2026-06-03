@@ -3,6 +3,7 @@ import socket
 import time
 import psycopg
 import unittest
+from helpers import stop_server, wait_for_catalog
 
 
 def _run_server(port: int):
@@ -50,19 +51,22 @@ class MultipleDatabaseTest(unittest.TestCase):
                     break
             time.sleep(0.1)
         else:
-            cls.proc.terminate()
-            cls.proc.join()
+            stop_server(cls.proc)
             raise RuntimeError("Server did not start")
 
         # the TCP port accepts connections before catalog emulation finishes
-        # loading, so the first client would race a half-ready server and hang.
-        # wait for the catalog to settle before the tests connect.
-        time.sleep(10)
+        # loading, so the first client would race a half-ready server. poll the
+        # registered database in pg_database until it answers instead of sleeping.
+        wait_for_catalog(
+            cls.port,
+            "db1",
+            "SELECT datname FROM pg_catalog.pg_database WHERE datname='db2'",
+            "db2",
+        )
 
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.join()
+        stop_server(cls.proc)
 
     def test_isolation(self):
         conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db1")

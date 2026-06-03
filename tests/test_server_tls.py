@@ -8,6 +8,7 @@ import tempfile
 
 import psycopg
 import unittest
+from helpers import stop_server
 
 def _run_server_tls(port: int, cert: str, key: str):
     import riffq
@@ -56,14 +57,12 @@ class ServerTLSTest(unittest.TestCase):
                     break
             time.sleep(0.1)
         else:
-            cls.proc.terminate()
-            cls.proc.join()
+            stop_server(cls.proc)
             raise RuntimeError("Server did not start")
 
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.join()
+        stop_server(cls.proc)
         cls.tmp.cleanup()
 
     def test_tls_query(self):

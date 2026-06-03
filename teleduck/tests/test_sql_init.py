@@ -48,8 +48,7 @@ class SqlInitTest(unittest.TestCase):
                     break
             time.sleep(0.1)
         else:
-            cls.proc.terminate()
-            cls.proc.join()
+            stop_server(cls.proc)
             raise RuntimeError("Server did not start")
 
         # the socket binds before the init scripts/sql have populated the db,

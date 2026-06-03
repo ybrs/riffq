@@ -1,5 +1,9 @@
 from sqlalchemy import create_engine, text
 import time
+from riffq.testing import stop_server  # re-exported for the concurrency tests
+
+__all__ = ["stop_server", "wait_for_server"]
+
 
 def wait_for_server(port: int = 5433):
     engine = create_engine(f"postgresql://myuser:mypassword@127.0.0.1:{port}/mydb")

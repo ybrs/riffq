@@ -2,6 +2,7 @@ import multiprocessing
 import socket
 import time
 import unittest
+from helpers import stop_server
 import psycopg
 
 import pyarrow as pa
@@ -63,14 +64,12 @@ class PgCatalogEnabledTest(unittest.TestCase):
                     break
             time.sleep(0.1)
         else:
-            cls.proc.terminate()
-            cls.proc.join()
+            stop_server(cls.proc)
             raise RuntimeError("Server did not start")
 
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.join()
+        stop_server(cls.proc)
 
     def test_catalog_query(self):
         conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
@@ -118,14 +117,12 @@ class PgCatalogDisabledTest(unittest.TestCase):
                     break
             time.sleep(0.1)
         else:
-            cls.proc.terminate()
-            cls.proc.join()
+            stop_server(cls.proc)
             raise RuntimeError("Server did not start")
 
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.join()
+        stop_server(cls.proc)
 
     def test_pg_class_disabled(self):
         conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")

@@ -10,7 +10,7 @@ from multiprocessing import Process
 import riffq
 import logging
 
-from utils import wait_for_server
+from utils import wait_for_server, stop_server, ensure_started
 logging.basicConfig(level=logging.DEBUG)
 
 def start_duckdb_server():
@@ -19,7 +19,7 @@ def start_duckdb_server():
 
 def run_heavy_query():
     logging.info("sending long running query")
-    engine = create_engine("postgresql://myuser:mypassword@127.0.0.1:5433/mydb")
+    engine = create_engine("postgresql://myuser:mypassword@127.0.0.1:55501/mydb")
     with engine.connect() as conn:
         conn.execute(text("""
             SELECT SUM(a.id * b.id)
@@ -35,14 +35,14 @@ class TestDuckDBConcurrency(unittest.TestCase):
         cls.server_proc = Process(target=start_duckdb_server)
         cls.server_proc.start()
         time.sleep(1.5)  # wait for server
+        ensure_started(cls.server_proc, 55501)
 
     @classmethod
     def tearDownClass(cls):
-        cls.server_proc.terminate()
-        cls.server_proc.join()
+        stop_server(cls.server_proc)
 
     def test_concurrent_queries(self):
-        engine = wait_for_server()
+        engine = wait_for_server(port=55501)
         fast_query_times = []
 
         heavy_proc = Process(target=run_heavy_query)

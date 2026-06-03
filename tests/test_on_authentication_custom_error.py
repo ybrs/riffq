@@ -2,8 +2,8 @@ import multiprocessing
 import socket
 import time
 import unittest
+from helpers import stop_server
 import psycopg
-from helpers import _ensure_riffq_built
 
 
 def _run_server(port: int):
@@ -25,7 +25,6 @@ def _run_server(port: int):
 class AuthenticationErrorTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55452
         cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
         cls.proc.start()
@@ -36,14 +35,12 @@ class AuthenticationErrorTest(unittest.TestCase):
                     break
             time.sleep(0.1)
         else:
-            cls.proc.terminate()
-            cls.proc.join()
+            stop_server(cls.proc)
             raise RuntimeError("Server did not start")
 
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.join()
+        stop_server(cls.proc)
 
     def test_auth_error(self):
         with self.assertRaises(psycopg.OperationalError) as ctx:

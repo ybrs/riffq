@@ -7,7 +7,7 @@ from multiprocessing import Process
 import riffq
 import logging
 
-from utils import wait_for_server
+from utils import wait_for_server, stop_server, ensure_started
 logging.basicConfig(level=logging.DEBUG)
 
 def start_polars_server():
@@ -16,7 +16,7 @@ def start_polars_server():
 
 def run_heavy_query():
     logging.info("sending long running query")
-    engine = create_engine("postgresql://myuser:mypassword@127.0.0.1:5434/mydb")
+    engine = create_engine("postgresql://myuser:mypassword@127.0.0.1:55503/mydb")
     with engine.connect() as conn:
         # trigger the heavy Polars computation
         conn.execute(text("SELECT heavy_query"))
@@ -29,14 +29,14 @@ class TestPolarsConcurrency(unittest.TestCase):
         cls.server_proc = Process(target=start_polars_server)
         cls.server_proc.start()
         time.sleep(1.5)  # wait for server
+        ensure_started(cls.server_proc, 55503)
 
     @classmethod
     def tearDownClass(cls):
-        cls.server_proc.terminate()
-        cls.server_proc.join()
+        stop_server(cls.server_proc)
 
     def test_concurrent_queries(self):
-        engine = wait_for_server(port=5434)
+        engine = wait_for_server(port=55503)
         
         fast_query_times = []
 

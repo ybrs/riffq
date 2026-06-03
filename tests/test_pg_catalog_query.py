@@ -2,8 +2,8 @@ import multiprocessing
 import socket
 import time
 import unittest
+from helpers import stop_server
 import psycopg
-from helpers import _ensure_riffq_built
 
 import pyarrow as pa
 
@@ -54,7 +54,6 @@ def _run_server_catalog(port: int, enabled: bool):
 class PgCatalogEnabledTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55434
         cls.proc = multiprocessing.Process(target=_run_server_catalog, args=(cls.port, True), daemon=True)
         cls.proc.start()
@@ -65,14 +64,12 @@ class PgCatalogEnabledTest(unittest.TestCase):
                     break
             time.sleep(0.1)
         else:
-            cls.proc.terminate()
-            cls.proc.join()
+            stop_server(cls.proc)
             raise RuntimeError("Server did not start")
 
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.join()
+        stop_server(cls.proc)
 
     def test_catalog_query(self):
         conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
@@ -110,7 +107,6 @@ class PgCatalogEnabledTest(unittest.TestCase):
 class PgCatalogDisabledTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55439
         cls.proc = multiprocessing.Process(target=_run_server_catalog, args=(cls.port, False), daemon=True)
         cls.proc.start()
@@ -121,14 +117,12 @@ class PgCatalogDisabledTest(unittest.TestCase):
                     break
             time.sleep(0.1)
         else:
-            cls.proc.terminate()
-            cls.proc.join()
+            stop_server(cls.proc)
             raise RuntimeError("Server did not start")
 
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.join()
+        stop_server(cls.proc)
 
     def test_pg_class_disabled(self):
         conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")

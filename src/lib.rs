@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::{Sink, SinkExt, Stream};
 use tokio::net::TcpListener;
+use tokio::net::TcpSocket;
 use tokio::signal;
 use tokio::sync::oneshot;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
@@ -1677,6 +1678,7 @@ pub struct Server {
     on_connect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_disconnect_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     on_authentication_cb: Arc<Mutex<Option<Py<PyAny>>>>,
+    handle_shutdown_cb: Arc<Mutex<Option<Py<PyAny>>>>,
     tls_acceptor: Arc<Mutex<Option<TlsAcceptor>>>,
     databases: Vec<String>,
     schemas: Vec<(String, String)>,
@@ -1693,6 +1695,7 @@ impl Server {
             on_connect_cb: Arc::new(Mutex::new(None)),
             on_disconnect_cb: Arc::new(Mutex::new(None)),
             on_authentication_cb: Arc::new(Mutex::new(None)),
+            handle_shutdown_cb: Arc::new(Mutex::new(None)),
             tls_acceptor: Arc::new(Mutex::new(None)),
             databases: Vec::new(),
             schemas: Vec::new(),
@@ -1714,6 +1717,12 @@ impl Server {
 
     fn on_authentication(&mut self, _py: Python, cb: Py<PyAny>) {
         *self.on_authentication_cb.lock().unwrap() = Some(cb);
+    }
+
+    fn handle_shutdown(&mut self, _py: Python, cb: Py<PyAny>) {
+        // Called once after the server stops accepting connections on SIGINT or
+        // SIGTERM, letting Python flush/checkpoint state (e.g. DuckDB) before exit.
+        *self.handle_shutdown_cb.lock().unwrap() = Some(cb);
     }
 
     fn set_tls(&mut self, cert_path: String, key_path: String) -> PyResult<()> {
@@ -1772,18 +1781,20 @@ impl Server {
 
 
     #[pyo3(signature = (tls=false, catalog_emulation=false, server_version=None))]
-    fn start(&self, py: Python, tls: bool, catalog_emulation: bool, server_version: Option<String>) {
-        py.allow_threads(|| {
-            self.run_server(tls, catalog_emulation, server_version);
-        });
+    fn start(&self, py: Python, tls: bool, catalog_emulation: bool, server_version: Option<String>) -> PyResult<()> {
+        // surface a failed bind (e.g. the port is taken) as a python OSError
+        // instead of panicking the worker process.
+        py.allow_threads(|| self.run_server(tls, catalog_emulation, server_version))
+            .map_err(|err| pyo3::exceptions::PyOSError::new_err(err.to_string()))
     }
 
-    fn run_server(&self, tls: bool, catalog_emulation: bool, server_version: Option<String>) {
+    fn run_server(&self, tls: bool, catalog_emulation: bool, server_version: Option<String>) -> std::io::Result<()> {
         let addr = self.addr.clone();
         let query_cb = self.on_query_cb.clone();
         let connect_cb = self.on_connect_cb.clone();
         let disconnect_cb = self.on_disconnect_cb.clone();
         let auth_cb = self.on_authentication_cb.clone();
+        let shutdown_cb = self.handle_shutdown_cb.clone();
         let server_version = server_version.unwrap_or_else(|| SERVER_VERSION.to_string());
 
         if query_cb.lock().unwrap().is_none() {
@@ -1837,7 +1848,7 @@ impl Server {
             let ctx_map = Arc::new(ctx_map);
             let default_ctx = ctx_map.values().next().unwrap().clone();
 
-            let listener = TcpListener::bind(&addr).await.unwrap();
+            let listener = bind_listener(&addr)?;
             info!("Listening on {}", addr);
 
             let server_task = tokio::spawn({
@@ -1893,9 +1904,70 @@ impl Server {
                 }
             });
 
-            signal::ctrl_c().await.expect("Failed to listen for shutdown signal");
+            wait_for_shutdown_signal().await;
             info!("Shutting down server");
             server_task.abort();
+            run_shutdown_callback(&shutdown_cb);
+            Ok(())
+        })
+    }
+}
+
+fn bind_listener(addr: &str) -> std::io::Result<TcpListener> {
+    // Bind with SO_REUSEADDR so a port left in TIME_WAIT by a just-stopped
+    // server (its closed client connections) can be reused immediately. Without
+    // it, restarting on the same port races "address already in use". A genuine
+    // failure (port owned by another process, bad address) returns an Err so
+    // start() can raise it as a python OSError instead of panicking.
+    let socket_addr: std::net::SocketAddr = addr.parse().map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid listen address: {}", addr),
+        )
+    })?;
+
+    let socket = if socket_addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+
+    socket.set_reuseaddr(true)?;
+    socket.bind(socket_addr)?;
+    socket.listen(1024)
+}
+
+async fn wait_for_shutdown_signal() {
+    // Resolves on SIGINT (ctrl-c) or SIGTERM (the signal kill/docker stop/k8s
+    // send for graceful shutdown). tokio drives these through its own reactor,
+    // so they fire even though the python main thread is parked in this runtime.
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .expect("Failed to install SIGTERM handler");
+
+    tokio::select! {
+        result = signal::ctrl_c() => {
+            result.expect("Failed to listen for SIGINT");
+        }
+        _ = sigterm.recv() => {}
+    }
+}
+
+fn run_shutdown_callback(shutdown_cb: &Arc<Mutex<Option<Py<PyAny>>>>) {
+    // Invokes the python handle_shutdown callback (if any), reacquiring the GIL
+    // released by start()'s allow_threads. Errors are logged, not panicked, so
+    // a failing callback cannot abort shutdown.
+    let cb = shutdown_cb.lock().unwrap();
+
+    if let Some(callback) = cb.as_ref() {
+        Python::with_gil(|py| {
+            // a SIGINT leaves python's default handler pending, which would
+            // otherwise surface as KeyboardInterrupt on the first bytecode of
+            // the callback. consume it here so the callback runs cleanly.
+            let _ = py.check_signals();
+
+            if let Err(err) = callback.call0(py) {
+                error!("handle_shutdown callback failed: {:?}", err);
+            }
         });
     }
 }

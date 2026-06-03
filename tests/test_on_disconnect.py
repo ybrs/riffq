@@ -7,7 +7,7 @@ import multiprocessing
 
 import psycopg
 import unittest
-from helpers import _ensure_riffq_built
+from helpers import stop_server
 
 
 def _run_server(port: int, q):
@@ -28,7 +28,6 @@ def _run_server(port: int, q):
 class OnDisconnectTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        _ensure_riffq_built()
         cls.port = 55437
         cls.queue = multiprocessing.Queue()
         cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port, cls.queue), daemon=True)
@@ -40,14 +39,12 @@ class OnDisconnectTest(unittest.TestCase):
                     break
             time.sleep(0.1)
         else:
-            cls.proc.terminate()
-            cls.proc.join()
+            stop_server(cls.proc)
             raise RuntimeError("Server did not start")
 
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.join()
+        stop_server(cls.proc)
 
     def test_disconnect_called(self):
         conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")

@@ -145,7 +145,7 @@ def main():
 
     executor = ThreadPoolExecutor(max_workers=4)
 
-    server = riffq.Server("127.0.0.1:5433")
+    server = riffq.Server("127.0.0.1:55501")
     server.on_query(handle_query)
     server.start()
 

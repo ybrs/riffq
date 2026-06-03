@@ -4,7 +4,6 @@ import pyarrow as pa
 import riffq
 from riffq.helpers import to_arrow
 import logging
-import signal
 import threading
 from pathlib import Path
 from typing import Iterable, Optional
@@ -174,16 +173,27 @@ def run_server(
     if not read_only:
         duckdb_con.execute("PRAGMA wal_autocheckpoint='1KB'")
 
-    def _atexit_checkpoint():
-        """Checkpoint DuckDB on interpreter exit."""
+    shutdown_state = {"done": False}
+
+    def _checkpoint_and_close():
+        """
+        Checkpoints and closes DuckDB exactly once; safe to call repeatedly.
+        """
+        if shutdown_state["done"]:
+            return
+
         try:
             duckdb_con.execute("CHECKPOINT")
             duckdb_con.close()
-            logging.info("atexit: database checkpointed and closed.")
+            logging.info("Database checkpointed and closed.")
         except Exception as exc:
-            logging.error("atexit: checkpoint failed: %s", exc)
+            logging.error("Checkpoint failed: %s", exc)
 
-    atexit.register(_atexit_checkpoint)
+        shutdown_state["done"] = True
+
+    # atexit is the fallback; riffq's handle_shutdown (below) is the primary
+    # path and fires on SIGINT/SIGTERM from inside the rust runtime.
+    atexit.register(_checkpoint_and_close)
 
     # execute initialization SQL before starting the server
     if sql_scripts:
@@ -243,22 +253,11 @@ def run_server(
         server._server.register_database(database_name)
         register_schemas_and_tables_in_database(database_name)
     
-    def _shutdown(signum, frame):
-        """Checkpoint and close DuckDB on shutdown signal."""
-        logging.info(
-            "Signal %s received, checkpointing and closing db",
-            signum,
-        )
-        try:
-            duckdb_con.execute("CHECKPOINT")
-            duckdb_con.close()
-            logging.info("Database checkpointed and closed.")
-        except Exception as exc:
-            logging.error("Checkpoint failed: %s", exc)
-        os._exit(0)
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
+    # riffq catches SIGINT/SIGTERM inside its tokio runtime and invokes this
+    # before start() returns. a python signal.signal handler cannot be used
+    # here: start() parks the main thread in rust, so a python-level handler
+    # would never be dispatched (it would just leave a zombie holding the port).
+    server.handle_shutdown(_checkpoint_and_close)
 
     server.start(catalog_emulation=True, tls=use_tls)
     

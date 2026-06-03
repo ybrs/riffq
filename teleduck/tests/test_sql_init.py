@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import psycopg
 import unittest
+from server_readiness import wait_for_catalog, stop_server
 
 
 def _run_server(db_file: str, port: int, scripts, sqls):
@@ -47,17 +48,27 @@ class SqlInitTest(unittest.TestCase):
                     break
             time.sleep(0.1)
         else:
-            cls.proc.terminate()
-            cls.proc.join()
+            stop_server(cls.proc)
             raise RuntimeError("Server did not start")
+
+        # the socket binds before the init scripts/sql have populated the db,
+        # so poll the seeded row count until it settles instead of sleeping.
+        waited = wait_for_catalog(
+            cls.port,
+            "db",
+            "SELECT count(*) FROM t",
+            2,
+        )
+        print(f"server ready after {waited:.2f}s")
 
     @classmethod
     def tearDownClass(cls):
-        cls.proc.terminate()
-        cls.proc.join()
-        os.unlink(cls.db_file)
-        os.unlink(cls.script1.name)
-        os.unlink(cls.script2.name)
+        stop_server(cls.proc)
+        # force-kill skips the shutdown checkpoint, so DuckDB may never flush
+        # the .db file to disk; tolerate its absence when cleaning up.
+        Path(cls.db_file).unlink(missing_ok=True)
+        Path(cls.script1.name).unlink(missing_ok=True)
+        Path(cls.script2.name).unlink(missing_ok=True)
 
     def test_scripts_executed(self):
         conn = psycopg.connect(

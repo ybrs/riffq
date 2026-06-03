@@ -5,7 +5,6 @@ maturin
 duckdb
 pandas
 pyarrow
-psycopg2
 polars
-sqlparse==0.5.3
+sqlparse==0.5.5
 pygments

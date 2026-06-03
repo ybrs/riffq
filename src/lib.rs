@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::{Sink, SinkExt, Stream};
 use tokio::net::TcpListener;
+use tokio::net::TcpSocket;
 use tokio::signal;
 use tokio::sync::oneshot;
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
@@ -1846,7 +1847,7 @@ impl Server {
             let ctx_map = Arc::new(ctx_map);
             let default_ctx = ctx_map.values().next().unwrap().clone();
 
-            let listener = TcpListener::bind(&addr).await.unwrap();
+            let listener = bind_listener(&addr);
             info!("Listening on {}", addr);
 
             let server_task = tokio::spawn({
@@ -1908,6 +1909,28 @@ impl Server {
             run_shutdown_callback(&shutdown_cb);
         });
     }
+}
+
+fn bind_listener(addr: &str) -> TcpListener {
+    // Bind with SO_REUSEADDR so a port left in TIME_WAIT by a just-stopped
+    // server (its closed client connections) can be reused immediately. Without
+    // it, restarting on the same port races "address already in use".
+    let socket_addr: std::net::SocketAddr = addr
+        .parse()
+        .unwrap_or_else(|_| panic!("invalid listen address: {}", addr));
+
+    let socket = if socket_addr.is_ipv4() {
+        TcpSocket::new_v4()
+    } else {
+        TcpSocket::new_v6()
+    }
+    .expect("failed to create TCP socket");
+
+    socket.set_reuseaddr(true).expect("failed to set SO_REUSEADDR");
+    socket
+        .bind(socket_addr)
+        .unwrap_or_else(|err| panic!("failed to bind {}: {}", addr, err));
+    socket.listen(1024).expect("failed to listen")
 }
 
 async fn wait_for_shutdown_signal() {

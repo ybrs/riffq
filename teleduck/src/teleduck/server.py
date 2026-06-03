@@ -182,13 +182,14 @@ def run_server(
         if shutdown_state["done"]:
             return
 
-        shutdown_state["done"] = True
         try:
             duckdb_con.execute("CHECKPOINT")
             duckdb_con.close()
             logging.info("Database checkpointed and closed.")
         except Exception as exc:
             logging.error("Checkpoint failed: %s", exc)
+
+        shutdown_state["done"] = True
 
     # atexit is the fallback; riffq's handle_shutdown (below) is the primary
     # path and fires on SIGINT/SIGTERM from inside the rust runtime.

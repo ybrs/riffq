@@ -134,13 +134,13 @@ impl BoolCallbackWrapper {
     #[pyo3(signature = (result, message=None, severity=None, sqlstate=None))]
     fn __call__(
         &self,
-        result: PyObject,
+        result: Py<PyAny>,
         message: Option<String>,
         severity: Option<String>,
         sqlstate: Option<String>,
     ) {
         if let Some(sender) = self.responder.lock().unwrap().take() {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 let val: bool = result.extract(py).unwrap_or(false);
                 if val {
                     let _ = sender.send(BoolCallbackResult { allowed: true, error: None });
@@ -163,9 +163,9 @@ impl BoolCallbackWrapper {
 #[pymethods]
 impl CallbackWrapper {
     #[pyo3(signature = (result, *, is_tag=false, is_error=false))]
-    fn __call__(&self, result: PyObject, is_tag: bool, is_error: bool) {
+    fn __call__(&self, result: Py<PyAny>, is_tag: bool, is_error: bool) {
         if let Some(sender) = self.responder.lock().unwrap().take() {
-            Python::with_gil(|py| {
+            Python::attach(|py| {
                 if is_tag {
                     let tag = result.extract::<String>(py).unwrap_or_default();
                     let ret = sender.send(QueryResult::Tag(tag));
@@ -237,7 +237,7 @@ impl CallbackWrapper {
                 }
 
                 // Fallback: assume (schema_desc, rows) tuple, build batches
-                let parsed: PyResult<(Vec<HashMap<String, String>>, Vec<Vec<PyObject>>)> = result_bound.extract::<(Vec<HashMap<String, String>>, Vec<Vec<PyObject>>)>() ;
+                let parsed: PyResult<(Vec<HashMap<String, String>>, Vec<Vec<Py<PyAny>>>)> = result_bound.extract::<(Vec<HashMap<String, String>>, Vec<Vec<Py<PyAny>>>)>() ;
                 if let Ok((schema_desc, py_rows)) = parsed {
                     // turn PyObjects into Rust Option<String>
                     let rows: Vec<Vec<Option<String>>> = py_rows.into_iter()
@@ -670,14 +670,14 @@ impl PythonWorker {
         let auth_cb_thread = auth_cb.clone();
         thread::spawn(move || {
             info!("[PY_WORKER] Thread started");
-            pyo3::prepare_freethreaded_python();
+            pyo3::Python::initialize();
             loop {
                 debug!("[PY_WORKER] waiting to receive on rx...");
                 match rx.recv() {
                     Ok(msg) => match msg {
                         WorkerMessage::Query { query, params, param_types, do_describe, connection_id, responder } => {
                             debug!("[PY_WORKER] received query: {} -- {}", connection_id, query);
-                            let cb_opt = Python::with_gil(|py| {
+                            let cb_opt = Python::attach(|py| {
                                 query_cb
                                     .lock()
                                     .unwrap()
@@ -686,7 +686,7 @@ impl PythonWorker {
                             });
 
                             if let Some(cb) = cb_opt {
-                                Python::with_gil(|py| {
+                                Python::attach(|py| {
                                     debug!("[PY_WORKER] GIL acquired, invoking callback");
                                     let wrapper = Py::new(py, CallbackWrapper {
                                         responder: Arc::new(Mutex::new(Some(responder))),
@@ -740,7 +740,7 @@ impl PythonWorker {
                             }
                         }
                         WorkerMessage::Connect { connection_id, ip, port, server_name, responder } => {
-                            let cb_opt = Python::with_gil(|py| {
+                            let cb_opt = Python::attach(|py| {
                                 connect_cb
                                     .lock()
                                     .unwrap()
@@ -748,7 +748,7 @@ impl PythonWorker {
                                     .map(|cb| cb.clone_ref(py))
                             });
                             if let Some(cb) = cb_opt {
-                                Python::with_gil(|py| {
+                                Python::attach(|py| {
                                     let wrapper = Py::new(py, BoolCallbackWrapper {
                                         responder: Arc::new(Mutex::new(Some(responder))),
                                     }).unwrap();
@@ -773,7 +773,7 @@ impl PythonWorker {
                             }
                         }
                         WorkerMessage::Disconnect { connection_id, ip, port } => {
-                            let cb_opt = Python::with_gil(|py| {
+                            let cb_opt = Python::attach(|py| {
                                 disconnect_cb
                                     .lock()
                                     .unwrap()
@@ -781,7 +781,7 @@ impl PythonWorker {
                                     .map(|cb| cb.clone_ref(py))
                             });
                             if let Some(cb) = cb_opt {
-                                Python::with_gil(|py| {
+                                Python::attach(|py| {
                                     let args = PyTuple::new(py, [
                                         connection_id.into_py_any(py).unwrap(),
                                         ip.clone().into_py_any(py).unwrap(),
@@ -794,7 +794,7 @@ impl PythonWorker {
                             }
                         }
                         WorkerMessage::Authentication { connection_id, user, database, host, password, responder } => {
-                            let cb_opt = Python::with_gil(|py| {
+                            let cb_opt = Python::attach(|py| {
                                 auth_cb_thread
                                     .lock()
                                     .unwrap()
@@ -802,7 +802,7 @@ impl PythonWorker {
                                     .map(|cb| cb.clone_ref(py))
                             });
                             if let Some(cb) = cb_opt {
-                                Python::with_gil(|py| {
+                                Python::attach(|py| {
                                     let wrapper = Py::new(py, BoolCallbackWrapper {
                                         responder: Arc::new(Mutex::new(Some(responder))),
                                     }).unwrap();
@@ -1784,7 +1784,7 @@ impl Server {
     fn start(&self, py: Python, tls: bool, catalog_emulation: bool, server_version: Option<String>) -> PyResult<()> {
         // surface a failed bind (e.g. the port is taken) as a python OSError
         // instead of panicking the worker process.
-        py.allow_threads(|| self.run_server(tls, catalog_emulation, server_version))
+        py.detach(|| self.run_server(tls, catalog_emulation, server_version))
             .map_err(|err| pyo3::exceptions::PyOSError::new_err(err.to_string()))
     }
 
@@ -1959,7 +1959,7 @@ fn run_shutdown_callback(shutdown_cb: &Arc<Mutex<Option<Py<PyAny>>>>) {
     let cb = shutdown_cb.lock().unwrap();
 
     if let Some(callback) = cb.as_ref() {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             // a SIGINT leaves python's default handler pending, which would
             // otherwise surface as KeyboardInterrupt on the first bytecode of
             // the callback. consume it here so the callback runs cleanly.

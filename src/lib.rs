@@ -70,6 +70,7 @@ use pgwire::messages::startup::Authentication;
 use pgwire::messages::response::ErrorResponse;
 use pgwire::tokio::process_socket;
 use pgwire::api::stmt::{StoredStatement};
+use pgwire::api::portal::Format;
 
 pub mod pg;
 mod helpers;
@@ -1384,6 +1385,20 @@ pub struct MyStatement {
 }
 pub struct MyQueryParser;
 
+fn resolve_param_types(types: &[Option<Type>]) -> Vec<Type> {
+    // pgwire 0.40 reports each prepared-statement parameter type as Option<Type>
+    // (None = the client left it unspecified). riffq's query path wants concrete
+    // types, so fall back to UNKNOWN for any unspecified parameter, matching the
+    // pre-0.40 behavior where parameter_types was a plain Vec<Type>.
+    let mut resolved = Vec::with_capacity(types.len());
+
+    for ty in types {
+        resolved.push(ty.clone().unwrap_or(Type::UNKNOWN));
+    }
+
+    resolved
+}
+
 #[async_trait]
 impl pgwire::api::stmt::QueryParser for MyQueryParser {
     type Statement = MyStatement;
@@ -1392,7 +1407,7 @@ impl pgwire::api::stmt::QueryParser for MyQueryParser {
         &self,
         _client: &C,
         sql: &str,
-        _types: &[Type],
+        _types: &[Option<Type>],
     ) -> PgWireResult<Self::Statement>
     where
         C: ClientInfo + Unpin + Send + Sync,
@@ -1400,6 +1415,22 @@ impl pgwire::api::stmt::QueryParser for MyQueryParser {
         Ok(MyStatement {
             query: sql.to_string(),
         })
+    }
+
+    fn get_parameter_types(&self, _stmt: &Self::Statement) -> PgWireResult<Vec<Type>> {
+        // riffq overrides do_describe_statement/portal with real schema lookup,
+        // so pgwire's parser-driven describe auto-impl is unused; no static
+        // parameter types to report.
+        Ok(Vec::new())
+    }
+
+    fn get_result_schema(
+        &self,
+        _stmt: &Self::Statement,
+        _column_format: Option<&Format>,
+    ) -> PgWireResult<Vec<FieldInfo>> {
+        // see get_parameter_types: the real schema is computed in do_describe_*.
+        Ok(Vec::new())
     }
 }
 
@@ -1429,7 +1460,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
         debug!(
             "[PGWIRE EXTENDED] do_query: {} {}",
             portal.statement.statement.query,
-            _debug_parameters(&portal.parameters, &portal.statement.parameter_types)
+            _debug_parameters(&portal.parameters, &resolve_param_types(&portal.statement.parameter_types))
         );
 
         let query = query.trim().to_lowercase();
@@ -1473,7 +1504,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
             .execute(
                 query.to_string(),
                 Some(portal.parameters.clone()),
-                Some(portal.statement.parameter_types.clone()),
+                Some(resolve_param_types(&portal.statement.parameter_types)),
                 false,
                 connection_id,
             )
@@ -1513,7 +1544,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
             .unwrap_or(0);
 
         let query = &statement.statement.query;
-        let param_types = statement.parameter_types.clone();
+        let param_types = resolve_param_types(&statement.parameter_types);
 
         let result = self
             .query_runner
@@ -1573,7 +1604,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
             .execute(
                 query.to_string(),
                 Some(portal.parameters.clone()),
-                Some(portal.statement.parameter_types.clone()),
+                Some(resolve_param_types(&portal.statement.parameter_types)),
                 true,
                 connection_id,
             )

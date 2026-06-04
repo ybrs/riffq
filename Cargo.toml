@@ -18,9 +18,7 @@ codegen-units = 4
 [dependencies]
 pyo3 = { version = "0.28", features = ["extension-module"] }
 
-# pgwire 0.40 changes the QueryParser/ExtendedQueryHandler traits; deferred to a
-# dedicated migration. Pinned to the latest 0.34.x for now.
-pgwire = "0.34.2"
+pgwire = "0.40.0"
 # pgwire = { git = "https://github.com/ybrs/pgwire", branch = "expose-sni", package = "pgwire" }
 
 bytes = "1.5"

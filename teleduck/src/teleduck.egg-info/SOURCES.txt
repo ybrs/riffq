@@ -14,5 +14,6 @@ src/teleduck/certs/server.key
 tests/test_checkpoint_on_shutdown.py
 tests/test_cli.py
 tests/test_duckdb_catalog.py
+tests/test_lazy_catalog.py
 tests/test_read_only.py
 tests/test_sql_init.py

@@ -37,8 +37,8 @@ sqlparser = "0.61.0"
 chrono = "0.4.41"
 log = "0.4"
 datafusion = "53.1.0"
-datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", branch = "main", package = "datafusion_pg_catalog" }
-# datafusion_pg_catalog = { path = "../pg_catalog" }
+# datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", branch = "main", package = "datafusion_pg_catalog" }
+datafusion_pg_catalog = { path = "../pg_catalog" }
 
 env_logger = "0.11.8"
 

@@ -73,7 +73,7 @@ def _run_server(port: int):
 class LazyCatalogTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.port = 55461
+        cls.port = 55490
         cls.proc = multiprocessing.Process(
             target=_run_server, args=(cls.port,), daemon=True
         )

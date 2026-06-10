@@ -26,7 +26,7 @@ class DuckDbLazyCatalogTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.port = 55462
+        cls.port = 55491
         fd, cls.db_file = tempfile.mkstemp(suffix=".db")
         Path(cls.db_file).unlink()  # remove so DuckDB can create it
         with duckdb.connect(cls.db_file) as con:

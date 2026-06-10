@@ -10,6 +10,19 @@ teleduck mydata.db
 
 and connect with any PostgreSQL client.
 
+## How it works
+
+Teleduck runs a `riffq` server in catalog-emulation mode. Data queries are
+executed against DuckDB; catalog queries (`pg_catalog`, `information_schema`) are
+answered by `riffq`'s **lazy catalog**: Teleduck registers a single source
+(`DuckdbCatalogSource`) via `server.set_lazy_catalog(...)`, and `riffq` reads the
+live DuckDB schema from it on every catalog scan. As a result the emulated
+catalog always reflects the current database — a table or index created **after**
+Teleduck started shows up immediately, with no re-registration.
+
+DuckDB has no table ownership, so `pg_tables.tableowner` is intentionally left
+blank; index presence (`hasindexes`) is reported from `duckdb_indexes()`.
+
 ## Command line options
 
 Teleduck serves the PostgreSQL protocol over TLS by default. The command

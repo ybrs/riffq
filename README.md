@@ -245,6 +245,34 @@ For example
     server.start(catalog_emulation=True)
 ```
 
+#### Lazy (callback-driven) catalog
+
+The `register_*` calls above snapshot the catalog at startup. For a **live**
+source, install a lazy catalog instead: supply one source object and Riffq pulls
+catalog metadata from it on every `pg_catalog` scan, so tables created after
+startup show up automatically — nothing is cached.
+
+```python
+class MyCatalog:
+    def databases(self, callback):
+        callback([{"oid": 16384, "name": "appdb"}])
+    def schemas(self, database, callback):
+        callback([{"oid": 16385, "name": "public"}])
+    def relations(self, database, schema, callback):
+        callback([{"oid": 20001, "reltype_oid": 30001, "name": "users",
+                   "kind": "table", "has_index": False}])
+    def columns(self, database, schema, relation, callback):
+        callback([{"name": "id", "type_oid": 23, "nullable": False}])  # 23 = int4
+
+server.set_lazy_catalog(MyCatalog())   # replaces the eager register_* calls
+server.start(catalog_emulation=True)
+```
+
+You own the OIDs (stable + unique); `type_oid` is a `pg_type` OID. See
+[docs/catalog.md](docs/catalog.md) for the full contract and
+[`example/lazy_catalog.py`](example/lazy_catalog.py) for a runnable example;
+[Teleduck](teleduck/) uses this path against a live DuckDB connection.
+
 
 ---
 

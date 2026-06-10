@@ -78,6 +78,86 @@ for schema_name, table_name in list_tables_from_duckdb():
 server.start(catalog_emulation=True)
 ```
 
+## Lazy (callback-driven) catalog
+
+The `register_*` calls above take a **snapshot at startup**: if your underlying
+data changes (a table is created, dropped, or altered), the emulated catalog
+goes stale until you re-register.
+
+For a live source, install a **lazy catalog** instead. You supply one source
+object and Riffq pulls catalog metadata from it on *every* `pg_catalog` /
+`information_schema` scan, so the catalog always reflects the current state —
+tables created after startup included. Nothing is cached.
+
+```python
+server.set_lazy_catalog(source)   # instead of register_database/schema/table
+server.start(catalog_emulation=True)
+```
+
+The `source` object implements four methods. Each receives a `callback` and
+invokes it with a list of row dicts (mirroring the Rust `LazyCatalogSource`
+trait one method per catalog level):
+
+```python
+class MyCatalog:
+    def databases(self, callback):
+        # -> pg_database
+        callback([{"oid": 16384, "name": "appdb"}])           # "datdba"? optional
+
+    def schemas(self, database, callback):
+        # -> pg_namespace
+        callback([{"oid": 16385, "name": "public"}])          # "owner_oid"? optional
+
+    def relations(self, database, schema, callback):
+        # -> pg_class (+ pg_type rowtype)
+        callback([{
+            "oid": 20001, "reltype_oid": 30001, "name": "users",
+            "kind": "table",            # "table" | "view" | "materialized_view"
+            # all optional, default off / NULL:
+            "owner_oid": 10,            # -> pg_tables.tableowner (omit if no ownership)
+            "has_index": True,          # -> pg_tables.hasindexes
+            "has_rules": False, "has_triggers": False, "row_security": False,
+        }])
+
+    def columns(self, database, schema, relation, callback):
+        # -> pg_attribute (+ information_schema.columns)
+        callback([
+            {"name": "id",   "type_oid": 23, "nullable": False},  # 23 = int4
+            {"name": "name", "type_oid": 25, "nullable": True},   # 25 = text
+        ])
+
+server.set_lazy_catalog(MyCatalog())
+server.start(catalog_emulation=True)
+```
+
+### Rules of the contract
+
+- **You own the OIDs.** Riffq writes them through verbatim. They must be stable
+  across calls (so catalog joins like `pg_class.oid = pg_attribute.attrelid`
+  resolve) and unique among your objects. Keep them **above the built-in range**
+  so they don't collide with built-in rows on OID joins — use `16384`
+  (PostgreSQL's first normal object id) as a safe base, as the example and
+  Teleduck do. A common trick is `16384 + stable_hash(name)` (see the example
+  below).
+- **`type_oid` is a `pg_type` OID** you choose, e.g. `23` int4, `20` int8,
+  `25` text, `16` bool, `701` float8, `1700` numeric, `1082` date, `1114`
+  timestamp. This keeps Riffq independent of your engine's type system.
+- **Merged with built-ins.** Your rows are merged with the built-in system rows
+  (so `int4`, `pg_class`, etc. still resolve). A user object whose name collides
+  with a built-in **replaces** it; two of your objects with the same identity
+  (e.g. two tables of the same name in one schema) is an **error** surfaced to the
+  client.
+- **Errors propagate.** An exception raised in any source method is returned to
+  the SQL client as an error — it never fails silently.
+- **Opt-in & exclusive.** When a lazy source is set, the eager
+  `register_database`/`register_schema`/`register_table` calls are ignored.
+  Requires `start(catalog_emulation=True)`.
+
+A complete runnable example backed by an in-memory dict (no external engine) is
+in [`example/lazy_catalog.py`](https://github.com/ybrs/riffq/blob/main/example/lazy_catalog.py),
+and [Teleduck](https://github.com/ybrs/riffq/tree/main/teleduck) uses this path
+against a live DuckDB connection.
+
 ## Examples
 
 For a minimal end-to-end example that registers a database, schema, and table and asserts they appear via `pg_catalog`, see:
@@ -219,6 +299,16 @@ Each column is `{ name: {"type": <str>, "nullable": <bool>} }`.
 ```python
 RiffqServer.register_table(database_name: str, 
   schema_name: str, table_name: str, columns: list[dict]) -> None:
+```
+
+### Install a lazy (callback-driven) catalog source.
+
+Pull catalog metadata from `source` on every scan instead of snapshotting it.
+See [Lazy (callback-driven) catalog](#lazy-callback-driven-catalog) for the
+source object's contract. Mutually exclusive with the eager `register_*` calls.
+
+```python
+RiffqServer.set_lazy_catalog(source) -> None:
 ```
 
 

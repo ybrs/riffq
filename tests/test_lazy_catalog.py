@@ -135,5 +135,101 @@ class LazyCatalogTest(unittest.TestCase):
             )
 
 
+def _run_faulty_server(port: int, mode: str):
+    import riffq
+    from riffq.helpers import to_arrow
+
+    class FaultySource:
+        """databases/schemas are fine so the server is healthy; relations() is
+        broken in the way selected by `mode`, to exercise error propagation."""
+
+        def databases(self, callback):
+            callback([{"oid": 16384, "name": "appdb"}])
+
+        def schemas(self, database, callback):
+            if database == "appdb":
+                callback([{"oid": 16385, "name": "public"}])
+
+        def relations(self, database, schema, callback):
+            if mode == "raise":
+                raise ValueError("boom from source")
+            if mode == "missing_field":
+                # 'oid' is required; omit it.
+                callback([{"reltype_oid": 30001, "name": "broken", "kind": "table"}])
+            if mode == "bad_kind":
+                callback([{"oid": 20001, "reltype_oid": 30001, "name": "broken",
+                           "kind": "nonsense"}])
+
+        def columns(self, database, schema, relation, callback):
+            callback([])
+
+    def handle_query(sql, callback, **kwargs):
+        callback(to_arrow([{"name": "v", "type": "int"}], [[1]]))
+
+    server = riffq.Server(f"127.0.0.1:{port}")
+    server.set_lazy_catalog(FaultySource())
+    server.on_query(handle_query)
+    server.start(catalog_emulation=True)
+
+
+class LazyCatalogErrorPathTest(unittest.TestCase):
+    """The bridge must surface source errors to the SQL client, never silently
+    return an empty catalog."""
+
+    PORT_BASE = 55470
+    MODES = {"raise": 0, "missing_field": 1, "bad_kind": 2}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.procs = {}
+        for mode, off in cls.MODES.items():
+            port = cls.PORT_BASE + off
+            proc = multiprocessing.Process(
+                target=_run_faulty_server, args=(port, mode), daemon=True
+            )
+            proc.start()
+            cls.procs[mode] = (proc, port)
+            start = time.time()
+            while time.time() - start < 10:
+                with socket.socket() as sock:
+                    if sock.connect_ex(("127.0.0.1", port)) == 0:
+                        break
+                time.sleep(0.1)
+            else:
+                stop_server(proc)
+                raise RuntimeError(f"server for mode {mode} did not start")
+
+    @classmethod
+    def tearDownClass(cls):
+        for proc, _ in cls.procs.values():
+            stop_server(proc)
+
+    def _expect_error(self, mode, needle):
+        _, port = self.procs[mode]
+        conn = psycopg.connect(
+            f"postgresql://user@127.0.0.1:{port}/db", autocommit=True
+        )
+        try:
+            with conn.cursor() as cur:
+                with self.assertRaises(psycopg.Error) as ctx:
+                    cur.execute("SELECT relname FROM pg_catalog.pg_class")
+                    cur.fetchall()
+            self.assertIn(needle, str(ctx.exception).lower())
+        finally:
+            conn.close()
+
+    def test_exception_in_source_propagates(self):
+        # A Python exception in a source method becomes a query error.
+        self._expect_error("raise", "boom from source")
+
+    def test_missing_required_field_errors(self):
+        # A row missing the required 'oid' is a hard error, not a dropped row.
+        self._expect_error("missing_field", "oid")
+
+    def test_unknown_relation_kind_errors(self):
+        # An unrecognized 'kind' string is rejected.
+        self._expect_error("bad_kind", "kind")
+
+
 if __name__ == "__main__":
     unittest.main()

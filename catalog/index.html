@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<script>
+        const base_url = "https://riffq.github.io/riffq/"; /* for search plugin notably */
+    </script>
+    <script integrity="sha384-m6cZ+Whl1ci89lidlu8DH4C+sZLNOYBvImtjUIhUK+iaNffXhqtbYgBVuuPfRsa0" src="../js/dark.js"></script>
+
+
+    <meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+
+    
+
+
+<title>Catalog Emulation</title>
+
+
+
+
+
+
+
+
+
+<link rel="canonical" href="https://riffq.github.io/riffq/catalog/">
+
+
+<!-- Open Graph (Facebook, LinkedIn) -->
+
+<meta property="og:title" content="Catalog Emulation">
+
+
+
+
+
+<meta property="og:url" content="https://riffq.github.io/riffq/catalog/">
+
+
+
+
+
+
+<!-- Twitter Card -->
+
+<meta name="twitter:title" content="Catalog Emulation">
+
+
+
+
+
+
+<!-- JSON-LD Structured Data -->
+
+
+
+    <link href="../img/favicon.ico" rel="icon"/>
+
+    <link href="../css/base.css" rel="stylesheet"/>
+<link href="../css/geist.css" rel="stylesheet"/>
+
+    
+
+    <style>
+        :root {
+            --theme-accent: oklch(62.3% 0.214 259.815);
+        }
+    </style>
+    <link href="../assets/_mkdocstrings.css" rel="stylesheet"/>
+    <link href="../stylesheets/code-bg.css" rel="stylesheet"/>
+
+    
+
+    <script integrity="sha384-V2jkXRy811qODUbfkLlkVJYBbf4h6XHAEjcU6ReASBPrJvTrlYh4GrI4t6GCju6n" src="../js/callbacks.js"></script>
+
+    
+
+    
+
+    
+
+    
+    <script>
+    document.addEventListener("DOMContentLoaded", function () {
+        document.querySelectorAll("a.headerlink").forEach(function (link) {
+            link.addEventListener("click", function (e) {
+                e.preventDefault();
+
+                // Build the full URL with the anchor fragment
+                const url = window.location.origin + window.location.pathname + this.getAttribute("href");
+
+                navigator.clipboard.writeText(url).then(function () {
+                    // Optional: brief visual feedback
+                });
+            });
+        });
+    });
+</script>
+    
+
+    
+    
+</head>
+<body class="text-foreground group/body overscroll-none font-sans antialiased [--footer-height:calc(var(--spacing)*14)] [--header-height:calc(var(--spacing)*14)] xl:[--footer-height:calc(var(--spacing)*24)] theme-default">
+<div class="bg-background relative z-10 flex min-h-svh flex-col" id="inner-body">
+        <header class="bg-background sticky top-0 z-50 w-full" view-transition-name="header">
+    <div class="container-wrapper 3xl:fixed:px-0 px-6">
+        <div class="3xl:fixed:container flex h-(--header-height) items-center gap-2 **:data-[slot=separator]:!h-4">
+            <button id="menu-button" data-slot="popover-trigger" onclick="onMobileMenuButtonClick(event)"
+                class="group whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive hover:text-accent-foreground px-4 py-2 has-[&gt;svg]:px-3 extend-touch-target h-8 touch-manipulation items-center justify-start gap-2.5 !p-0 hover:bg-transparent focus-visible:bg-transparent focus-visible:ring-0 active:bg-transparent dark:hover:bg-transparent flex lg:hidden"
+                type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="radix-«Rmplb»"
+                data-state="closed">
+                <div class="relative flex h-8 w-4 items-center justify-center">
+                    <div class="relative size-4">
+                        <!-- 16px x 16px -->
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="0" x2="16" y1="5" y2="5"
+                                class="group-data-[state=open]:translate-y-[2.25px] group-data-[state=open]:-translate-x-[2.25px] group-data-[state=open]:rotate-45 transition-all duration-300 origin-center" />
+                            <line x1="0" x2="16" y1="11" y2="11"
+                                class="group-data-[state=open]:-translate-y-[2.25px] group-data-[state=open]:-translate-x-[2.25px] group-data-[state=open]:-rotate-45 transition-all duration-300 origin-center" />
+                        </svg>
+                    </div>
+
+                    <span class="sr-only">Toggle Menu</span>
+                </div>
+                <span class="flex h-8 items-center text-lg leading-none font-medium">Menu</span>
+            </button>
+            <a data-slot="button"
+                class="items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-5 shrink-0 [&_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50 hidden h-8 lg:flex"
+                href="https://riffq.github.io/riffq/">
+                <span class="size-8 flex flex-row justify-center items-center">
+                    
+
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256"
+    class="size-5">
+    <rect width="256" height="256" fill="none"></rect>
+    <line x1="208" y1="128" x2="128" y2="208" fill="none" stroke="currentColor" stroke-linecap="round"
+        stroke-linejoin="round" stroke-width="32"></line>
+    <line x1="192" y1="40" x2="40" y2="192" fill="none" stroke="currentColor" stroke-linecap="round"
+        stroke-linejoin="round" stroke-width="32"></line>
+</svg>
+
+
+                </span>
+
+                
+                <h1 class="pr-2">Riffq Docs</h1>
+                
+            </a>
+            
+            <div class="ml-auto flex items-center gap-2 md:flex-1 md:justify-end">
+                <div class="hidden w-full flex-1 md:flex md:w-auto md:flex-none">
+                    <div class="hidden w-full flex-1 md:flex md:w-auto md:flex-none">
+    <button onclick="onSearchBarClick(event)" data-slot="dialog-trigger" data-variant="outline" data-size="default" class="inline-flex shrink-0 items-center gap-2 text-sm whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&amp;_svg]:pointer-events-none [&amp;_svg]:shrink-0 [&amp;_svg:not([class*='size-'])]:size-4 border bg-background hover:text-accent-foreground dark:border-input dark:hover:bg-input/50 px-4 py-2 has-[&gt;svg]:px-3 relative h-8 w-full justify-start rounded-lg pl-3 font-normal text-foreground shadow-none hover:bg-muted/50 sm:pr-12 md:w-48 lg:w-56 xl:w-64 dark:bg-card" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="radix-_r_1_" data-state="closed">
+        <span class="hidden lg:inline-flex">Search documentation...</span>
+        <span class="inline-flex lg:hidden">Search...</span>
+    </button>
+</div>
+<dialog id="search-dialog" onclick="onSearchDialogClick(event)"
+    class="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-background rounded-lg shadow-lg border overflow-hidden p-0">
+    <div class="w-lg gap-4">
+        <div class="flex h-full w-full flex-col overflow-hidden rounded-md bg-popover text-popover-foreground">
+            <div data-slot="command-input-wrapper" class="flex h-9 items-center gap-2 border-b px-3"><svg
+                    xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                    class="lucide lucide-search size-4 shrink-0 opacity-50">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <path d="m21 21-4.3-4.3"></path>
+                </svg>
+                <input data-slot="command-input"
+                    class="placeholder:text-muted-foreground flex h-10 w-full rounded-md bg-transparent py-3 text-sm outline-hidden disabled:cursor-not-allowed disabled:opacity-50"
+                    placeholder="Search documentation..." cmdk-input="" autocomplete="off" autocorrect="off"
+                    spellcheck="false" aria-autocomplete="list" role="combobox" aria-expanded="true"
+                    aria-controls="radix-«r1t6»" aria-labelledby="radix-«r1t7»" id="radix-«r1t8»" type="text" value=""
+                    aria-activedescendant="radix-«r1th»" oninput="onInputHandler(event)">
+            </div>
+        </div>
+        <div id="mkdocs-search-results">
+            <!-- search results go there -->
+        </div>
+    </div>
+</dialog>
+<script>
+    document.removeEventListener("keydown", searchShortcutHandler);
+    document.addEventListener("keydown", searchShortcutHandler);
+</script>
+                </div>
+                
+                <div data-orientation="vertical" role="none" data-slot="separator"
+                    class="bg-border shrink-0 data-[orientation=horizontal]:h-px data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-px 3xl:flex hidden">
+                </div>
+                <button data-slot="button"
+                    class="items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50 size-8 3xl:flex hidden"
+                    title="Toggle layout" onclick="toggleLayout(event)">
+                    <span class="sr-only">Toggle layout</span>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        class="lucide lucide-gallery-horizontal">
+                        <path d="M2 3v18"></path>
+                        <rect width="12" height="18" x="6" y="3" rx="2"></rect>
+                        <path d="M22 3v18"></path>
+                    </svg>
+                </button>
+                <div data-orientation="vertical" role="none" data-slot="separator"
+                    class="bg-border shrink-0 data-[orientation=horizontal]:h-px data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-px">
+                </div>
+                <button data-slot="button"
+                    class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50 group/toggle extend-touch-target size-8"
+                    title="Toggle theme" onclick="onThemeSwitch(event)">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                        class="size-4.5">
+                        <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+                        <path d="M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"></path>
+                        <path d="M12 3l0 18"></path>
+                        <path d="M12 9l4.65 -4.65"></path>
+                        <path d="M12 14.3l7.37 -7.37"></path>
+                        <path d="M12 19.6l8.85 -8.85"></path>
+                    </svg>
+                    <span class="sr-only">Toggle theme</span>
+                </button>
+            </div>
+        </div>
+    </div>
+</header>
+        <main class="flex flex-1 flex-col">
+<div class="container-wrapper flex flex-1 flex-col px-2">
+<div class="group/sidebar-wrapper has-data-[variant=inset]:bg-sidebar flex w-full 3xl:fixed:container 3xl:fixed:px-3 min-h-min flex-1 items-start px-0 [--sidebar-width:220px] [--top-spacing:0] lg:grid lg:grid-cols-[var(--sidebar-width)_minmax(0,1fr)] lg:[--sidebar-width:240px] lg:[--top-spacing:calc(var(--spacing)*4)]" data-slot="sidebar-wrapper" style="--sidebar-width:calc(var(--spacing) * 72);--sidebar-width-icon:3rem;">
+<div class="w-(--sidebar-width) flex-col text-sidebar-foreground sticky top-[calc(var(--header-height)+0.6rem)] z-30 hidden h-[calc(100svh-10rem)] overscroll-none bg-transparent [--sidebar-menu-width:--spacing(56)] lg:flex" data-slot="sidebar">
+<div class="h-9"></div>
+<div class="absolute top-8 z-10 h-8 w-(--sidebar-menu-width) shrink-0 bg-gradient-to-b from-background via-background/80 to-background/50 blur-xs">
+</div>
+<div class="absolute top-12 right-2 bottom-0 hidden h-full w-px bg-gradient-to-b from-transparent via-border to-transparent lg:flex">
+</div>
+<div class="flex min-h-0 flex-1 flex-col gap-2 overflow-auto group-data-[collapsible=icon]:overflow-hidden mx-auto no-scrollbar w-(--sidebar-menu-width) overflow-x-hidden px-2" data-sidebar="content" data-slot="sidebar-content" view-transition-name="sidebar">
+                            
+
+
+
+
+
+
+
+
+
+
+
+<div data-slot="sidebar-group" data-sidebar="group" class="relative flex w-full min-w-0 flex-col p-2 pt-6">
+    <div data-slot="sidebar-group-content" data-sidebar="group-content" class="w-full text-sm">
+        <ul data-slot="sidebar-menu" data-sidebar="menu" class="flex w-full min-w-0 flex-col gap-0.5">
+            
+            
+            
+            <li data-slot="sidebar-menu-item" data-sidebar="menu-item" class="group/menu-item relative">
+    <a data-slot="sidebar-menu-button" data-active="false" data-sidebar="menu-button"
+        data-size="default" href=".."
+        class="peer/menu-button flex items-center gap-2 rounded-md p-2 text-left ring-sidebar-ring outline-hidden transition-[width,height,padding] group-has-data-[sidebar=menu-action]/menu-item:pr-8 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-accent data-[state=open]:hover:text-sidebar-accent-foreground [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground relative h-[30px] w-fit overflow-visible border border-transparent text-[0.8rem] font-medium after:absolute after:inset-x-0 after:-inset-y-1 after:z-0 after:rounded-md data-[active=true]:border-accent data-[active=true]:bg-accent 3xl:fixed:w-full 3xl:fixed:max-w-48">
+
+        
+        Home
+        
+
+        
+
+        
+
+        
+    </a>
+</li>
+            
+            
+            
+            
+            <li data-slot="sidebar-menu-item" data-sidebar="menu-item" class="group/menu-item relative">
+    <a data-slot="sidebar-menu-button" data-active="false" data-sidebar="menu-button"
+        data-size="default" href="../getting-started/"
+        class="peer/menu-button flex items-center gap-2 rounded-md p-2 text-left ring-sidebar-ring outline-hidden transition-[width,height,padding] group-has-data-[sidebar=menu-action]/menu-item:pr-8 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-accent data-[state=open]:hover:text-sidebar-accent-foreground [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground relative h-[30px] w-fit overflow-visible border border-transparent text-[0.8rem] font-medium after:absolute after:inset-x-0 after:-inset-y-1 after:z-0 after:rounded-md data-[active=true]:border-accent data-[active=true]:bg-accent 3xl:fixed:w-full 3xl:fixed:max-w-48">
+
+        
+        Getting Started
+        
+
+        
+
+        
+
+        
+    </a>
+</li>
+            
+            
+            
+            
+            <li data-slot="sidebar-menu-item" data-sidebar="menu-item" class="group/menu-item relative">
+    <a data-slot="sidebar-menu-button" data-active="false" data-sidebar="menu-button"
+        data-size="default" href="../api-reference/"
+        class="peer/menu-button flex items-center gap-2 rounded-md p-2 text-left ring-sidebar-ring outline-hidden transition-[width,height,padding] group-has-data-[sidebar=menu-action]/menu-item:pr-8 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-accent data-[state=open]:hover:text-sidebar-accent-foreground [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground relative h-[30px] w-fit overflow-visible border border-transparent text-[0.8rem] font-medium after:absolute after:inset-x-0 after:-inset-y-1 after:z-0 after:rounded-md data-[active=true]:border-accent data-[active=true]:bg-accent 3xl:fixed:w-full 3xl:fixed:max-w-48">
+
+        
+        API Reference
+        
+
+        
+
+        
+
+        
+    </a>
+</li>
+            
+            
+            
+            
+            <li data-slot="sidebar-menu-item" data-sidebar="menu-item" class="group/menu-item relative">
+    <a data-slot="sidebar-menu-button" data-active="true" data-sidebar="menu-button"
+        data-size="default" href="./"
+        class="peer/menu-button flex items-center gap-2 rounded-md p-2 text-left ring-sidebar-ring outline-hidden transition-[width,height,padding] group-has-data-[sidebar=menu-action]/menu-item:pr-8 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-accent data-[state=open]:hover:text-sidebar-accent-foreground [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground relative h-[30px] w-fit overflow-visible border border-transparent text-[0.8rem] font-medium after:absolute after:inset-x-0 after:-inset-y-1 after:z-0 after:rounded-md data-[active=true]:border-accent data-[active=true]:bg-accent 3xl:fixed:w-full 3xl:fixed:max-w-48">
+
+        
+        Catalog Emulation
+        
+
+        
+
+        
+
+        
+    </a>
+</li>
+            
+            
+            
+            
+            <li data-slot="sidebar-menu-item" data-sidebar="menu-item" class="group/menu-item relative">
+    <a data-slot="sidebar-menu-button" data-active="false" data-sidebar="menu-button"
+        data-size="default" href="../faq/"
+        class="peer/menu-button flex items-center gap-2 rounded-md p-2 text-left ring-sidebar-ring outline-hidden transition-[width,height,padding] group-has-data-[sidebar=menu-action]/menu-item:pr-8 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-accent data-[state=open]:hover:text-sidebar-accent-foreground [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground relative h-[30px] w-fit overflow-visible border border-transparent text-[0.8rem] font-medium after:absolute after:inset-x-0 after:-inset-y-1 after:z-0 after:rounded-md data-[active=true]:border-accent data-[active=true]:bg-accent 3xl:fixed:w-full 3xl:fixed:max-w-48">
+
+        
+        FAQ
+        
+
+        
+
+        
+
+        
+    </a>
+</li>
+            
+            
+            
+            
+            <li data-slot="sidebar-menu-item" data-sidebar="menu-item" class="group/menu-item relative">
+    <a data-slot="sidebar-menu-button" data-active="false" data-sidebar="menu-button"
+        data-size="default" href="../changelog/"
+        class="peer/menu-button flex items-center gap-2 rounded-md p-2 text-left ring-sidebar-ring outline-hidden transition-[width,height,padding] group-has-data-[sidebar=menu-action]/menu-item:pr-8 group-data-[collapsible=icon]:size-8! group-data-[collapsible=icon]:p-2! focus-visible:ring-2 active:bg-sidebar-accent active:text-sidebar-accent-foreground disabled:pointer-events-none disabled:opacity-50 aria-disabled:pointer-events-none aria-disabled:opacity-50 data-[active=true]:font-medium data-[active=true]:text-sidebar-accent-foreground data-[state=open]:hover:bg-sidebar-accent data-[state=open]:hover:text-sidebar-accent-foreground [&>span:last-child]:truncate [&>svg]:size-4 [&>svg]:shrink-0 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground relative h-[30px] w-fit overflow-visible border border-transparent text-[0.8rem] font-medium after:absolute after:inset-x-0 after:-inset-y-1 after:z-0 after:rounded-md data-[active=true]:border-accent data-[active=true]:bg-accent 3xl:fixed:w-full 3xl:fixed:max-w-48">
+
+        
+        Changelog
+        
+
+        
+
+        
+
+        
+    </a>
+</li>
+            
+            
+        </ul>
+    </div>
+</div>
+
+
+
+
+
+
+<div
+    class="sticky -bottom-1 z-10 h-16 shrink-0 bg-gradient-to-t from-background via-background/80 to-background/50 blur-xs">
+</div>
+                        </div>
+</div>
+<div class="h-full w-full">
+<div class="flex items-stretch text-[1.05rem] sm:text-[15px] xl:w-full" data-slot="docs">
+<div class="flex min-w-0 flex-1 flex-col">
+<div class="h-(--top-spacing) shrink-0"></div>
+                                <article class="w-full" view-transition-name="page">
+  <div class="flex flex-col gap-2">
+    <div class="flex flex-col gap-2">
+      <div id="page-header" class="flex items-start justify-between">
+        <h1 class="scroll-m-20 text-4xl font-semibold tracking-tight sm:text-3xl xl:text-4xl">
+          Catalog Emulation
+        </h1>
+
+        <div class="flex items-center gap-2 pt-1.5">
+          <button
+    onclick="fetch(`https://riffq.github.io/riffq/catalog.md`).then((r) => r.blob()).then((blob) => navigator.clipboard.write([new ClipboardItem({ 'text/plain': blob })]))"
+    data-slot="button" class="secondary cursor-pointer">
+    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tabler-icon tabler-icon-copy ">
+        <path
+            d="M7 7m0 2.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667z">
+        </path>
+        <path d="M4.012 16.737a2.005 2.005 0 0 1 -1.012 -1.737v-10c0 -1.1 .9 -2 2 -2h10c.75 0 1.158 .385 1.5 1"></path>
+    </svg>
+    <span class="max-md:hidden">Copy Page</span>
+</button>
+          
+          <a data-slot="button" id="previous-button"
+            class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive bg-secondary text-secondary-foreground hover:bg-secondary/80 extend-touch-target size-8 shadow-none md:size-7"
+            href="../api-reference/">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              class="tabler-icon tabler-icon-arrow-left">
+              <path d="M5 12l14 0"></path>
+              <path d="M5 12l6 6"></path>
+              <path d="M5 12l6 -6"></path>
+            </svg>
+            <span class="sr-only">Previous</span>
+          </a>
+          
+          
+          <a data-slot="button" id="next-button"
+            class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive bg-secondary text-secondary-foreground hover:bg-secondary/80 extend-touch-target size-8 shadow-none md:size-7"
+            href="../faq/">
+            <span class="sr-only">Next</span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              class="tabler-icon tabler-icon-arrow-right">
+              <path d="M5 12l14 0"></path>
+              <path d="M13 18l6 -6"></path>
+              <path d="M13 6l6 6"></path>
+            </svg>
+          </a>
+          
+        </div>
+      </div>
+      
+    </div>
+    <div class="flex justify-end items-center">
+      
+      
+    </div>
+  </div>
+  <div class="typography w-full flex-1 *:data-[slot=alert]:first:mt-0">
+    <p>Riffq can emulate PostgreSQL system catalogs (pg_catalog, information_schema) so client tools can enumerate databases, schemas, tables, and columns.</p>
+<p>At a high level:
+- Define metadata with <code>register_database</code>, <code>register_schema</code>, <code>register_table</code>.
+- Start your server with <code>catalog_emulation=True</code>.</p>
+<p>Behind the scenes, Riffq uses a Rust helper crate <a href="https://github.com/ybrs/pg_catalog">pg_catalog_rs</a> to answer catalog queries efficiently.</p>
+<h2 id="quick-start">Quick Start</h2>
+<div class="language-python highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #008000; font-weight: bold">import</span><span style="color: #BBB"> </span><span style="color: #00F; font-weight: bold">riffq</span>
+
+<span style="color: #008000; font-weight: bold">class</span><span style="color: #BBB"> </span><span style="color: #00F; font-weight: bold">Connection</span>(riffq<span style="color: #666">.</span>BaseConnection):
+    <span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">handle_query</span>(<span style="color: #008000">self</span>, sql, callback<span style="color: #666">=</span><span style="color: #008000">callable</span>, <span style="color: #666">**</span>kwargs):
+        <span style="color: #3D7B7B; font-style: italic"># return some rows or a command tag here</span>
+        <span style="color: #666">...</span>
+
+server <span style="color: #666">=</span> riffq<span style="color: #666">.</span>RiffqServer(<span style="color: #BA2121">&quot;127.0.0.1:5433&quot;</span>, connection_cls<span style="color: #666">=</span>Connection)
+
+<span style="color: #3D7B7B; font-style: italic"># 1) Register a database</span>
+server<span style="color: #666">.</span>register_database(<span style="color: #BA2121">&quot;mydb&quot;</span>)
+
+<span style="color: #3D7B7B; font-style: italic"># 2) Register a schema within the database</span>
+server<span style="color: #666">.</span>register_schema(<span style="color: #BA2121">&quot;mydb&quot;</span>, <span style="color: #BA2121">&quot;public&quot;</span>)
+
+<span style="color: #3D7B7B; font-style: italic"># 3) Register a table and its columns</span>
+server<span style="color: #666">.</span>register_table(
+    <span style="color: #BA2121">&quot;mydb&quot;</span>,
+    <span style="color: #BA2121">&quot;public&quot;</span>,
+    <span style="color: #BA2121">&quot;users&quot;</span>,
+    [
+        {<span style="color: #BA2121">&quot;id&quot;</span>: {<span style="color: #BA2121">&quot;type&quot;</span>: <span style="color: #BA2121">&quot;int&quot;</span>, <span style="color: #BA2121">&quot;nullable&quot;</span>: <span style="color: #008000; font-weight: bold">False</span>}},
+        {<span style="color: #BA2121">&quot;name&quot;</span>: {<span style="color: #BA2121">&quot;type&quot;</span>: <span style="color: #BA2121">&quot;string&quot;</span>, <span style="color: #BA2121">&quot;nullable&quot;</span>: <span style="color: #008000; font-weight: bold">True</span>}},
+        {<span style="color: #BA2121">&quot;created_at&quot;</span>: {<span style="color: #BA2121">&quot;type&quot;</span>: <span style="color: #BA2121">&quot;datetime&quot;</span>, <span style="color: #BA2121">&quot;nullable&quot;</span>: <span style="color: #008000; font-weight: bold">False</span>}},
+    ],
+)
+
+server<span style="color: #666">.</span>start(catalog_emulation<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">True</span>)
+</code></pre></div>
+<h2 id="column-types">Column Types</h2>
+<p>Supported column <code>type</code> strings align with the Arrow types used by Riffq:</p>
+<ul>
+<li><code>int</code>, <code>float</code>, <code>bool</code>, <code>string</code>/<code>str</code>, <code>date</code>, <code>datetime</code></li>
+</ul>
+<p>These types inform clients about your table shape; your actual query results
+can be produced by any engine (DuckDB, Polars, Pandas, etc.) as Arrow.</p>
+<h2 id="discovering-from-an-engine">Discovering From an Engine</h2>
+<p>For real data sources, enumerate schemas/tables/columns dynamically and
+register them. </p>
+<p>For example with DuckDB (pseudo-code):</p>
+<div class="language-python highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">map_type</span>(duckdb_type: <span style="color: #008000">str</span>) <span style="color: #666">-&gt;</span> <span style="color: #008000">str</span>:
+    t <span style="color: #666">=</span> duckdb_type<span style="color: #666">.</span>upper()
+    <span style="color: #008000; font-weight: bold">if</span> <span style="color: #BA2121">&quot;INT&quot;</span> <span style="color: #A2F; font-weight: bold">in</span> t: <span style="color: #008000; font-weight: bold">return</span> <span style="color: #BA2121">&quot;int&quot;</span>
+    <span style="color: #008000; font-weight: bold">if</span> <span style="color: #008000">any</span>(x <span style="color: #A2F; font-weight: bold">in</span> t <span style="color: #008000; font-weight: bold">for</span> x <span style="color: #A2F; font-weight: bold">in</span> [<span style="color: #BA2121">&quot;DOUBLE&quot;</span>, <span style="color: #BA2121">&quot;DECIMAL&quot;</span>, <span style="color: #BA2121">&quot;REAL&quot;</span>, <span style="color: #BA2121">&quot;FLOAT&quot;</span>]): <span style="color: #008000; font-weight: bold">return</span> <span style="color: #BA2121">&quot;float&quot;</span>
+    <span style="color: #008000; font-weight: bold">if</span> <span style="color: #BA2121">&quot;BOOL&quot;</span> <span style="color: #A2F; font-weight: bold">in</span> t: <span style="color: #008000; font-weight: bold">return</span> <span style="color: #BA2121">&quot;bool&quot;</span>
+    <span style="color: #008000; font-weight: bold">if</span> t <span style="color: #666">==</span> <span style="color: #BA2121">&quot;DATE&quot;</span>: <span style="color: #008000; font-weight: bold">return</span> <span style="color: #BA2121">&quot;date&quot;</span>
+    <span style="color: #008000; font-weight: bold">if</span> <span style="color: #BA2121">&quot;TIMESTAMP&quot;</span> <span style="color: #A2F; font-weight: bold">in</span> t <span style="color: #A2F; font-weight: bold">or</span> <span style="color: #BA2121">&quot;DATETIME&quot;</span> <span style="color: #A2F; font-weight: bold">in</span> t: <span style="color: #008000; font-weight: bold">return</span> <span style="color: #BA2121">&quot;datetime&quot;</span>
+    <span style="color: #008000; font-weight: bold">return</span> <span style="color: #BA2121">&quot;string&quot;</span>
+
+server<span style="color: #666">.</span>register_database(<span style="color: #BA2121">&quot;duckdb&quot;</span>)
+<span style="color: #008000; font-weight: bold">for</span> schema_name, table_name <span style="color: #A2F; font-weight: bold">in</span> list_tables_from_duckdb():
+    server<span style="color: #666">.</span>register_schema(<span style="color: #BA2121">&quot;duckdb&quot;</span>, schema_name)
+    columns <span style="color: #666">=</span> []
+    <span style="color: #008000; font-weight: bold">for</span> col_name, dt, is_nullable <span style="color: #A2F; font-weight: bold">in</span> list_columns(schema_name, table_name):
+        columns<span style="color: #666">.</span>append({col_name: {<span style="color: #BA2121">&quot;type&quot;</span>: map_type(dt), <span style="color: #BA2121">&quot;nullable&quot;</span>: is_nullable}})
+    server<span style="color: #666">.</span>register_table(<span style="color: #BA2121">&quot;duckdb&quot;</span>, schema_name, table_name, columns)
+
+server<span style="color: #666">.</span>start(catalog_emulation<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">True</span>)
+</code></pre></div>
+<h2 id="lazy-callback-driven-catalog">Lazy (callback-driven) catalog</h2>
+<p>The <code>register_*</code> calls above take a <strong>snapshot at startup</strong>: if your underlying
+data changes (a table is created, dropped, or altered), the emulated catalog
+goes stale until you re-register.</p>
+<p>For a live source, install a <strong>lazy catalog</strong> instead. You supply one source
+object and Riffq pulls catalog metadata from it on <em>every</em> <code>pg_catalog</code> /
+<code>information_schema</code> scan, so the catalog always reflects the current state —
+tables created after startup included. Nothing is cached.</p>
+<div class="language-python highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>server<span style="color: #666">.</span>set_lazy_catalog(source)   <span style="color: #3D7B7B; font-style: italic"># instead of register_database/schema/table</span>
+server<span style="color: #666">.</span>start(catalog_emulation<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">True</span>)
+</code></pre></div>
+<p>The <code>source</code> object implements four methods. Each receives a <code>callback</code> and
+invokes it with a list of row dicts (mirroring the Rust <code>LazyCatalogSource</code>
+trait one method per catalog level):</p>
+<div class="language-python highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #008000; font-weight: bold">class</span><span style="color: #BBB"> </span><span style="color: #00F; font-weight: bold">MyCatalog</span>:
+    <span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">databases</span>(<span style="color: #008000">self</span>, callback):
+        <span style="color: #3D7B7B; font-style: italic"># -&gt; pg_database</span>
+        callback([{<span style="color: #BA2121">&quot;oid&quot;</span>: <span style="color: #666">16384</span>, <span style="color: #BA2121">&quot;name&quot;</span>: <span style="color: #BA2121">&quot;appdb&quot;</span>}])           <span style="color: #3D7B7B; font-style: italic"># &quot;datdba&quot;? optional</span>
+
+    <span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">schemas</span>(<span style="color: #008000">self</span>, database, callback):
+        <span style="color: #3D7B7B; font-style: italic"># -&gt; pg_namespace</span>
+        callback([{<span style="color: #BA2121">&quot;oid&quot;</span>: <span style="color: #666">16385</span>, <span style="color: #BA2121">&quot;name&quot;</span>: <span style="color: #BA2121">&quot;public&quot;</span>}])          <span style="color: #3D7B7B; font-style: italic"># &quot;owner_oid&quot;? optional</span>
+
+    <span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">relations</span>(<span style="color: #008000">self</span>, database, schema, callback):
+        <span style="color: #3D7B7B; font-style: italic"># -&gt; pg_class (+ pg_type rowtype)</span>
+        callback([{
+            <span style="color: #BA2121">&quot;oid&quot;</span>: <span style="color: #666">20001</span>, <span style="color: #BA2121">&quot;reltype_oid&quot;</span>: <span style="color: #666">30001</span>, <span style="color: #BA2121">&quot;name&quot;</span>: <span style="color: #BA2121">&quot;users&quot;</span>,
+            <span style="color: #BA2121">&quot;kind&quot;</span>: <span style="color: #BA2121">&quot;table&quot;</span>,            <span style="color: #3D7B7B; font-style: italic"># &quot;table&quot; | &quot;view&quot; | &quot;materialized_view&quot;</span>
+            <span style="color: #3D7B7B; font-style: italic"># all optional, default off / NULL:</span>
+            <span style="color: #BA2121">&quot;owner_oid&quot;</span>: <span style="color: #666">10</span>,            <span style="color: #3D7B7B; font-style: italic"># -&gt; pg_tables.tableowner (omit if no ownership)</span>
+            <span style="color: #BA2121">&quot;has_index&quot;</span>: <span style="color: #008000; font-weight: bold">True</span>,          <span style="color: #3D7B7B; font-style: italic"># -&gt; pg_tables.hasindexes</span>
+            <span style="color: #BA2121">&quot;has_rules&quot;</span>: <span style="color: #008000; font-weight: bold">False</span>, <span style="color: #BA2121">&quot;has_triggers&quot;</span>: <span style="color: #008000; font-weight: bold">False</span>, <span style="color: #BA2121">&quot;row_security&quot;</span>: <span style="color: #008000; font-weight: bold">False</span>,
+        }])
+
+    <span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">columns</span>(<span style="color: #008000">self</span>, database, schema, relation, callback):
+        <span style="color: #3D7B7B; font-style: italic"># -&gt; pg_attribute (+ information_schema.columns)</span>
+        callback([
+            {<span style="color: #BA2121">&quot;name&quot;</span>: <span style="color: #BA2121">&quot;id&quot;</span>,   <span style="color: #BA2121">&quot;type_oid&quot;</span>: <span style="color: #666">23</span>, <span style="color: #BA2121">&quot;nullable&quot;</span>: <span style="color: #008000; font-weight: bold">False</span>},  <span style="color: #3D7B7B; font-style: italic"># 23 = int4</span>
+            {<span style="color: #BA2121">&quot;name&quot;</span>: <span style="color: #BA2121">&quot;name&quot;</span>, <span style="color: #BA2121">&quot;type_oid&quot;</span>: <span style="color: #666">25</span>, <span style="color: #BA2121">&quot;nullable&quot;</span>: <span style="color: #008000; font-weight: bold">True</span>},   <span style="color: #3D7B7B; font-style: italic"># 25 = text</span>
+        ])
+
+server<span style="color: #666">.</span>set_lazy_catalog(MyCatalog())
+server<span style="color: #666">.</span>start(catalog_emulation<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">True</span>)
+</code></pre></div>
+<h3 id="rules-of-the-contract">Rules of the contract</h3>
+<ul>
+<li><strong>You own the OIDs.</strong> Riffq writes them through verbatim. They must be stable
+  across calls (so catalog joins like <code>pg_class.oid = pg_attribute.attrelid</code>
+  resolve) and unique among your objects. Keep them <strong>above the built-in range</strong>
+  so they don't collide with built-in rows on OID joins — use <code>16384</code>
+  (PostgreSQL's first normal object id) as a safe base, as the example and
+  Teleduck do. A common trick is <code>16384 + stable_hash(name)</code> (see the example
+  below).</li>
+<li><strong><code>type_oid</code> is a <code>pg_type</code> OID</strong> you choose, e.g. <code>23</code> int4, <code>20</code> int8,
+  <code>25</code> text, <code>16</code> bool, <code>701</code> float8, <code>1700</code> numeric, <code>1082</code> date, <code>1114</code>
+  timestamp. This keeps Riffq independent of your engine's type system.</li>
+<li><strong>Merged with built-ins.</strong> Your rows are merged with the built-in system rows
+  (so <code>int4</code>, <code>pg_class</code>, etc. still resolve). A user object whose name collides
+  with a built-in <strong>replaces</strong> it; two of your objects with the same identity
+  (e.g. two tables of the same name in one schema) is an <strong>error</strong> surfaced to the
+  client.</li>
+<li><strong>Errors propagate.</strong> An exception raised in any source method is returned to
+  the SQL client as an error — it never fails silently.</li>
+<li><strong>Opt-in &amp; exclusive.</strong> When a lazy source is set, the eager
+  <code>register_database</code>/<code>register_schema</code>/<code>register_table</code> calls are ignored.
+  Requires <code>start(catalog_emulation=True)</code>.</li>
+</ul>
+<p>A complete runnable example backed by an in-memory dict (no external engine) is
+in <a href="https://github.com/ybrs/riffq/blob/main/example/lazy_catalog.py"><code>example/lazy_catalog.py</code></a>,
+and <a href="https://github.com/ybrs/riffq/tree/main/teleduck">Teleduck</a> uses this path
+against a live DuckDB connection.</p>
+<h2 id="examples">Examples</h2>
+<p>For a minimal end-to-end example that registers a database, schema, and table and asserts they appear via <code>pg_catalog</code>, see:</p>
+<ul>
+<li><a href="https://github.com/ybrs/riffq/blob/main/tests/test_register_catalog.py">tests/test_register_catalog.py</a></li>
+</ul>
+<div class="language-python highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code><span style="color: #008000; font-weight: bold">def</span><span style="color: #BBB"> </span><span style="color: #00F">main</span>():
+    server <span style="color: #666">=</span> riffq<span style="color: #666">.</span>RiffqServer(<span style="color: #BA2121">&quot;127.0.0.1:5444&quot;</span>, connection_cls<span style="color: #666">=</span>Connection)
+
+    <span style="color: #3D7B7B; font-style: italic"># Register catalog: logical databases redis0..redis2 (limited for illustration).</span>
+    <span style="color: #3D7B7B; font-style: italic"># Under each, register schema &quot;public&quot; and expose each Redis hash key as a</span>
+    <span style="color: #3D7B7B; font-style: italic"># table with (key,value). Increase the range below in real deployments.</span>
+    <span style="color: #3D7B7B; font-style: italic"># schema &quot;public&quot; and expose each Redis hash key as a table with (key,value).</span>
+
+    <span style="color: #008000; font-weight: bold">for</span> db_index <span style="color: #A2F; font-weight: bold">in</span> <span style="color: #008000">range</span>(<span style="color: #666">3</span>):
+        db_name <span style="color: #666">=</span> <span style="color: #BA2121">f&quot;redis</span><span style="color: #A45A77; font-weight: bold">{</span>db_index<span style="color: #A45A77; font-weight: bold">}</span><span style="color: #BA2121">&quot;</span>
+
+        r <span style="color: #666">=</span> redis<span style="color: #666">.</span>Redis(host<span style="color: #666">=</span><span style="color: #BA2121">&quot;localhost&quot;</span>, port<span style="color: #666">=6379</span>, 
+          db<span style="color: #666">=</span>db_index, password<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">None</span>, decode_responses<span style="color: #666">=</span><span style="color: #008000; font-weight: bold">True</span>)
+        server<span style="color: #666">.</span>register_database(db_name)
+        server<span style="color: #666">.</span>register_schema(db_name, <span style="color: #BA2121">&quot;public&quot;</span>)
+        <span style="color: #3D7B7B; font-style: italic"># Discover only hash keys. Uses SCAN TYPE hash (server-side filter)</span>
+        <span style="color: #3D7B7B; font-style: italic"># so we don&#39;t issue a TYPE per key. Still a best-effort scan.</span>
+        <span style="color: #008000; font-weight: bold">for</span> k <span style="color: #A2F; font-weight: bold">in</span> r<span style="color: #666">.</span>scan_iter(match<span style="color: #666">=</span><span style="color: #BA2121">&quot;*&quot;</span>, _type<span style="color: #666">=</span><span style="color: #BA2121">&quot;hash&quot;</span>):
+          server<span style="color: #666">.</span>register_table(
+              db_name,
+              <span style="color: #BA2121">&quot;public&quot;</span>,
+              <span style="color: #008000">str</span>(k),
+              [
+                  {<span style="color: #BA2121">&quot;key&quot;</span>: {<span style="color: #BA2121">&quot;type&quot;</span>: <span style="color: #BA2121">&quot;string&quot;</span>, <span style="color: #BA2121">&quot;nullable&quot;</span>: <span style="color: #008000; font-weight: bold">False</span>}},
+                  {<span style="color: #BA2121">&quot;value&quot;</span>: {<span style="color: #BA2121">&quot;type&quot;</span>: <span style="color: #BA2121">&quot;string&quot;</span>, <span style="color: #BA2121">&quot;nullable&quot;</span>: <span style="color: #008000; font-weight: bold">True</span>}},
+              ],
+          )
+</code></pre></div>
+<p>When you start the server and connect with psql you can see the tables</p>
+<div class="language-text highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>user=&gt; \l
+                                List of databases
+   Name    |  Owner   | Encoding |   Collate   |    Ctype    | Access privileges
+-----------+----------+----------+-------------+-------------+-------------------
+ postgres  | postgres | UTF8     | nl_NL.UTF-8 | nl_NL.UTF-8 |
+ redis0    | postgres | UTF8     | C           | C           | 
+ redis1    | postgres | UTF8     | C           | C           | 
+ redis2    | postgres | UTF8     | C           | C           | 
+ template0 | postgres | UTF8     | nl_NL.UTF-8 | nl_NL.UTF-8 | 
+ template1 | postgres | UTF8     | nl_NL.UTF-8 | nl_NL.UTF-8 | 
+(6 rows)
+
+user=&gt; \c redis0
+Password:
+psql (14.17 (Homebrew), server 17.4.0)
+WARNING: psql major version 14, server major version 17.
+         Some psql features might not work.
+You are now connected to database &quot;redis0&quot; as user &quot;user&quot;.
+redis0=&gt; \dt
+         List of relations
+ Schema |  Name  | Type  |  Owner
+--------+--------+-------+----------
+ public | myhash | table | postgres
+ public | test   | table | postgres
+ public | test2  | table | postgres
+ public | test3  | table | postgres
+(4 rows)
+
+redis0=&gt; \d myhash
+             Table &quot;public.myhash&quot;
+ Column | Type | Collation | Nullable | Default
+--------+------+-----------+----------+---------
+ key    | text |           | not null |
+ value  | text |           |          |
+</code></pre></div>
+<div class="language-text highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code> redis0=&gt; \d myhash
+             Table &quot;public.myhash&quot;
+ Column | Type | Collation | Nullable | Default
+--------+------+-----------+----------+---------
+ key    | text |           | not null |
+ value  | text |           |          |
+</code></pre></div>
+<div class="language-text highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>; pg_catalog_rs has all pg_catalog tables
+; for example you can select tables directly from pg_class 
+
+redis0=&gt; SELECT c.relname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind = &#39;r&#39;
+  AND n.nspname = &#39;public&#39;;
+ relname
+---------
+ myhash
+ test2
+ test
+ test3
+(4 rows)
+</code></pre></div>
+<div class="language-text highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>; or you can use ::regclass or ::oid type conversions as in 
+; real postgresql pg_catalog
+
+redis0=&gt; SELECT oid,relname,reltype,relnamespace
+FROM pg_class
+WHERE oid = &#39;myhash&#39;::oid;
+  oid  | relname | reltype | relnamespace
+-------+---------+---------+--------------
+ 50010 | myhash  |   50011 |         2200
+(1 row)
+</code></pre></div>
+<h2 id="api-reference">API Reference</h2>
+<h3 id="register-a-logical-database-name">Register a logical database name</h3>
+<div class="language-python highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>RiffqServer<span style="color: #666">.</span>register_database(database_name: <span style="color: #008000">str</span>) <span style="color: #666">-&gt;</span> <span style="color: #008000; font-weight: bold">None</span>:
+</code></pre></div>
+<h3 id="register-a-schema-under-a-previously-registered-database">Register a schema under a previously registered database.</h3>
+<div class="language-python highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>RiffqServer<span style="color: #666">.</span>register_schema(database_name: <span style="color: #008000">str</span>, schema_name: <span style="color: #008000">str</span>) <span style="color: #666">-&gt;</span> <span style="color: #008000; font-weight: bold">None</span>:
+</code></pre></div>
+<h3 id="register-a-table-and-its-columns">Register a table and its columns.</h3>
+<p>Each column is <code>{ name: {"type": &lt;str&gt;, "nullable": &lt;bool&gt;} }</code>.</p>
+<div class="language-python highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>RiffqServer<span style="color: #666">.</span>register_table(database_name: <span style="color: #008000">str</span>, 
+  schema_name: <span style="color: #008000">str</span>, table_name: <span style="color: #008000">str</span>, columns: <span style="color: #008000">list</span>[<span style="color: #008000">dict</span>]) <span style="color: #666">-&gt;</span> <span style="color: #008000; font-weight: bold">None</span>:
+</code></pre></div>
+<h3 id="install-a-lazy-callback-driven-catalog-source">Install a lazy (callback-driven) catalog source.</h3>
+<p>Pull catalog metadata from <code>source</code> on every scan instead of snapshotting it.
+See <a href="#lazy-callback-driven-catalog">Lazy (callback-driven) catalog</a> for the
+source object's contract. Mutually exclusive with the eager <code>register_*</code> calls.</p>
+<div class="language-python highlight" style="background: #f8f8f8"><pre style="line-height: 125%;"><span></span><code>RiffqServer<span style="color: #666">.</span>set_lazy_catalog(source) <span style="color: #666">-&gt;</span> <span style="color: #008000; font-weight: bold">None</span>:
+</code></pre></div>
+  </div>
+  
+  <script>
+    document.querySelectorAll('article h2, article h3').forEach((header) => {
+      toc.observer.observe(header);
+    });
+  </script>
+</article>
+                                <div class="mx-auto flex flex-wrap h-16 w-full max-w-2xl items-center gap-2 px-4 md:px-0">
+    
+    <a data-slot="button"
+        class="inline-flex items-center justify-center whitespace-nowrap text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive bg-secondary text-secondary-foreground hover:bg-secondary/80 h-8 rounded-md gap-1.5 px-3 has-[&gt;svg]:px-2.5 shadow-none"
+        href="../api-reference/">
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            class="tabler-icon tabler-icon-arrow-left ">
+            <path d="M5 12l14 0"></path>
+            <path d="M5 12l6 6"></path>
+            <path d="M5 12l6 -6"></path>
+        </svg>
+        <span class="max-[500px]:hidden">API Reference</span>
+    </a>
+    
+    
+    <a data-slot="button"
+        class="inline-flex items-center justify-center whitespace-nowrap text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive bg-secondary text-secondary-foreground hover:bg-secondary/80 h-8 rounded-md gap-1.5 px-3 has-[&gt;svg]:px-2.5 ml-auto shadow-none"
+        href="../faq/">
+        <span class="max-[500px]:hidden">FAQ</span>
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            class="tabler-icon tabler-icon-arrow-right ">
+            <path d="M5 12l14 0"></path>
+            <path d="M13 18l6 -6"></path>
+            <path d="M13 6l6 6"></path>
+        </svg>
+    </a>
+    
+</div>
+                                <dialog id="bottom-sidebar" onclick="onBottomSidebarDialogClick(event)" class="bg-transparent"
+    style="position: fixed; left: 0px; top: 0px; transform: translate(0px, 58px); min-width: max-content; --radix-popper-transform-origin: 0% 0px; will-change: transform; z-index: 50; --radix-popper-available-width: 504px; --radix-popper-available-height: 857px; --radix-popper-anchor-width: 72.94999694824219px; --radix-popper-anchor-height: 32px;">
+    <div data-side="bottom" data-align="start" data-state="open" role="dialog" data-slot="popover-content"
+        class="text-popover-foreground data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 origin-(--radix-popover-content-transform-origin) border outline-hidden bg-background/90 no-scrollbar h-(--radix-popper-available-height) w-(--radix-popper-available-width) overflow-y-auto rounded-none border-none p-0 shadow-none backdrop-blur duration-100"
+        style="--radix-popover-content-transform-origin: var(--radix-popper-transform-origin); --radix-popover-content-available-width: var(--radix-popper-available-width); --radix-popover-content-available-height: var(--radix-popper-available-height); --radix-popover-trigger-width: var(--radix-popper-anchor-width); --radix-popover-trigger-height: var(--radix-popper-anchor-height);"
+        tabindex="-1">
+        <div class="flex flex-col gap-12 overflow-auto px-6 py-6">
+            
+            
+            
+
+            
+            <div class="flex flex-col gap-4">
+                <div class="text-muted-foreground text-sm font-medium">Menu</div>
+                <div class="flex flex-col gap-3">
+                    
+                    <a class="text-2xl font-medium" href="..">
+                        
+                        Home
+                        
+                    </a>
+                    
+                    <a class="text-2xl font-medium" href="../getting-started/">
+                        
+                        Getting Started
+                        
+                    </a>
+                    
+                    <a class="text-2xl font-medium" href="../api-reference/">
+                        
+                        API Reference
+                        
+                    </a>
+                    
+                    <a class="text-2xl font-medium" href="./">
+                        
+                        Catalog Emulation
+                        
+                    </a>
+                    
+                    <a class="text-2xl font-medium" href="../faq/">
+                        
+                        FAQ
+                        
+                    </a>
+                    
+                    <a class="text-2xl font-medium" href="../changelog/">
+                        
+                        Changelog
+                        
+                    </a>
+                    
+                </div>
+            </div>
+            
+
+            
+            
+
+        </div>
+    </div>
+</dialog>
+                            </div>
+<div class="sticky top-[calc(var(--header-height)+1px)] ml-auto hidden h-[calc(100svh-var(--header-height)-var(--footer-height))] w-72 flex-col gap-4 overflow-hidden overscroll-none pb-8 xl:flex">
+<div class="h-(--top-spacing) shrink-0"></div>
+                                <div id="toc" view-transition-name="toc" class="no-scrollbar overflow-y-auto px-8">
+    <div class="flex flex-col gap-2 p-4 pt-0 text-sm">
+        <p class="text-muted-foreground bg-background sticky top-0 h-6 text-xs">On This Page</p>
+        
+        
+        
+        
+        <a href="#quick-start"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#quick-start');">
+            Quick Start
+        </a>
+        
+
+        
+        <a href="#column-types"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#column-types');">
+            Column Types
+        </a>
+        
+
+        
+        <a href="#discovering-from-an-engine"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#discovering-from-an-engine');">
+            Discovering From an Engine
+        </a>
+        
+
+        
+        <a href="#lazy-callback-driven-catalog"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#lazy-callback-driven-catalog');">
+            Lazy (callback-driven) catalog
+        </a>
+        
+        
+        <a href="#rules-of-the-contract"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#rules-of-the-contract');">
+            Rules of the contract
+        </a>
+        
+        
+
+        
+        <a href="#examples"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#examples');">
+            Examples
+        </a>
+        
+
+        
+        <a href="#api-reference"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#api-reference');">
+            API Reference
+        </a>
+        
+        
+        <a href="#register-a-logical-database-name"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#register-a-logical-database-name');">
+            Register a logical database name
+        </a>
+        
+        <a href="#register-a-schema-under-a-previously-registered-database"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#register-a-schema-under-a-previously-registered-database');">
+            Register a schema under a previously registered database.
+        </a>
+        
+        <a href="#register-a-table-and-its-columns"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#register-a-table-and-its-columns');">
+            Register a table and its columns.
+        </a>
+        
+        <a href="#install-a-lazy-callback-driven-catalog-source"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#install-a-lazy-callback-driven-catalog-source');">
+            Install a lazy (callback-driven) catalog source.
+        </a>
+        
+        
+
+        
+        
+        
+        
+
+    </div>
+    <div class="h-12"></div>
+
+</div>
+                            </div>
+</div>
+</div>
+</div>
+</div>
+</main>
+        <footer view-transition-name="footer"
+    class="group-has-[.section-soft]/body:bg-surface/40 3xl:fixed:bg-transparent dark:bg-transparent">
+    <div class="container-wrapper px-4 xl:px-6">
+        <div class="flex h-(--footer-height) items-center justify-between">
+            <div class="text-muted-foreground w-full text-center text-xs leading-loose sm:text-sm">
+                
+                <a href="https://github.com/asiffer/mkdocs-shadcn">shadcn theme</a> provided by
+                <a href="https://github.com/asiffer">@asiffer</a>
+            </div>
+        </div>
+    </div>
+</footer>
+    </div>
+     
+
+<script src="../search/main.js"></script>
+
+
+    
+
+    <script integrity="sha384-JLNLRFGzvOp0up707XKgSnAjjt1w5BF/+lbeLQvlf6mNwf0m89IXFdpNAk4t6Hcs" src="../js/copy-button.js"></script>
+<script integrity="sha384-JBx6cBEiyhK1KPwZgBHiI6GDaAmvlOxMQFyWAZTEpW5Ifo5XQ2LBcJ61GVOumwF1" src="../js/sidebar.js"></script>
+<script integrity="sha384-fNURFMRt0p/HqXnQnV4+CT9dX1GiU5F0fC3pFbg7gfoANytoUMErSW7suWSBkSuF" src="../js/slider.js"></script>
+<script>updatePygmentsStylesheet();</script>
+    
+    <script>fetchStargazers("None");</script>
+    
+    
+    <script integrity="sha384-Oi13RhLSSgEpSmRyDbfsfmU5N1KzT7IBoQqMenKZoi1Mu+0mCDcF1mKtSZw3cd80" src="../js/mkdocstrings.js"></script>
+    
+    
+    <script type="speculationrules">
+{
+  "prerender": [
+    {
+      "where": {
+          "selector_matches": ["#next-button", "#previous-button"]
+      }
+    }
+  ]
+}
+</script>
+</body>
+</html>

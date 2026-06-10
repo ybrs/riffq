@@ -37,8 +37,9 @@ sqlparser = "0.61.0"
 chrono = "0.4.41"
 log = "0.4"
 datafusion = "53.1.0"
-# datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", branch = "main", package = "datafusion_pg_catalog" }
-datafusion_pg_catalog = { path = "../pg_catalog" }
+datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", rev = "4ee6e83b86a3444dac1aa61f07e930d4222b6316", package = "datafusion_pg_catalog" }
+# Local dev override (uncomment to build against the in-tree ../pg_catalog):
+# datafusion_pg_catalog = { path = "../pg_catalog" }
 
 env_logger = "0.11.8"
 

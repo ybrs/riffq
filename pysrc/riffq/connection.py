@@ -163,6 +163,43 @@ class RiffqServer:
 
         self._server.set_tls(crt, key)
 
+    def set_lazy_catalog(self, source: Any) -> None:
+        """Install a lazy (callback-driven) catalog source for catalog emulation.
+
+        Instead of eagerly pre-registering every database/schema/table with
+        `register_database`/`register_schema`/`register_table`, supply one
+        ``source`` object and the server pulls catalog metadata from it on every
+        ``pg_catalog`` / ``information_schema`` scan — so the catalog always
+        reflects the source's live state.
+
+        ``source`` must expose four methods, each of which receives a ``callback``
+        and invokes it with a list of row dicts:
+
+        - ``databases(callback)`` -> ``[{"oid": int, "name": str, "datdba"?: int}]``
+        - ``schemas(database, callback)`` -> ``[{"oid": int, "name": str, "owner_oid"?: int}]``
+        - ``relations(database, schema, callback)`` ->
+          ``[{"oid": int, "reltype_oid": int, "name": str,
+          "kind"?: "table"|"view"|"materialized_view",
+          "owner_oid"?: int, "has_index"?: bool, "has_rules"?: bool,
+          "has_triggers"?: bool, "row_security"?: bool}]`` — the optional flags
+          populate ``pg_tables`` (``tableowner`` via ``owner_oid``, ``hasindexes``,
+          etc.); omit ``owner_oid`` for backends without ownership (it stays blank)
+        - ``columns(database, schema, relation, callback)`` ->
+          ``[{"name": str, "type_oid": int, "nullable": bool}]``
+
+        OIDs are supplied by the source and written through verbatim; they must be
+        stable across calls (so catalog joins resolve) and unique among the
+        source's objects. A duplicate object (same name in the same scope) is an
+        error; a source object whose name collides with a built-in replaces it.
+
+        When a lazy source is set, the eager ``register_*`` registrations are
+        ignored. Requires ``start(catalog_emulation=True)``.
+
+        Args:
+            source: The lazy catalog source object described above.
+        """
+        self._server.set_lazy_catalog(source)
+
     def register_database(self, database_name: str) -> None:
         """Register a logical database for catalog emulation.
 

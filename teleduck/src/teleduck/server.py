@@ -24,6 +24,147 @@ def map_type(data_type: str) -> str:
         return "datetime"
     return "str"
 
+
+def duckdb_type_to_oid(data_type: str) -> int:
+    """Map a DuckDB declared type to a PostgreSQL ``pg_type`` OID.
+
+    Used to fill ``pg_attribute.atttypid`` / ``information_schema.columns`` for
+    the lazy catalog. Only the common scalar types are distinguished; anything
+    unrecognized falls back to ``text`` (25), which is the safest default for
+    client type introspection.
+    """
+    dt = data_type.upper()
+    if "BIGINT" in dt or "INT8" in dt or "HUGEINT" in dt or "LONG" in dt:
+        return 20  # int8
+    if "SMALLINT" in dt or "INT2" in dt or "TINYINT" in dt:
+        return 21  # int2
+    if "INT" in dt:
+        return 23  # int4
+    if "BOOL" in dt:
+        return 16  # bool
+    if "DOUBLE" in dt or "FLOAT8" in dt:
+        return 701  # float8
+    if "REAL" in dt or "FLOAT" in dt:
+        return 700  # float4
+    if "DECIMAL" in dt or "NUMERIC" in dt:
+        return 1700  # numeric
+    if "TIMESTAMP" in dt or "DATETIME" in dt:
+        return 1184 if "TZ" in dt else 1114  # timestamptz / timestamp
+    if dt == "DATE":
+        return 1082  # date
+    if "TIME" in dt:
+        return 1083  # time
+    return 25  # text / varchar / everything else
+
+
+def _stable_oid(salt: str, *parts: str) -> int:
+    """Derive a stable, built-in-clear OID from a namespace `salt` and `parts`.
+
+    The same inputs always yield the same OID (so ``pg_class.oid`` and
+    ``pg_attribute.attrelid`` agree across scans and joins resolve), distinct
+    object classes use distinct salts to avoid collisions, and the result sits
+    well above the built-in OID range and inside the signed-32-bit range that
+    the catalog row types use.
+    """
+    key = "\x00".join((salt,) + parts)
+    h = int(hashlib.sha1(key.encode("utf-8")).hexdigest()[:8], 16)
+    return 16384 + (h % 2_000_000_000)
+
+
+class DuckdbCatalogSource:
+    """A lazy ``pg_catalog`` source backed by a live DuckDB connection.
+
+    Each method queries DuckDB's own catalog on demand and hands the rows to the
+    ``callback``, so the emulated ``pg_catalog`` / ``information_schema`` always
+    reflects DuckDB's current schema -- including tables created after the server
+    started. Mirrors the Rust ``LazyCatalogSource`` trait one method per level.
+
+    A fresh ``cursor()`` is used per call because the underlying connection is
+    shared with the query path and DuckDB connections are not concurrency-safe;
+    cursors give an independent, GIL-serialized handle.
+    """
+
+    def __init__(self, con):
+        self._con = con
+
+    def databases(self, callback):
+        rows = self._con.cursor().execute(
+            "SELECT database_name FROM duckdb_databases() WHERE internal = false"
+        ).fetchall()
+        callback(
+            [
+                {"oid": _stable_oid("db", name), "name": name}
+                for (name,) in rows
+                if name not in ("system", "temp")
+            ]
+        )
+
+    def schemas(self, database, callback):
+        rows = self._con.cursor().execute(
+            "SELECT DISTINCT table_schema FROM information_schema.tables "
+            "WHERE table_catalog = ? "
+            "AND table_schema NOT IN ('pg_catalog', 'information_schema')",
+            (database,),
+        ).fetchall()
+        callback(
+            [
+                {"oid": _stable_oid("ns", database, schema), "name": schema}
+                for (schema,) in rows
+            ]
+        )
+
+    def relations(self, database, schema, callback):
+        rows = self._con.cursor().execute(
+            "SELECT table_name, table_type FROM information_schema.tables "
+            "WHERE table_catalog = ? AND table_schema = ?",
+            (database, schema),
+        ).fetchall()
+        # Tables that carry at least one index, so pg_tables.hasindexes is true.
+        # DuckDB has no triggers/rules/row-level-security, so those flags stay
+        # false (their default), which is truthful rather than blank. DuckDB also
+        # has no table ownership, so "owner_oid" is intentionally omitted and
+        # pg_tables.tableowner is left blank.
+        indexed = {
+            name
+            for (name,) in self._con.cursor().execute(
+                "SELECT DISTINCT table_name FROM duckdb_indexes() "
+                "WHERE database_name = ? AND schema_name = ?",
+                (database, schema),
+            ).fetchall()
+        }
+        out = []
+        for table_name, table_type in rows:
+            kind = "view" if (table_type or "").upper().startswith("VIEW") else "table"
+            out.append(
+                {
+                    "oid": _stable_oid("rel", database, schema, table_name),
+                    "reltype_oid": _stable_oid("type", database, schema, table_name),
+                    "name": table_name,
+                    "kind": kind,
+                    "has_index": table_name in indexed,
+                }
+            )
+        callback(out)
+
+    def columns(self, database, schema, relation, callback):
+        rows = self._con.cursor().execute(
+            "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+            "WHERE table_catalog = ? AND table_schema = ? AND table_name = ? "
+            "ORDER BY ordinal_position",
+            (database, schema, relation),
+        ).fetchall()
+        callback(
+            [
+                {
+                    "name": col_name,
+                    "type_oid": duckdb_type_to_oid(data_type),
+                    "nullable": str(is_nullable).upper() == "YES",
+                }
+                for (col_name, data_type, is_nullable) in rows
+            ]
+        )
+
+
 class Connection(riffq.BaseConnection):
     def _handle_query(self, sql, callback, **kwargs):
         cur = duckdb_con.cursor()
@@ -213,46 +354,12 @@ def run_server(
         server.set_tls(cert_path, key_path)
 
 
-    def register_schemas_and_tables_in_database(database_name):
-        if database_name in ("system", "temp"):
-            return
+    # Drive pg_catalog lazily from the live DuckDB connection: every catalog
+    # scan re-reads DuckDB's schema, so tables created after startup show up
+    # without any re-registration. (Replaces the previous eager walk that
+    # snapshotted databases/schemas/tables once at boot.)
+    server.set_lazy_catalog(DuckdbCatalogSource(duckdb_con))
 
-        # duckdb_con.execute(f"use {database_name}")
-        
-        tbls = duckdb_con.execute(
-            "SELECT table_schema, table_name FROM information_schema.tables "
-            "WHERE table_schema NOT IN ('pg_catalog','information_schema')" \
-            "and table_catalog = ?", (database_name,)
-        ).fetchall()
-
-        for schema_name, table_name in tbls:
-            server._server.register_schema(database_name, schema_name)
-            cols_info = duckdb_con.execute(
-                "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
-                "WHERE table_schema=? AND table_name=?",
-                (schema_name, table_name),
-            ).fetchall()
-            columns = []
-            for col_name, data_type, is_nullable in cols_info:
-                columns.append(
-                    {
-                        col_name: {
-                            "type": map_type(data_type),
-                            "nullable": is_nullable.upper() == "YES",
-                        }
-                    }
-                )
-            server._server.register_table(database_name, schema_name, table_name, columns)
-
-
-    databases = duckdb_con.execute(
-        "SELECT database_name, path, type FROM duckdb_databases() where internal=false"
-    ).fetchall()
-
-    for database_name, path, type in databases:
-        server._server.register_database(database_name)
-        register_schemas_and_tables_in_database(database_name)
-    
     # riffq catches SIGINT/SIGTERM inside its tokio runtime and invokes this
     # before start() returns. a python signal.signal handler cannot be used
     # here: start() parks the main thread in rust, so a python-level handler

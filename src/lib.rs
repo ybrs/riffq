@@ -46,11 +46,20 @@ use datafusion::execution::context::SessionContext;
 use datafusion_pg_catalog::{
     dispatch_query,
     get_base_session_context,
+    get_base_session_context_with_lazy_catalog,
     register_user_database,
     register_schema,
     register_user_tables,
     ColumnDef,
+    ColumnSpec,
+    DatabaseDef,
+    LazyCatalogOptions,
+    LazyCatalogSource,
+    RelationDef,
+    RelationKind,
+    SchemaDef,
 };
+use datafusion::error::{DataFusionError, Result as DFResult};
 use postgres_types::FromSql;
 
 use chrono::{DateTime, Duration, NaiveDate};
@@ -1702,6 +1711,278 @@ fn setup_tls(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, IOError> {
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
+/// Convert a Python exception raised by a lazy catalog source into a
+/// `DataFusionError`, so the failure propagates to the SQL client instead of
+/// being swallowed (the lazy catalog contract forbids failing silently).
+fn py_to_df(e: PyErr) -> DataFusionError {
+    DataFusionError::Execution(format!("lazy catalog source error: {e}"))
+}
+
+/// The synchronous callback object handed to a Python lazy-catalog method. The
+/// Python source calls it with the list of rows it produced; we capture that
+/// list so the surrounding Rust method can marshal it. Mirrors the
+/// `&mut dyn FnMut(Vec<...>)` callback of the Rust `LazyCatalogSource` trait.
+#[pyclass]
+struct CatalogCallback {
+    rows: Arc<Mutex<Option<Py<PyAny>>>>,
+}
+
+#[pymethods]
+impl CatalogCallback {
+    /// Record the rows the Python source passed in. Expected to be invoked once,
+    /// synchronously, before the calling method returns.
+    fn __call__(&self, rows: Py<PyAny>) {
+        *self.rows.lock().unwrap() = Some(rows);
+    }
+}
+
+/// Read a required integer field from a row dict.
+fn req_i32(d: &Bound<'_, PyDict>, key: &str) -> DFResult<i32> {
+    match d.get_item(key).map_err(py_to_df)? {
+        Some(v) => v.extract::<i32>().map_err(py_to_df),
+        None => Err(DataFusionError::Execution(format!(
+            "lazy catalog row is missing required field '{key}'"
+        ))),
+    }
+}
+
+/// Read a required string field from a row dict.
+fn req_str(d: &Bound<'_, PyDict>, key: &str) -> DFResult<String> {
+    match d.get_item(key).map_err(py_to_df)? {
+        Some(v) => v.extract::<String>().map_err(py_to_df),
+        None => Err(DataFusionError::Execution(format!(
+            "lazy catalog row is missing required field '{key}'"
+        ))),
+    }
+}
+
+/// Read a required boolean field from a row dict.
+fn req_bool(d: &Bound<'_, PyDict>, key: &str) -> DFResult<bool> {
+    match d.get_item(key).map_err(py_to_df)? {
+        Some(v) => v.extract::<bool>().map_err(py_to_df),
+        None => Err(DataFusionError::Execution(format!(
+            "lazy catalog row is missing required field '{key}'"
+        ))),
+    }
+}
+
+/// Read an optional integer field from a row dict (absent or `None` -> `None`).
+fn opt_i32(d: &Bound<'_, PyDict>, key: &str) -> DFResult<Option<i32>> {
+    match d.get_item(key).map_err(py_to_df)? {
+        Some(v) if !v.is_none() => Ok(Some(v.extract::<i32>().map_err(py_to_df)?)),
+        _ => Ok(None),
+    }
+}
+
+/// Read an optional string field from a row dict (absent or `None` -> `None`).
+fn opt_str(d: &Bound<'_, PyDict>, key: &str) -> DFResult<Option<String>> {
+    match d.get_item(key).map_err(py_to_df)? {
+        Some(v) if !v.is_none() => Ok(Some(v.extract::<String>().map_err(py_to_df)?)),
+        _ => Ok(None),
+    }
+}
+
+/// Read an optional boolean field from a row dict, defaulting to `default` when
+/// absent or `None`.
+fn opt_bool_or(d: &Bound<'_, PyDict>, key: &str, default: bool) -> DFResult<bool> {
+    match d.get_item(key).map_err(py_to_df)? {
+        Some(v) if !v.is_none() => v.extract::<bool>().map_err(py_to_df),
+        _ => Ok(default),
+    }
+}
+
+/// Downcast the Python value a source returned into a list of row dicts.
+fn row_dicts<'py>(
+    method: &str,
+    list: &Bound<'py, PyAny>,
+) -> DFResult<Vec<Bound<'py, PyDict>>> {
+    let list: &Bound<'py, PyList> = list.downcast().map_err(|e| {
+        DataFusionError::Execution(format!("{method}() must pass a list of dicts: {e}"))
+    })?;
+    let mut out = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        let d: Bound<'py, PyDict> = item.downcast_into().map_err(|e| {
+            DataFusionError::Execution(format!("{method}() rows must be dicts: {e}"))
+        })?;
+        out.push(d);
+    }
+    Ok(out)
+}
+
+/// Parse `databases()` rows: `{oid, name, [datdba]}` -> [`DatabaseDef`].
+fn parse_databases(list: &Bound<'_, PyAny>) -> DFResult<Vec<DatabaseDef>> {
+    row_dicts("databases", list)?
+        .iter()
+        .map(|d| {
+            let oid = req_i32(d, "oid")?;
+            let name = req_str(d, "name")?;
+            let datdba = opt_i32(d, "datdba")?.unwrap_or(10);
+            Ok(DatabaseDef::new(oid, name, datdba))
+        })
+        .collect()
+}
+
+/// Parse `schemas()` rows: `{oid, name, [owner_oid]}` -> [`SchemaDef`].
+fn parse_schemas(list: &Bound<'_, PyAny>) -> DFResult<Vec<SchemaDef>> {
+    row_dicts("schemas", list)?
+        .iter()
+        .map(|d| {
+            Ok(SchemaDef {
+                oid: req_i32(d, "oid")?,
+                name: req_str(d, "name")?,
+                owner_oid: opt_i32(d, "owner_oid")?,
+            })
+        })
+        .collect()
+}
+
+/// Parse `relations()` rows: `{oid, reltype_oid, name, [kind]}` -> [`RelationDef`].
+fn parse_relations(list: &Bound<'_, PyAny>) -> DFResult<Vec<RelationDef>> {
+    row_dicts("relations", list)?
+        .iter()
+        .map(|d| {
+            let kind = match opt_str(d, "kind")?.as_deref() {
+                Some("table") | None => RelationKind::Table,
+                Some("view") => RelationKind::View,
+                Some("materialized_view") | Some("matview") => RelationKind::MaterializedView,
+                Some(other) => {
+                    return Err(DataFusionError::Execution(format!(
+                        "unknown relation kind '{other}' (use table/view/materialized_view)"
+                    )))
+                }
+            };
+            Ok(RelationDef {
+                oid: req_i32(d, "oid")?,
+                reltype_oid: req_i32(d, "reltype_oid")?,
+                name: req_str(d, "name")?,
+                kind,
+                owner_oid: opt_i32(d, "owner_oid")?,
+                has_index: opt_bool_or(d, "has_index", false)?,
+                has_rules: opt_bool_or(d, "has_rules", false)?,
+                has_triggers: opt_bool_or(d, "has_triggers", false)?,
+                row_security: opt_bool_or(d, "row_security", false)?,
+            })
+        })
+        .collect()
+}
+
+/// Parse `columns()` rows: `{name, type_oid, nullable}` -> [`ColumnSpec`].
+fn parse_columns(list: &Bound<'_, PyAny>) -> DFResult<Vec<ColumnSpec>> {
+    row_dicts("columns", list)?
+        .iter()
+        .map(|d| {
+            Ok(ColumnSpec::new(
+                req_str(d, "name")?,
+                req_i32(d, "type_oid")?,
+                req_bool(d, "nullable")?,
+            ))
+        })
+        .collect()
+}
+
+/// A [`LazyCatalogSource`] backed by a Python object whose `databases`,
+/// `schemas`, `relations`, and `columns` methods each accept a callback and
+/// invoke it with a list of row dicts. Each trait method acquires the GIL, hands
+/// Python a [`CatalogCallback`], and marshals the captured rows into the
+/// pg_catalog definition types. Errors raised in Python surface as
+/// `DataFusionError` to the SQL client.
+struct PyLazyCatalogSource {
+    obj: Py<PyAny>,
+}
+
+impl PyLazyCatalogSource {
+    /// Call `method` on the Python source with `str_args` followed by a fresh
+    /// callback, returning whatever list the callback captured (or `None` if the
+    /// source never invoked it).
+    fn pull(
+        &self,
+        py: Python<'_>,
+        method: &str,
+        str_args: &[&str],
+    ) -> DFResult<Option<Py<PyAny>>> {
+        let cell: Arc<Mutex<Option<Py<PyAny>>>> = Arc::new(Mutex::new(None));
+        let wrapper = Py::new(
+            py,
+            CatalogCallback {
+                rows: cell.clone(),
+            },
+        )
+        .map_err(py_to_df)?;
+
+        let mut items: Vec<Py<PyAny>> = Vec::with_capacity(str_args.len() + 1);
+        for s in str_args {
+            items.push((*s).into_py_any(py).map_err(py_to_df)?);
+        }
+        items.push(wrapper.into_py_any(py).map_err(py_to_df)?);
+        let args = PyTuple::new(py, items).map_err(py_to_df)?;
+
+        self.obj
+            .bind(py)
+            .call_method1(method, args)
+            .map_err(py_to_df)?;
+
+        let captured = cell.lock().unwrap().take();
+        Ok(captured)
+    }
+}
+
+impl LazyCatalogSource for PyLazyCatalogSource {
+    fn databases(&self, callback: &mut dyn FnMut(Vec<DatabaseDef>)) -> DFResult<()> {
+        let defs = Python::attach(|py| -> DFResult<Vec<DatabaseDef>> {
+            match self.pull(py, "databases", &[])? {
+                Some(list) => parse_databases(list.bind(py)),
+                None => Ok(Vec::new()),
+            }
+        })?;
+        callback(defs);
+        Ok(())
+    }
+
+    fn schemas(&self, database: &str, callback: &mut dyn FnMut(Vec<SchemaDef>)) -> DFResult<()> {
+        let defs = Python::attach(|py| -> DFResult<Vec<SchemaDef>> {
+            match self.pull(py, "schemas", &[database])? {
+                Some(list) => parse_schemas(list.bind(py)),
+                None => Ok(Vec::new()),
+            }
+        })?;
+        callback(defs);
+        Ok(())
+    }
+
+    fn relations(
+        &self,
+        database: &str,
+        schema: &str,
+        callback: &mut dyn FnMut(Vec<RelationDef>),
+    ) -> DFResult<()> {
+        let defs = Python::attach(|py| -> DFResult<Vec<RelationDef>> {
+            match self.pull(py, "relations", &[database, schema])? {
+                Some(list) => parse_relations(list.bind(py)),
+                None => Ok(Vec::new()),
+            }
+        })?;
+        callback(defs);
+        Ok(())
+    }
+
+    fn columns(
+        &self,
+        database: &str,
+        schema: &str,
+        relation: &str,
+        callback: &mut dyn FnMut(Vec<ColumnSpec>),
+    ) -> DFResult<()> {
+        let defs = Python::attach(|py| -> DFResult<Vec<ColumnSpec>> {
+            match self.pull(py, "columns", &[database, schema, relation])? {
+                Some(list) => parse_columns(list.bind(py)),
+                None => Ok(Vec::new()),
+            }
+        })?;
+        callback(defs);
+        Ok(())
+    }
+}
+
 #[pyclass]
 pub struct Server {
     addr: String,
@@ -1714,6 +1995,7 @@ pub struct Server {
     databases: Vec<String>,
     schemas: Vec<(String, String)>,
     tables: Vec<(String, String, String, Vec<BTreeMap<String, ColumnDef>>)>,
+    lazy_catalog_source: Arc<Mutex<Option<Py<PyAny>>>>,
 }
 
 #[pymethods]
@@ -1731,6 +2013,7 @@ impl Server {
             databases: Vec::new(),
             schemas: Vec::new(),
             tables: Vec::new(),
+            lazy_catalog_source: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1764,6 +2047,19 @@ impl Server {
             }
             Err(e) => Err(pyo3::exceptions::PyIOError::new_err(e.to_string())),
         }
+    }
+
+    /// Install a lazy catalog source. `source` is a Python object whose
+    /// `databases(callback)`, `schemas(database, callback)`,
+    /// `relations(database, schema, callback)`, and
+    /// `columns(database, schema, relation, callback)` methods each call their
+    /// `callback` with a list of row dicts. When set, the base catalog context is
+    /// built with the lazy providers (so `pg_catalog`/`information_schema` reflect
+    /// the source live on every scan) and the eager `register_database`/
+    /// `register_schema`/`register_table` registrations are skipped. Requires
+    /// `start(catalog_emulation=True)` for the catalog queries to be routed here.
+    fn set_lazy_catalog(&mut self, _py: Python, source: Py<PyAny>) {
+        *self.lazy_catalog_source.lock().unwrap() = Some(source);
     }
 
     fn register_database(&mut self, database_name: String) {
@@ -1840,8 +2136,33 @@ impl Server {
         rt.block_on(async move {
             let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
             let mut ctx_map: HashMap<String, Arc<SessionContext>> = HashMap::new();
-            
-            if self.databases.is_empty() {
+
+            // Clone the Python lazy-catalog source out of the server, if one was set.
+            let lazy_source = self
+                .lazy_catalog_source
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|o| Python::attach(|py| o.clone_ref(py)));
+
+            if let Some(obj) = lazy_source {
+                // Lazy path: a single catalog context whose pg_catalog /
+                // information_schema tables (and views) are sourced from Python on
+                // every scan. Built BEFORE the views are created so they bind to
+                // the lazy providers. Eager register_* is skipped below.
+                let source: Arc<dyn LazyCatalogSource> = Arc::new(PyLazyCatalogSource { obj });
+                let (raw_ctx, _) = get_base_session_context_with_lazy_catalog(
+                    None,
+                    "datafusion".to_string(),
+                    "public".to_string(),
+                    None,
+                    source,
+                    LazyCatalogOptions::all(),
+                )
+                .await
+                .unwrap();
+                ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
+            } else if self.databases.is_empty() {
                 if catalog_emulation {
                     let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string(), None).await.unwrap();
                     ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
@@ -1851,28 +2172,32 @@ impl Server {
                 }
             } else {
                 for db in &self.databases {
-                    let (raw_ctx, _) = get_base_session_context(None, 
-                                                                                db.to_string(), 
+                    let (raw_ctx, _) = get_base_session_context(None,
+                                                                                db.to_string(),
                                                                                 "main".to_string(), None).await.unwrap();
                     ctx_map.insert(db.clone(), Arc::new(raw_ctx));
                 }
             }
-            
-            for ctx in ctx_map.values() {
-                for db in &self.databases {
-                    register_user_database(ctx, db).await.unwrap();
-                }
-            }
 
-            for (db, schema) in &self.schemas {
-                if let Some(c) = ctx_map.get(db) {
-                    register_schema(c, db, schema).await.unwrap();
+            // The eager registrations are mutually exclusive with the lazy source:
+            // when a source is installed it is authoritative for user objects.
+            if self.lazy_catalog_source.lock().unwrap().is_none() {
+                for ctx in ctx_map.values() {
+                    for db in &self.databases {
+                        register_user_database(ctx, db).await.unwrap();
+                    }
                 }
-            }
 
-            for (db, schema, table, cols) in &self.tables {
-                if let Some(c) = ctx_map.get(db) {
-                    register_user_tables(c, db, schema, table, cols.clone()).await.unwrap();
+                for (db, schema) in &self.schemas {
+                    if let Some(c) = ctx_map.get(db) {
+                        register_schema(c, db, schema).await.unwrap();
+                    }
+                }
+
+                for (db, schema, table, cols) in &self.tables {
+                    if let Some(c) = ctx_map.get(db) {
+                        register_user_tables(c, db, schema, table, cols.clone()).await.unwrap();
+                    }
                 }
             }
 

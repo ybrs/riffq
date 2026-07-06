@@ -52,12 +52,14 @@ use datafusion_pg_catalog::{
     register_user_tables,
     ColumnDef,
     ColumnSpec,
+    ConfigSettingDef,
     DatabaseDef,
     LazyCatalogOptions,
     LazyCatalogSource,
     RelationDef,
     RelationKind,
     SchemaDef,
+    SettingDef,
 };
 use datafusion::error::{DataFusionError, Result as DFResult};
 use postgres_types::FromSql;
@@ -1880,6 +1882,32 @@ fn parse_columns(list: &Bound<'_, PyAny>) -> DFResult<Vec<ColumnSpec>> {
         .collect()
 }
 
+/// Parse `config()` rows: `{name, setting}` -> [`ConfigSettingDef`] (pg_config).
+fn parse_config(list: &Bound<'_, PyAny>) -> DFResult<Vec<ConfigSettingDef>> {
+    row_dicts("config", list)?
+        .iter()
+        .map(|d| {
+            Ok(ConfigSettingDef {
+                name: req_str(d, "name")?,
+                setting: req_str(d, "setting")?,
+            })
+        })
+        .collect()
+}
+
+/// Parse `settings()` rows: `{name, setting}` -> [`SettingDef`] (pg_settings).
+fn parse_settings(list: &Bound<'_, PyAny>) -> DFResult<Vec<SettingDef>> {
+    row_dicts("settings", list)?
+        .iter()
+        .map(|d| {
+            Ok(SettingDef {
+                name: req_str(d, "name")?,
+                setting: req_str(d, "setting")?,
+            })
+        })
+        .collect()
+}
+
 /// A [`LazyCatalogSource`] backed by a Python object whose `databases`,
 /// `schemas`, `relations`, and `columns` methods each accept a callback and
 /// invoke it with a list of row dicts. Each trait method acquires the GIL, hands
@@ -1975,6 +2003,36 @@ impl LazyCatalogSource for PyLazyCatalogSource {
         let defs = Python::attach(|py| -> DFResult<Vec<ColumnSpec>> {
             match self.pull(py, "columns", &[database, schema, relation])? {
                 Some(list) => parse_columns(list.bind(py)),
+                None => Ok(Vec::new()),
+            }
+        })?;
+        callback(defs);
+        Ok(())
+    }
+
+    fn config(&self, callback: &mut dyn FnMut(Vec<ConfigSettingDef>)) -> DFResult<()> {
+        let defs = Python::attach(|py| -> DFResult<Vec<ConfigSettingDef>> {
+            // Optional method: a source without `config` keeps the built-in pg_config defaults.
+            if !self.obj.bind(py).hasattr("config").map_err(py_to_df)? {
+                return Ok(Vec::new());
+            }
+            match self.pull(py, "config", &[])? {
+                Some(list) => parse_config(list.bind(py)),
+                None => Ok(Vec::new()),
+            }
+        })?;
+        callback(defs);
+        Ok(())
+    }
+
+    fn settings(&self, callback: &mut dyn FnMut(Vec<SettingDef>)) -> DFResult<()> {
+        let defs = Python::attach(|py| -> DFResult<Vec<SettingDef>> {
+            // Optional method: a source without `settings` keeps the built-in pg_settings snapshot.
+            if !self.obj.bind(py).hasattr("settings").map_err(py_to_df)? {
+                return Ok(Vec::new());
+            }
+            match self.pull(py, "settings", &[])? {
+                Some(list) => parse_settings(list.bind(py)),
                 None => Ok(Vec::new()),
             }
         })?;

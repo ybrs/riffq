@@ -99,6 +99,19 @@ class DictCatalogSource:
             ]
         )
 
+    # Both methods below are OPTIONAL. Omit them and pg_config / pg_settings
+    # serve their built-in defaults. Implement them to override or extend those
+    # rows; a row whose ``name`` matches a built-in one replaces it.
+
+    def config(self, callback):
+        """``pg_catalog.pg_config`` build settings — report our own version."""
+        callback([{"name": "VERSION", "setting": "riffq lazy-catalog example"}])
+
+    def settings(self, callback):
+        """``pg_catalog.pg_settings`` runtime parameters — override the live
+        value of session-mutable ones (here, ``search_path``)."""
+        callback([{"name": "search_path", "setting": "public"}])
+
 
 class Connection(riffq.BaseConnection):
     """Data path. Catalog queries are served by the lazy source above; everything

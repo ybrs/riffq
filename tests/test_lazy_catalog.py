@@ -52,6 +52,13 @@ def _run_server(port: int):
                 ]
             )
 
+        # Optional: override pg_config / pg_settings rows by name.
+        def config(self, callback):
+            callback([{"name": "VERSION", "setting": "riffq-test 1.0"}])
+
+        def settings(self, callback):
+            callback([{"name": "search_path", "setting": "tenant_x"}])
+
     def handle_query(sql, callback, **kwargs):
         s = sql.strip().lower()
         # Emulate a data backend: a CREATE TABLE mutates the live catalog state.
@@ -96,6 +103,35 @@ class LazyCatalogTest(unittest.TestCase):
         return psycopg.connect(
             f"postgresql://user@127.0.0.1:{self.port}/db", autocommit=True
         )
+
+    def test_pg_config_and_settings_overrides(self):
+        with self._conn() as conn, conn.cursor() as cur:
+            # The Python config() override replaces the built-in VERSION row.
+            cur.execute("SELECT setting FROM pg_catalog.pg_config WHERE name='VERSION'")
+            self.assertEqual(cur.fetchone()[0], "riffq-test 1.0")
+            # An untouched built-in pg_config default is still served.
+            cur.execute("SELECT count(*) FROM pg_catalog.pg_config WHERE name='BINDIR'")
+            self.assertEqual(cur.fetchone()[0], 1)
+
+            # The settings() override replaces the snapshot search_path value.
+            cur.execute("SELECT setting FROM pg_catalog.pg_settings WHERE name='search_path'")
+            self.assertEqual(cur.fetchone()[0], "tenant_x")
+            # An untouched built-in pg_settings row is preserved.
+            cur.execute("SELECT count(*) FROM pg_catalog.pg_settings WHERE name='max_connections'")
+            self.assertEqual(cur.fetchone()[0], 1)
+
+    def test_multi_batch_union_returns_all_rows(self):
+        # Riffq's wire layer must stream ALL Arrow RecordBatches of a result, not
+        # just one. A catalog UNION ALL produces one batch per branch; every
+        # branch's rows must come back (pg_catalog had a bug here; riffq must not).
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT typname FROM pg_catalog.pg_type WHERE typname = 'int4' "
+                "UNION ALL "
+                "SELECT typname FROM pg_catalog.pg_type WHERE typname = 'text'"
+            )
+            names = sorted(r[0] for r in cur.fetchall())
+            self.assertEqual(names, ["int4", "text"], names)
 
     def test_lazy_objects_and_builtins(self):
         with self._conn() as conn, conn.cursor() as cur:

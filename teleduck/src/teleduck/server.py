@@ -34,6 +34,12 @@ def duckdb_type_to_oid(data_type: str) -> int:
     client type introspection.
     """
     dt = data_type.upper()
+    # `WITH TIME ZONE` is how DuckDB's information_schema spells timestamptz/timetz
+    # (it does NOT contain "TZ"); accept both spellings.
+    with_tz = "TIME ZONE" in dt or "TZ" in dt
+    # INTERVAL must be checked before the integer arms: "INTERVAL" contains "INT".
+    if "INTERVAL" in dt:
+        return 1186  # interval
     if "BIGINT" in dt or "INT8" in dt or "HUGEINT" in dt or "LONG" in dt:
         return 20  # int8
     if "SMALLINT" in dt or "INT2" in dt or "TINYINT" in dt:
@@ -49,11 +55,11 @@ def duckdb_type_to_oid(data_type: str) -> int:
     if "DECIMAL" in dt or "NUMERIC" in dt:
         return 1700  # numeric
     if "TIMESTAMP" in dt or "DATETIME" in dt:
-        return 1184 if "TZ" in dt else 1114  # timestamptz / timestamp
+        return 1184 if with_tz else 1114  # timestamptz / timestamp
     if dt == "DATE":
         return 1082  # date
     if "TIME" in dt:
-        return 1083  # time
+        return 1266 if with_tz else 1083  # timetz / time
     return 25  # text / varchar / everything else
 
 

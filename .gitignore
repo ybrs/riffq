@@ -9,5 +9,6 @@ __pycache__/
 venv/
 duckdata.*
 example/data/*
-+riffq/_riffq*.so
+pysrc/riffq/_riffq*.so
+teleduck/testd.db
 docs-site/

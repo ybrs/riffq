@@ -432,6 +432,10 @@ fn arrow_value_to_string(array: &dyn Array, row: usize) -> Option<String> {
         DataType::Boolean => Some(array.as_boolean().value(row).to_string()),
         DataType::Utf8 => Some(array.as_string::<i32>().value(row).to_string()),
         DataType::LargeUtf8 => Some(array.as_string::<i64>().value(row).to_string()),
+        // DataFusion 54 returns many information_schema/pg_catalog string columns as
+        // Utf8View (e.g. information_schema.columns.column_name); without this arm they
+        // fall through to None and reach the client as NULL.
+        DataType::Utf8View => Some(array.as_string_view().value(row).to_string()),
         DataType::Date32 => {
             let days = array
                 .as_primitive::<arrow::array::types::Date32Type>()
@@ -668,6 +672,10 @@ fn encode_arrow_value(
         DataType::Boolean => encoder.encode_field(&Some(array.as_boolean().value(row))),
         DataType::Utf8 => encoder.encode_field(&Some(array.as_string::<i32>().value(row))),
         DataType::LargeUtf8 => encoder.encode_field(&Some(array.as_string::<i64>().value(row))),
+        // DataFusion 54 returns many information_schema/pg_catalog string columns as
+        // Utf8View (e.g. information_schema.columns.column_name); without this arm they
+        // fall through to the NULL default and reach the client as NULL.
+        DataType::Utf8View => encoder.encode_field(&Some(array.as_string_view().value(row))),
         DataType::Date32 => {
             let days = array
                 .as_primitive::<arrow::array::types::Date32Type>()

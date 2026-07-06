@@ -133,6 +133,18 @@ class LazyCatalogTest(unittest.TestCase):
             names = sorted(r[0] for r in cur.fetchall())
             self.assertEqual(names, ["int4", "text"], names)
 
+    def test_information_schema_column_names_are_not_null(self):
+        # DataFusion 54 returns information_schema.columns.column_name as an Arrow
+        # Utf8View column (unlike pg_class.relname, which is Utf8). Riffq's value
+        # encoder must handle Utf8View; otherwise every such string reaches the
+        # client as NULL. Regression guard for that wire-encoding gap.
+        with self._conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='users' ORDER BY ordinal_position"
+            )
+            self.assertEqual([r[0] for r in cur.fetchall()], ["id", "name"])
+
     def test_lazy_objects_and_builtins(self):
         with self._conn() as conn, conn.cursor() as cur:
             # The lazy database and its built-in neighbours both show up.

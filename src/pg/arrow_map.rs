@@ -44,7 +44,7 @@ pub fn arrow_type_to_pgwire(dt: &DataType) -> Type {
 
         /* ── booleans / strings / bytes ─────────── */
         Boolean => Type::BOOL,
-        Utf8 | LargeUtf8 => Type::VARCHAR,
+        Utf8 | LargeUtf8 | Utf8View => Type::VARCHAR,
         Binary | LargeBinary | FixedSizeBinary(_) => Type::BYTEA,
 
         /* ── temporal ───────────────────────────── */
@@ -90,7 +90,7 @@ pub fn arrow_type_to_pgwire(dt: &DataType) -> Type {
 
         /* ── arrays ─────────────────────────────── */
         List(field) | LargeList(field) | FixedSizeList(field, _) => match field.data_type() {
-            DataType::Utf8 | DataType::LargeUtf8 => Type::VARCHAR_ARRAY,
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => Type::VARCHAR_ARRAY,
             _ => Type::VARCHAR,
         },
 
@@ -128,6 +128,7 @@ mod tests {
         assert_eq!(arrow_type_to_pgwire(&DataType::Boolean), Type::BOOL);
         assert_eq!(arrow_type_to_pgwire(&DataType::Utf8), Type::VARCHAR);
         assert_eq!(arrow_type_to_pgwire(&DataType::LargeUtf8), Type::VARCHAR);
+        assert_eq!(arrow_type_to_pgwire(&DataType::Utf8View), Type::VARCHAR);
         assert_eq!(arrow_type_to_pgwire(&DataType::Date32), Type::DATE);
         assert_eq!(arrow_type_to_pgwire(&DataType::Date64), Type::DATE);
         assert_eq!(

@@ -2425,7 +2425,14 @@ impl Server {
                 .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("missing nullable"))?
                 .extract()?;
             let mut m = BTreeMap::new();
-            m.insert(name_str, ColumnDef { col_type, nullable });
+            m.insert(
+                name_str,
+                ColumnDef {
+                    col_type,
+                    nullable,
+                    has_default: false,
+                },
+            );
             cols.push(m);
         }
         self.tables
@@ -2546,7 +2553,10 @@ impl Server {
 
                 for (db, schema, table, cols) in &self.tables {
                     if let Some(c) = ctx_map.get(db) {
-                        register_user_tables(c, db, schema, table, cols.clone())
+                        // register_user_tables identifies the schema by OID; register_schema
+                        // is idempotent and returns the OID of the existing-or-created schema.
+                        let schema_oid = register_schema(c, db, schema).await.unwrap();
+                        register_user_tables(c, db, schema_oid, table, cols.clone())
                             .await
                             .unwrap();
                     }

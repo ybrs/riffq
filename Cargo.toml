@@ -37,11 +37,9 @@ sqlparser = "0.62"
 chrono = "0.4.41"
 log = "0.4"
 datafusion = "54.0.0"
-# In-tree path dep: required because this crate is now on DataFusion 54, which the
-# previously-pinned git rev (a DataFusion 53 build) is incompatible with. After
-# publishing a DataFusion 54 pg_catalog, swap this for the git line below + bump the rev.
-datafusion_pg_catalog = { path = "../pg_catalog", package = "datafusion_pg_catalog" }
-# datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", rev = "<df54-rev>", package = "datafusion_pg_catalog" }
+# Pinned to a pg_catalog main commit (DataFusion 54). Bump the rev to pull in
+# newer pg_catalog changes.
+datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", rev = "7423815bdde319b58011005c8f5a5bed7e44ab22", package = "datafusion_pg_catalog" }
 
 env_logger = "0.11.8"
 

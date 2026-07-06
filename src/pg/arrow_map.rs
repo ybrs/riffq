@@ -18,7 +18,6 @@ use pgwire::api::Type;
 //     }
 // }
 
-
 /// Translate an Arrow `DataType` into a pgwire `Type` (PostgreSQL OID).
 ///
 /// Only scalar / first-class SQL-ish types have direct mappings.
@@ -32,32 +31,35 @@ pub fn arrow_type_to_pgwire(dt: &DataType) -> Type {
     info!("Datatype -> {:?}", dt);
     match dt {
         /* ── integers ───────────────────────────── */
-        Int8 | UInt8                   => Type::INT2,   // SMALLINT
-        Int16                          => Type::INT2,
-        UInt16                         => Type::INT4,
-        Int32                          => Type::INT4,
-        UInt32 | Int64 | UInt64        => Type::INT8,   // BIGINT
+        Int8 | UInt8 => Type::INT2, // SMALLINT
+        Int16 => Type::INT2,
+        UInt16 => Type::INT4,
+        Int32 => Type::INT4,
+        UInt32 | Int64 | UInt64 => Type::INT8, // BIGINT
 
         /* ── floats & decimals ──────────────────── */
-        Float16 | Float32              => Type::FLOAT4,
-        Float64                        => Type::FLOAT8,
-        Decimal128(_, _) | Decimal256(_, _)
-                                        => Type::NUMERIC,
+        Float16 | Float32 => Type::FLOAT4,
+        Float64 => Type::FLOAT8,
+        Decimal128(_, _) | Decimal256(_, _) => Type::NUMERIC,
 
         /* ── booleans / strings / bytes ─────────── */
-        Boolean                        => Type::BOOL,
-        Utf8 | LargeUtf8               => Type::VARCHAR,
-        Binary | LargeBinary | FixedSizeBinary(_)
-                                        => Type::BYTEA,
+        Boolean => Type::BOOL,
+        Utf8 | LargeUtf8 => Type::VARCHAR,
+        Binary | LargeBinary | FixedSizeBinary(_) => Type::BYTEA,
 
         /* ── temporal ───────────────────────────── */
-        Date32 | Date64                => Type::DATE,
-        Time32(_) | Time64(_)          => Type::TIME,
-        Timestamp(_, tz)               =>
-            if tz.is_some() { Type::TIMESTAMPTZ } else { Type::TIMESTAMP },
-        Duration(_) | Interval(_)      => Type::INTERVAL,
-        /* ── UUID ──────────────────────────────── */        
-        // TODO: we probably need to support uuid with something similar to this 
+        Date32 | Date64 => Type::DATE,
+        Time32(_) | Time64(_) => Type::TIME,
+        Timestamp(_, tz) => {
+            if tz.is_some() {
+                Type::TIMESTAMPTZ
+            } else {
+                Type::TIMESTAMP
+            }
+        }
+        Duration(_) | Interval(_) => Type::INTERVAL,
+        /* ── UUID ──────────────────────────────── */
+        // TODO: we probably need to support uuid with something similar to this
         //pub fn arrow_field_to_pgwire(field: &Field) -> Type {
         //     use DataType::*;
 
@@ -85,7 +87,7 @@ pub fn arrow_type_to_pgwire(dt: &DataType) -> Type {
         // | Dictionary(_, _)
         // | RunEndEncoded(_, _)
         // | Null                      => Type::VARCHAR,
-        
+
         /* ── arrays ─────────────────────────────── */
         List(field) | LargeList(field) | FixedSizeList(field, _) => match field.data_type() {
             DataType::Utf8 | DataType::LargeUtf8 => Type::VARCHAR_ARRAY,
@@ -100,7 +102,7 @@ pub fn arrow_type_to_pgwire(dt: &DataType) -> Type {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::datatypes::{TimeUnit};
+    use arrow::datatypes::TimeUnit;
 
     #[test]
     fn test_arrow_type_to_pgwire_integers() {
@@ -128,8 +130,14 @@ mod tests {
         assert_eq!(arrow_type_to_pgwire(&DataType::LargeUtf8), Type::VARCHAR);
         assert_eq!(arrow_type_to_pgwire(&DataType::Date32), Type::DATE);
         assert_eq!(arrow_type_to_pgwire(&DataType::Date64), Type::DATE);
-        assert_eq!(arrow_type_to_pgwire(&DataType::Decimal128(16, 6)), Type::NUMERIC);
-        assert_eq!(arrow_type_to_pgwire(&DataType::Decimal256(38, 10)), Type::NUMERIC);
+        assert_eq!(
+            arrow_type_to_pgwire(&DataType::Decimal128(16, 6)),
+            Type::NUMERIC
+        );
+        assert_eq!(
+            arrow_type_to_pgwire(&DataType::Decimal256(38, 10)),
+            Type::NUMERIC
+        );
         assert_eq!(
             arrow_type_to_pgwire(&DataType::Timestamp(TimeUnit::Second, None)),
             Type::TIMESTAMP

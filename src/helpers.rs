@@ -1,10 +1,12 @@
 use bytes::Bytes;
+use pgwire::api::Type;
 use postgres_types::FromSql;
-use pgwire::api::{Type};
 
 pub fn _debug_parameters(params: &[Option<Bytes>], types: &[Type]) -> String {
-    params.iter().zip(types.iter()).map(|(param, ty)| {
-        match param {
+    params
+        .iter()
+        .zip(types.iter())
+        .map(|(param, ty)| match param {
             None => "NULL".to_string(),
             Some(bytes) => {
                 let mut buf = &bytes[..];
@@ -17,10 +19,11 @@ pub fn _debug_parameters(params: &[Option<Bytes>], types: &[Type]) -> String {
                     &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR => {
                         String::from_sql(ty, &mut buf).map(|s| format!("{:?}", s))
                     }
-                    _ => Err("unsupported type".into())
+                    _ => Err("unsupported type".into()),
                 };
                 decoded.unwrap_or_else(|_| format!("0x{}", hex::encode(bytes)))
             }
-        }
-    }).collect::<Vec<_>>().join(", ")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }

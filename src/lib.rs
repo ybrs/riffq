@@ -1,99 +1,91 @@
+use async_trait::async_trait;
 use datafusion::sql::sqlparser::dialect::PostgreSqlDialect;
 use datafusion_pg_catalog::session::ClientOpts;
-use pyo3::prelude::*;
-use pyo3::{PyAny, Bound, IntoPyObjectExt};
-use std::sync::{Arc, Mutex};
-use async_trait::async_trait;
 use futures::{Sink, SinkExt, Stream};
-use tokio::net::TcpListener;
-use tokio::net::TcpSocket;
-use tokio::signal;
-use tokio::sync::oneshot;
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
-use tokio::net::TcpStream;
-use pyo3::types::{PyDict, PyList, PyTuple, PyCapsule};
-use std::fs::File;
-use std::io::{BufReader, Error as IOError, ErrorKind};
+use log::{debug, error, info};
+use pyo3::prelude::*;
+use pyo3::types::{PyCapsule, PyDict, PyList, PyTuple};
+use pyo3::{Bound, IntoPyObjectExt, PyAny};
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use tokio_rustls::rustls::ServerConfig;
+use std::fs::File;
+use std::io::{BufReader, Error as IOError, ErrorKind};
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::net::TcpSocket;
+use tokio::net::TcpStream;
+use tokio::signal;
+use tokio::sync::oneshot;
 use tokio_rustls::TlsAcceptor;
-use log::{debug, error, info};
+use tokio_rustls::rustls::ServerConfig;
 
-use std::collections::HashMap;
 use std::collections::BTreeMap;
-use std::sync::mpsc::{channel, Sender};
-use std::thread;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Sender, channel};
+use std::thread;
 
 static CONNECTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use bytes::Bytes;
+use futures::stream;
 use std::ffi::c_void;
 use std::pin::Pin;
-use futures::stream;
 
-use arrow::ffi_stream::ArrowArrayStreamReader;
 use arrow::array::{
-    Array, RecordBatch, ListArray, LargeListArray, FixedSizeListArray, BinaryArray, LargeBinaryArray, FixedSizeBinaryArray, Decimal128Array, Decimal256Array,
+    Array, BinaryArray, Decimal128Array, Decimal256Array, FixedSizeBinaryArray, FixedSizeListArray,
+    LargeBinaryArray, LargeListArray, ListArray, RecordBatch,
 };
+use arrow::ffi_stream::ArrowArrayStreamReader;
 // no explicit import of i256 required; we only use to_string() on values
 use arrow::array::cast::AsArray;
-use arrow::record_batch::RecordBatchReader;
-use arrow::datatypes::{DataType, Field, Schema, TimestampMicrosecondType, TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType};
 use arrow::array::{ArrayRef, StringBuilder};
+use arrow::datatypes::{
+    DataType, Field, Schema, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, TimestampSecondType,
+};
+use arrow::record_batch::RecordBatchReader;
+use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::context::SessionContext;
 use datafusion_pg_catalog::{
-    dispatch_query,
-    get_base_session_context,
-    get_base_session_context_with_lazy_catalog,
-    register_user_database,
-    register_schema,
+    ColumnDef, ColumnSpec, ConfigSettingDef, DatabaseDef, LazyCatalogOptions, LazyCatalogSource,
+    RelationDef, RelationKind, SchemaDef, SettingDef, dispatch_query, get_base_session_context,
+    get_base_session_context_with_lazy_catalog, register_schema, register_user_database,
     register_user_tables,
-    ColumnDef,
-    ColumnSpec,
-    ConfigSettingDef,
-    DatabaseDef,
-    LazyCatalogOptions,
-    LazyCatalogSource,
-    RelationDef,
-    RelationKind,
-    SchemaDef,
-    SettingDef,
 };
-use datafusion::error::{DataFusionError, Result as DFResult};
 use postgres_types::FromSql;
 
-use chrono::{DateTime, Duration, NaiveDate};
 use arrow::datatypes::TimeUnit;
+use chrono::{DateTime, Duration, NaiveDate};
 
-
-use pgwire::api::auth::{finish_authentication, DefaultServerParameterProvider, StartupHandler};
 use pgwire::api::PgWireConnectionState;
-use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
-use pgwire::api::results::{DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo, QueryResponse, Response, Tag};
-use pgwire::messages::data::DataRow;
-use pgwire::api::{ClientInfo, NoopHandler, PgWireServerHandlers, Type};
-use pgwire::api::portal::Portal;
-use pgwire::error::{PgWireError, PgWireResult, ErrorInfo};
-use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
-use pgwire::messages::startup::Authentication;
-use pgwire::messages::response::ErrorResponse;
-use pgwire::tokio::process_socket;
-use pgwire::api::stmt::{StoredStatement};
+use pgwire::api::auth::{DefaultServerParameterProvider, StartupHandler, finish_authentication};
 use pgwire::api::portal::Format;
+use pgwire::api::portal::Portal;
+use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
+use pgwire::api::results::{
+    DataRowEncoder, DescribePortalResponse, DescribeStatementResponse, FieldFormat, FieldInfo,
+    QueryResponse, Response, Tag,
+};
+use pgwire::api::stmt::StoredStatement;
+use pgwire::api::{ClientInfo, NoopHandler, PgWireServerHandlers, Type};
+use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
+use pgwire::messages::data::DataRow;
+use pgwire::messages::response::ErrorResponse;
+use pgwire::messages::startup::Authentication;
+use pgwire::messages::{PgWireBackendMessage, PgWireFrontendMessage};
+use pgwire::tokio::process_socket;
 
-pub mod pg;
 mod helpers;
-use pg::arrow_type_to_pgwire;
-use sqlparser::parser::Parser;
-use sqlparser::ast::Statement;
+pub mod pg;
 use helpers::_debug_parameters;
-
+use pg::arrow_type_to_pgwire;
+use sqlparser::ast::Statement;
+use sqlparser::parser::Parser;
 
 /// PostgreSQL version reported to clients during startup and via `SHOW server_version`.
 pub const SERVER_VERSION: &str = "17.4.0";
-
 
 pub enum WorkerMessage {
     Query {
@@ -155,7 +147,10 @@ impl BoolCallbackWrapper {
             Python::attach(|py| {
                 let val: bool = result.extract(py).unwrap_or(false);
                 if val {
-                    let _ = sender.send(BoolCallbackResult { allowed: true, error: None });
+                    let _ = sender.send(BoolCallbackResult {
+                        allowed: true,
+                        error: None,
+                    });
                 } else {
                     let err = if message.is_some() || severity.is_some() || sqlstate.is_some() {
                         let sev = severity.unwrap_or_else(|| "FATAL".to_string());
@@ -165,7 +160,10 @@ impl BoolCallbackWrapper {
                     } else {
                         None
                     };
-                    let _ = sender.send(BoolCallbackResult { allowed: false, error: err });
+                    let _ = sender.send(BoolCallbackResult {
+                        allowed: false,
+                        error: err,
+                    });
                 }
             });
         }
@@ -189,16 +187,14 @@ impl CallbackWrapper {
                 if is_error {
                     let err_tuple = result
                         .extract::<(String, String, String)>(py)
-                        .unwrap_or_else(|_| (
-                            "ERROR".to_string(),
-                            "XX000".to_string(),
-                            "unknown error".to_string(),
-                        ));
-                    let err_info = ErrorInfo::new(
-                        err_tuple.0,
-                        err_tuple.1,
-                        err_tuple.2,
-                    );
+                        .unwrap_or_else(|_| {
+                            (
+                                "ERROR".to_string(),
+                                "XX000".to_string(),
+                                "unknown error".to_string(),
+                            )
+                        });
+                    let err_info = ErrorInfo::new(err_tuple.0, err_tuple.1, err_tuple.2);
                     let _ = sender.send(QueryResult::Error(Box::new(err_info)));
                     return;
                 }
@@ -234,7 +230,6 @@ impl CallbackWrapper {
                     return;
                 }
 
-
                 // First try to treat the result as Arrow IPC bytes. When the
                 // callback returns bytes we assume they contain an Arrow IPC
                 // stream produced by ``pyarrow``.
@@ -249,10 +244,12 @@ impl CallbackWrapper {
                 }
 
                 // Fallback: assume (schema_desc, rows) tuple, build batches
-                let parsed: PyResult<(Vec<HashMap<String, String>>, Vec<Vec<Py<PyAny>>>)> = result_bound.extract::<(Vec<HashMap<String, String>>, Vec<Vec<Py<PyAny>>>)>() ;
+                let parsed: PyResult<(Vec<HashMap<String, String>>, Vec<Vec<Py<PyAny>>>)> =
+                    result_bound.extract::<(Vec<HashMap<String, String>>, Vec<Vec<Py<PyAny>>>)>();
                 if let Ok((schema_desc, py_rows)) = parsed {
                     // turn PyObjects into Rust Option<String>
-                    let rows: Vec<Vec<Option<String>>> = py_rows.into_iter()
+                    let rows: Vec<Vec<Option<String>>> = py_rows
+                        .into_iter()
                         .map(|row| {
                             row.into_iter()
                                 .map(|val| {
@@ -268,7 +265,8 @@ impl CallbackWrapper {
                         .collect();
 
                     // build arrow arrays column-wise
-                    let fields: Vec<Field> = schema_desc.iter()
+                    let fields: Vec<Field> = schema_desc
+                        .iter()
                         .map(|c| Field::new(c.get("name").unwrap(), DataType::Utf8, true))
                         .collect();
 
@@ -279,7 +277,7 @@ impl CallbackWrapper {
                         for (i, cell) in row.iter().enumerate() {
                             match cell {
                                 Some(s) => builders[i].append_value(s),
-                                None    => builders[i].append_null(),
+                                None => builders[i].append_null(),
                             }
                         }
                     }
@@ -290,11 +288,9 @@ impl CallbackWrapper {
                         .collect();
 
                     let schema = Arc::new(Schema::new(fields));
-                    let batch  = RecordBatch::try_new(schema.clone(), arrays).unwrap();
-                    let _      = sender.send(QueryResult::Arrow(vec![batch], schema));
+                    let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+                    let _ = sender.send(QueryResult::Arrow(vec![batch], schema));
                 }
-
-
             });
         }
     }
@@ -329,7 +325,7 @@ fn arrow_to_pg_rows(
 
     // lazy row stream
     let row_stream = stream::unfold((0usize, batches), {
-        let meta_outer = field_defs.clone();          // captured by outer FnMut
+        let meta_outer = field_defs.clone(); // captured by outer FnMut
         move |(mut row_idx, mut remaining_batches)| {
             // clone **inside** so the async move owns its copy
             let meta = meta_outer.clone();
@@ -347,8 +343,12 @@ fn arrow_to_pg_rows(
                     let batch = &remaining_batches[0];
                     let mut enc = DataRowEncoder::new(meta.clone());
                     for (col_idx, col) in batch.columns().iter().enumerate() {
-                        let format = meta.get(col_idx).map(|f| f.format()).unwrap_or(FieldFormat::Text);
-                        if let Err(e) = encode_arrow_value(&mut enc, col.as_ref(), row_idx, format) {
+                        let format = meta
+                            .get(col_idx)
+                            .map(|f| f.format())
+                            .unwrap_or(FieldFormat::Text);
+                        if let Err(e) = encode_arrow_value(&mut enc, col.as_ref(), row_idx, format)
+                        {
                             return Some((Err(e), (row_idx + 1, remaining_batches)));
                         }
                     }
@@ -369,35 +369,97 @@ fn arrow_value_to_string(array: &dyn Array, row: usize) -> Option<String> {
     }
 
     match array.data_type() {
-        DataType::Int8 => Some(array.as_primitive::<arrow::array::types::Int8Type>().value(row).to_string()),
-        DataType::Int16 => Some(array.as_primitive::<arrow::array::types::Int16Type>().value(row).to_string()),
-        DataType::Int32 => Some(array.as_primitive::<arrow::array::types::Int32Type>().value(row).to_string()),
-        DataType::Int64 => Some(array.as_primitive::<arrow::array::types::Int64Type>().value(row).to_string()),
-        DataType::UInt8 => Some(array.as_primitive::<arrow::array::types::UInt8Type>().value(row).to_string()),
-        DataType::UInt16 => Some(array.as_primitive::<arrow::array::types::UInt16Type>().value(row).to_string()),
-        DataType::UInt32 => Some(array.as_primitive::<arrow::array::types::UInt32Type>().value(row).to_string()),
-        DataType::UInt64 => Some(array.as_primitive::<arrow::array::types::UInt64Type>().value(row).to_string()),
-        DataType::Float32 => Some(array.as_primitive::<arrow::array::types::Float32Type>().value(row).to_string()),
-        DataType::Float64 => Some(array.as_primitive::<arrow::array::types::Float64Type>().value(row).to_string()),
+        DataType::Int8 => Some(
+            array
+                .as_primitive::<arrow::array::types::Int8Type>()
+                .value(row)
+                .to_string(),
+        ),
+        DataType::Int16 => Some(
+            array
+                .as_primitive::<arrow::array::types::Int16Type>()
+                .value(row)
+                .to_string(),
+        ),
+        DataType::Int32 => Some(
+            array
+                .as_primitive::<arrow::array::types::Int32Type>()
+                .value(row)
+                .to_string(),
+        ),
+        DataType::Int64 => Some(
+            array
+                .as_primitive::<arrow::array::types::Int64Type>()
+                .value(row)
+                .to_string(),
+        ),
+        DataType::UInt8 => Some(
+            array
+                .as_primitive::<arrow::array::types::UInt8Type>()
+                .value(row)
+                .to_string(),
+        ),
+        DataType::UInt16 => Some(
+            array
+                .as_primitive::<arrow::array::types::UInt16Type>()
+                .value(row)
+                .to_string(),
+        ),
+        DataType::UInt32 => Some(
+            array
+                .as_primitive::<arrow::array::types::UInt32Type>()
+                .value(row)
+                .to_string(),
+        ),
+        DataType::UInt64 => Some(
+            array
+                .as_primitive::<arrow::array::types::UInt64Type>()
+                .value(row)
+                .to_string(),
+        ),
+        DataType::Float32 => Some(
+            array
+                .as_primitive::<arrow::array::types::Float32Type>()
+                .value(row)
+                .to_string(),
+        ),
+        DataType::Float64 => Some(
+            array
+                .as_primitive::<arrow::array::types::Float64Type>()
+                .value(row)
+                .to_string(),
+        ),
         DataType::Boolean => Some(array.as_boolean().value(row).to_string()),
         DataType::Utf8 => Some(array.as_string::<i32>().value(row).to_string()),
         DataType::LargeUtf8 => Some(array.as_string::<i64>().value(row).to_string()),
         DataType::Date32 => {
-            let days = array.as_primitive::<arrow::array::types::Date32Type>().value(row) as i64;
+            let days = array
+                .as_primitive::<arrow::array::types::Date32Type>()
+                .value(row) as i64;
             let date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + Duration::days(days);
             Some(date.to_string())
         }
         DataType::Date64 => {
-            let ms = array.as_primitive::<arrow::array::types::Date64Type>().value(row);
+            let ms = array
+                .as_primitive::<arrow::array::types::Date64Type>()
+                .value(row);
             let dt = DateTime::from_timestamp(ms / 1000, (ms % 1000 * 1_000_000) as u32).unwrap();
             Some(dt.to_string())
         }
         DataType::Timestamp(unit, _) => {
             let nanos: i128 = match unit {
-                TimeUnit::Second => array.as_primitive::<TimestampSecondType>().value(row) as i128 * 1_000_000_000,
-                TimeUnit::Millisecond => array.as_primitive::<TimestampMillisecondType>().value(row) as i128 * 1_000_000,
-                TimeUnit::Microsecond => array.as_primitive::<TimestampMicrosecondType>().value(row) as i128 * 1_000,
-                TimeUnit::Nanosecond => array.as_primitive::<TimestampNanosecondType>().value(row) as i128,
+                TimeUnit::Second => {
+                    array.as_primitive::<TimestampSecondType>().value(row) as i128 * 1_000_000_000
+                }
+                TimeUnit::Millisecond => {
+                    array.as_primitive::<TimestampMillisecondType>().value(row) as i128 * 1_000_000
+                }
+                TimeUnit::Microsecond => {
+                    array.as_primitive::<TimestampMicrosecondType>().value(row) as i128 * 1_000
+                }
+                TimeUnit::Nanosecond => {
+                    array.as_primitive::<TimestampNanosecondType>().value(row) as i128
+                }
             };
             let secs = (nanos / 1_000_000_000) as i64;
             let nsec = (nanos % 1_000_000_000) as u32;
@@ -423,7 +485,10 @@ fn arrow_value_to_string(array: &dyn Array, row: usize) -> Option<String> {
             Some(hex_bytea(arr.value(row)))
         }
         DataType::FixedSizeBinary(_) => {
-            let arr = array.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+            let arr = array
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
             Some(hex_bytea(arr.value(row)))
         }
         DataType::List(_) => {
@@ -537,7 +602,10 @@ fn encode_arrow_value(
             }
         }
         DataType::FixedSizeBinary(_) => {
-            let arr = array.as_any().downcast_ref::<FixedSizeBinaryArray>().unwrap();
+            let arr = array
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .unwrap();
             let bytes = arr.value(row);
             match format {
                 FieldFormat::Binary => encoder.encode_field(&Some(bytes)),
@@ -547,35 +615,87 @@ fn encode_arrow_value(
                 }
             }
         }
-        DataType::Int8 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int8Type>().value(row) as i16)),
-        DataType::Int16 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int16Type>().value(row))),
-        DataType::Int32 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int32Type>().value(row))),
-        DataType::Int64 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Int64Type>().value(row))),
-        DataType::UInt8 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::UInt8Type>().value(row) as i16)),
-        DataType::UInt16 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::UInt16Type>().value(row) as i32)),
-        DataType::UInt32 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::UInt32Type>().value(row) as i64)),
-        DataType::UInt64 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::UInt64Type>().value(row) as i64)),
-        DataType::Float32 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Float32Type>().value(row))),
-        DataType::Float64 => encoder.encode_field(&Some(array.as_primitive::<arrow::array::types::Float64Type>().value(row))),
+        DataType::Int8 => encoder.encode_field(&Some(
+            array
+                .as_primitive::<arrow::array::types::Int8Type>()
+                .value(row) as i16,
+        )),
+        DataType::Int16 => encoder.encode_field(&Some(
+            array
+                .as_primitive::<arrow::array::types::Int16Type>()
+                .value(row),
+        )),
+        DataType::Int32 => encoder.encode_field(&Some(
+            array
+                .as_primitive::<arrow::array::types::Int32Type>()
+                .value(row),
+        )),
+        DataType::Int64 => encoder.encode_field(&Some(
+            array
+                .as_primitive::<arrow::array::types::Int64Type>()
+                .value(row),
+        )),
+        DataType::UInt8 => encoder.encode_field(&Some(
+            array
+                .as_primitive::<arrow::array::types::UInt8Type>()
+                .value(row) as i16,
+        )),
+        DataType::UInt16 => encoder.encode_field(&Some(
+            array
+                .as_primitive::<arrow::array::types::UInt16Type>()
+                .value(row) as i32,
+        )),
+        DataType::UInt32 => encoder.encode_field(&Some(
+            array
+                .as_primitive::<arrow::array::types::UInt32Type>()
+                .value(row) as i64,
+        )),
+        DataType::UInt64 => encoder.encode_field(&Some(
+            array
+                .as_primitive::<arrow::array::types::UInt64Type>()
+                .value(row) as i64,
+        )),
+        DataType::Float32 => encoder.encode_field(&Some(
+            array
+                .as_primitive::<arrow::array::types::Float32Type>()
+                .value(row),
+        )),
+        DataType::Float64 => encoder.encode_field(&Some(
+            array
+                .as_primitive::<arrow::array::types::Float64Type>()
+                .value(row),
+        )),
         DataType::Boolean => encoder.encode_field(&Some(array.as_boolean().value(row))),
         DataType::Utf8 => encoder.encode_field(&Some(array.as_string::<i32>().value(row))),
         DataType::LargeUtf8 => encoder.encode_field(&Some(array.as_string::<i64>().value(row))),
         DataType::Date32 => {
-            let days = array.as_primitive::<arrow::array::types::Date32Type>().value(row) as i64;
+            let days = array
+                .as_primitive::<arrow::array::types::Date32Type>()
+                .value(row) as i64;
             let date = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap() + Duration::days(days);
             encoder.encode_field(&Some(date))
         }
         DataType::Date64 => {
-            let ms = array.as_primitive::<arrow::array::types::Date64Type>().value(row);
+            let ms = array
+                .as_primitive::<arrow::array::types::Date64Type>()
+                .value(row);
             let dt = DateTime::from_timestamp(ms / 1000, (ms % 1000 * 1_000_000) as u32).unwrap();
             encoder.encode_field(&Some(dt))
         }
         DataType::Timestamp(unit, _) => {
             let nanos: i128 = match unit {
-                TimeUnit::Second => array.as_primitive::<TimestampSecondType>().value(row) as i128 * 1_000_000_000,
-                TimeUnit::Millisecond => array.as_primitive::<TimestampMillisecondType>().value(row) as i128 * 1_000_000,
-                TimeUnit::Microsecond => array.as_primitive::<TimestampMicrosecondType>().value(row) as i128 * 1_000,
-                TimeUnit::Nanosecond => array.as_primitive::<TimestampNanosecondType>().value(row) as i128,
+                TimeUnit::Second => {
+                    array.as_primitive::<TimestampSecondType>().value(row) as i128 * 1_000_000_000
+                }
+                TimeUnit::Millisecond => {
+                    array.as_primitive::<TimestampMillisecondType>().value(row) as i128 * 1_000_000
+                }
+                TimeUnit::Microsecond => {
+                    array.as_primitive::<TimestampMicrosecondType>().value(row) as i128 * 1_000
+                }
+                TimeUnit::Nanosecond => {
+                    array.as_primitive::<TimestampNanosecondType>().value(row) as i128
+                }
             };
             let secs = (nanos / 1_000_000_000) as i64;
             let nsec = (nanos % 1_000_000_000) as u32;
@@ -615,8 +735,15 @@ fn insert_decimal_point(s: &str, scale: usize) -> String {
         }
     }
     let len = digits.len();
-    let result = if scale == 0 { digits } else if len > scale {
-        format!("{}.{:0width$}", &digits[..len - scale], digits[len - scale..].to_string(), width = scale)
+    let result = if scale == 0 {
+        digits
+    } else if len > scale {
+        format!(
+            "{}.{:0width$}",
+            &digits[..len - scale],
+            digits[len - scale..].to_string(),
+            width = scale
+        )
     } else {
         // pad with leading zeros
         let mut tmp = String::from("0.");
@@ -638,14 +765,15 @@ fn hex_bytea(bytes: &[u8]) -> String {
     out
 }
 
-    #[cfg(test)]
+#[cfg(test)]
 mod encode_tests {
     use super::*;
 
-        #[test]
-        fn test_decimal128_to_string() {
+    #[test]
+    fn test_decimal128_to_string() {
         let dt = DataType::Decimal128(16, 6);
-        let arr = Decimal128Array::from(vec![Some(123456789i128), Some(-42i128), None]).with_data_type(dt.clone());
+        let arr = Decimal128Array::from(vec![Some(123456789i128), Some(-42i128), None])
+            .with_data_type(dt.clone());
         let a: &dyn Array = &arr;
         assert_eq!(arrow_value_to_string(a, 0).as_deref(), Some("123.456789"));
         assert_eq!(arrow_value_to_string(a, 1).as_deref(), Some("-0.000042"));
@@ -654,17 +782,12 @@ mod encode_tests {
 
     #[test]
     fn test_binary_to_hex_text() {
-        let arr = BinaryArray::from(vec![
-            Some(&[0xab][..]),
-            Some(&[0xde, 0xad, 0xbe, 0xef][..])
-        ]);
+        let arr = BinaryArray::from(vec![Some(&[0xab][..]), Some(&[0xde, 0xad, 0xbe, 0xef][..])]);
         let a: &dyn Array = &arr;
         assert_eq!(arrow_value_to_string(a, 0).as_deref(), Some("\\xab"));
         assert_eq!(arrow_value_to_string(a, 1).as_deref(), Some("\\xdeadbeef"));
     }
 }
-
-
 
 pub struct PythonWorker {
     sender: Sender<WorkerMessage>,
@@ -687,37 +810,50 @@ impl PythonWorker {
                 debug!("[PY_WORKER] waiting to receive on rx...");
                 match rx.recv() {
                     Ok(msg) => match msg {
-                        WorkerMessage::Query { query, params, param_types, do_describe, connection_id, responder } => {
+                        WorkerMessage::Query {
+                            query,
+                            params,
+                            param_types,
+                            do_describe,
+                            connection_id,
+                            responder,
+                        } => {
                             debug!("[PY_WORKER] received query: {} -- {}", connection_id, query);
                             let cb_opt = Python::attach(|py| {
-                                query_cb
-                                    .lock()
-                                    .unwrap()
-                                    .as_ref()
-                                    .map(|cb| cb.clone_ref(py))
+                                query_cb.lock().unwrap().as_ref().map(|cb| cb.clone_ref(py))
                             });
 
                             if let Some(cb) = cb_opt {
                                 Python::attach(|py| {
                                     debug!("[PY_WORKER] GIL acquired, invoking callback");
-                                    let wrapper = Py::new(py, CallbackWrapper {
-                                        responder: Arc::new(Mutex::new(Some(responder))),
-                                    }).unwrap();
+                                    let wrapper = Py::new(
+                                        py,
+                                        CallbackWrapper {
+                                            responder: Arc::new(Mutex::new(Some(responder))),
+                                        },
+                                    )
+                                    .unwrap();
 
-                                    let args = PyTuple::new(py, [
-                                        query.clone().into_py_any(py).unwrap(),
-                                        wrapper.clone_ref(py).into_py_any(py).unwrap(),
-                                    ]).unwrap();
+                                    let args = PyTuple::new(
+                                        py,
+                                        [
+                                            query.clone().into_py_any(py).unwrap(),
+                                            wrapper.clone_ref(py).into_py_any(py).unwrap(),
+                                        ],
+                                    )
+                                    .unwrap();
                                     let kwargs = PyDict::new(py);
 
                                     // Add do_describe flag
                                     kwargs.set_item("do_describe", do_describe).unwrap();
 
                                     // Connection identifier
-                                    kwargs.set_item("connection_id", connection_id).unwrap();                                    
+                                    kwargs.set_item("connection_id", connection_id).unwrap();
 
                                     // Add query_args if present
-                                    if let (Some(params), Some(param_types)) = (&params, &param_types) {
+                                    if let (Some(params), Some(param_types)) =
+                                        (&params, &param_types)
+                                    {
                                         let py_args = PyList::empty(py);
                                         for (val, ty) in params.iter().zip(param_types.iter()) {
                                             match val {
@@ -727,15 +863,68 @@ impl PythonWorker {
                                                 Some(bytes) => {
                                                     let mut buf = &bytes[..];
                                                     match ty {
-                                                        &Type::INT2 => if let Ok(v) = i16::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
-                                                        &Type::INT4 => if let Ok(v) = i32::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
-                                                        &Type::INT8 => if let Ok(v) = i64::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
-                                                        &Type::FLOAT4 => if let Ok(v) = f32::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
-                                                        &Type::FLOAT8 => if let Ok(v) = f64::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
-                                                        &Type::TEXT | &Type::VARCHAR | &Type::BPCHAR => if let Ok(v) = String::from_sql(ty, &mut buf) { py_args.append(v).unwrap(); } else { py_args.append(py.None()).unwrap(); },
-                                                        _ => { 
-                                                            info!("unknown query argument type {:}?", ty);
-                                                            py_args.append(py.None()).unwrap(); 
+                                                        &Type::INT2 => {
+                                                            if let Ok(v) =
+                                                                i16::from_sql(ty, &mut buf)
+                                                            {
+                                                                py_args.append(v).unwrap();
+                                                            } else {
+                                                                py_args.append(py.None()).unwrap();
+                                                            }
+                                                        }
+                                                        &Type::INT4 => {
+                                                            if let Ok(v) =
+                                                                i32::from_sql(ty, &mut buf)
+                                                            {
+                                                                py_args.append(v).unwrap();
+                                                            } else {
+                                                                py_args.append(py.None()).unwrap();
+                                                            }
+                                                        }
+                                                        &Type::INT8 => {
+                                                            if let Ok(v) =
+                                                                i64::from_sql(ty, &mut buf)
+                                                            {
+                                                                py_args.append(v).unwrap();
+                                                            } else {
+                                                                py_args.append(py.None()).unwrap();
+                                                            }
+                                                        }
+                                                        &Type::FLOAT4 => {
+                                                            if let Ok(v) =
+                                                                f32::from_sql(ty, &mut buf)
+                                                            {
+                                                                py_args.append(v).unwrap();
+                                                            } else {
+                                                                py_args.append(py.None()).unwrap();
+                                                            }
+                                                        }
+                                                        &Type::FLOAT8 => {
+                                                            if let Ok(v) =
+                                                                f64::from_sql(ty, &mut buf)
+                                                            {
+                                                                py_args.append(v).unwrap();
+                                                            } else {
+                                                                py_args.append(py.None()).unwrap();
+                                                            }
+                                                        }
+                                                        &Type::TEXT
+                                                        | &Type::VARCHAR
+                                                        | &Type::BPCHAR => {
+                                                            if let Ok(v) =
+                                                                String::from_sql(ty, &mut buf)
+                                                            {
+                                                                py_args.append(v).unwrap();
+                                                            } else {
+                                                                py_args.append(py.None()).unwrap();
+                                                            }
+                                                        }
+                                                        _ => {
+                                                            info!(
+                                                                "unknown query argument type {:}?",
+                                                                ty
+                                                            );
+                                                            py_args.append(py.None()).unwrap();
                                                         }
                                                     }
                                                 }
@@ -751,7 +940,13 @@ impl PythonWorker {
                                 });
                             }
                         }
-                        WorkerMessage::Connect { connection_id, ip, port, server_name, responder } => {
+                        WorkerMessage::Connect {
+                            connection_id,
+                            ip,
+                            port,
+                            server_name,
+                            responder,
+                        } => {
                             let cb_opt = Python::attach(|py| {
                                 connect_cb
                                     .lock()
@@ -761,14 +956,22 @@ impl PythonWorker {
                             });
                             if let Some(cb) = cb_opt {
                                 Python::attach(|py| {
-                                    let wrapper = Py::new(py, BoolCallbackWrapper {
-                                        responder: Arc::new(Mutex::new(Some(responder))),
-                                    }).unwrap();
-                                    let args = PyTuple::new(py, [
-                                        connection_id.into_py_any(py).unwrap(),
-                                        ip.clone().into_py_any(py).unwrap(),
-                                        port.into_py_any(py).unwrap(),
-                                    ]).unwrap();
+                                    let wrapper = Py::new(
+                                        py,
+                                        BoolCallbackWrapper {
+                                            responder: Arc::new(Mutex::new(Some(responder))),
+                                        },
+                                    )
+                                    .unwrap();
+                                    let args = PyTuple::new(
+                                        py,
+                                        [
+                                            connection_id.into_py_any(py).unwrap(),
+                                            ip.clone().into_py_any(py).unwrap(),
+                                            port.into_py_any(py).unwrap(),
+                                        ],
+                                    )
+                                    .unwrap();
                                     let kwargs = PyDict::new(py);
                                     kwargs.set_item("callback", wrapper.clone_ref(py)).unwrap();
                                     if let Some(name) = server_name.clone() {
@@ -781,10 +984,17 @@ impl PythonWorker {
                                     }
                                 });
                             } else {
-                                let _ = responder.send(BoolCallbackResult { allowed: true, error: None });
+                                let _ = responder.send(BoolCallbackResult {
+                                    allowed: true,
+                                    error: None,
+                                });
                             }
                         }
-                        WorkerMessage::Disconnect { connection_id, ip, port } => {
+                        WorkerMessage::Disconnect {
+                            connection_id,
+                            ip,
+                            port,
+                        } => {
                             let cb_opt = Python::attach(|py| {
                                 disconnect_cb
                                     .lock()
@@ -794,18 +1004,29 @@ impl PythonWorker {
                             });
                             if let Some(cb) = cb_opt {
                                 Python::attach(|py| {
-                                    let args = PyTuple::new(py, [
-                                        connection_id.into_py_any(py).unwrap(),
-                                        ip.clone().into_py_any(py).unwrap(),
-                                        port.into_py_any(py).unwrap(),
-                                    ]).unwrap();
+                                    let args = PyTuple::new(
+                                        py,
+                                        [
+                                            connection_id.into_py_any(py).unwrap(),
+                                            ip.clone().into_py_any(py).unwrap(),
+                                            port.into_py_any(py).unwrap(),
+                                        ],
+                                    )
+                                    .unwrap();
                                     if let Err(e) = cb.call1(py, args) {
                                         e.print(py);
                                     }
                                 });
                             }
                         }
-                        WorkerMessage::Authentication { connection_id, user, database, host, password, responder } => {
+                        WorkerMessage::Authentication {
+                            connection_id,
+                            user,
+                            database,
+                            host,
+                            password,
+                            responder,
+                        } => {
                             let cb_opt = Python::attach(|py| {
                                 auth_cb_thread
                                     .lock()
@@ -815,15 +1036,23 @@ impl PythonWorker {
                             });
                             if let Some(cb) = cb_opt {
                                 Python::attach(|py| {
-                                    let wrapper = Py::new(py, BoolCallbackWrapper {
-                                        responder: Arc::new(Mutex::new(Some(responder))),
-                                    }).unwrap();
-                                    let args = PyTuple::new(py, [
-                                        connection_id.into_py_any(py).unwrap(),
-                                        user.clone().into_py_any(py).unwrap(),
-                                        password.clone().into_py_any(py).unwrap(),
-                                        host.clone().into_py_any(py).unwrap(),
-                                    ]).unwrap();
+                                    let wrapper = Py::new(
+                                        py,
+                                        BoolCallbackWrapper {
+                                            responder: Arc::new(Mutex::new(Some(responder))),
+                                        },
+                                    )
+                                    .unwrap();
+                                    let args = PyTuple::new(
+                                        py,
+                                        [
+                                            connection_id.into_py_any(py).unwrap(),
+                                            user.clone().into_py_any(py).unwrap(),
+                                            password.clone().into_py_any(py).unwrap(),
+                                            host.clone().into_py_any(py).unwrap(),
+                                        ],
+                                    )
+                                    .unwrap();
                                     let kwargs = PyDict::new(py);
                                     kwargs.set_item("callback", wrapper.clone_ref(py)).unwrap();
                                     if let Some(db) = database {
@@ -834,7 +1063,10 @@ impl PythonWorker {
                                     }
                                 });
                             } else {
-                                let _ = responder.send(BoolCallbackResult { allowed: true, error: None });
+                                let _ = responder.send(BoolCallbackResult {
+                                    allowed: true,
+                                    error: None,
+                                });
                             }
                         }
                     },
@@ -846,9 +1078,11 @@ impl PythonWorker {
             }
         });
 
-        PythonWorker { sender: tx, auth_cb }
+        PythonWorker {
+            sender: tx,
+            auth_cb,
+        }
     }
-
 
     pub async fn on_query(
         &self,
@@ -877,8 +1111,13 @@ impl PythonWorker {
         })
     }
 
-
-    pub async fn on_connect(&self, connection_id: u64, ip: String, port: u16, server_name: Option<&str>) -> BoolCallbackResult {
+    pub async fn on_connect(
+        &self,
+        connection_id: u64,
+        ip: String,
+        port: u16,
+        server_name: Option<&str>,
+    ) -> BoolCallbackResult {
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(WorkerMessage::Connect {
@@ -889,7 +1128,10 @@ impl PythonWorker {
                 responder: tx,
             })
             .expect("Send failed!");
-        rx.await.unwrap_or(BoolCallbackResult { allowed: false, error: None })
+        rx.await.unwrap_or(BoolCallbackResult {
+            allowed: false,
+            error: None,
+        })
     }
 
     pub fn authentication_enabled(&self) -> bool {
@@ -906,27 +1148,26 @@ impl PythonWorker {
     ) -> BoolCallbackResult {
         // info!("new authentication {} {}", connection_id, database.clone().unwrap_or_default());
         let (tx, rx) = oneshot::channel();
-        let _ = self
-            .sender
-            .send(WorkerMessage::Authentication {
-                connection_id,
-                user,
-                database,
-                host,
-                password,
-                responder: tx,
-            });
-        rx.await.unwrap_or(BoolCallbackResult { allowed: false, error: None })
+        let _ = self.sender.send(WorkerMessage::Authentication {
+            connection_id,
+            user,
+            database,
+            host,
+            password,
+            responder: tx,
+        });
+        rx.await.unwrap_or(BoolCallbackResult {
+            allowed: false,
+            error: None,
+        })
     }
 
     pub async fn on_disconnect(&self, connection_id: u64, ip: String, port: u16) {
-        let _ = self
-            .sender
-            .send(WorkerMessage::Disconnect {
-                connection_id,
-                ip,
-                port,
-            });
+        let _ = self.sender.send(WorkerMessage::Disconnect {
+            connection_id,
+            ip,
+            port,
+        });
     }
 }
 
@@ -996,21 +1237,24 @@ impl QueryRunner for RouterQueryRunner {
                         *tag_store.lock().unwrap() = Some(tag);
                         Ok((Vec::new(), Arc::new(Schema::empty())))
                     }
-                    QueryResult::Error(e) => Err(datafusion::error::DataFusionError::External(Box::new(UserQueryError(e))))
+                    QueryResult::Error(e) => Err(datafusion::error::DataFusionError::External(
+                        Box::new(UserQueryError(e)),
+                    )),
                 }
             }
         };
 
-        let (batches, schema) = match dispatch_query(&ctx, &query, params, param_types, handler).await {
-            Ok(v) => v,
-            Err(datafusion::error::DataFusionError::External(e)) => {
-                match e.downcast::<UserQueryError>() {
-                    Ok(user_err) => return Ok(QueryResult::Error(user_err.0)),
-                    Err(e) => return Err(datafusion::error::DataFusionError::External(e)),
+        let (batches, schema) =
+            match dispatch_query(&ctx, &query, params, param_types, handler).await {
+                Ok(v) => v,
+                Err(datafusion::error::DataFusionError::External(e)) => {
+                    match e.downcast::<UserQueryError>() {
+                        Ok(user_err) => return Ok(QueryResult::Error(user_err.0)),
+                        Err(e) => return Err(datafusion::error::DataFusionError::External(e)),
+                    }
                 }
-            }
-            Err(e) => return Err(e),
-        };
+                Err(e) => return Err(e),
+            };
 
         if let Some(tag) = tag_holder.lock().unwrap().take() {
             Ok(QueryResult::Tag(tag))
@@ -1024,11 +1268,9 @@ impl QueryRunner for RouterQueryRunner {
     }
 }
 
-
 struct DirectQueryRunner {
     py_worker: Arc<PythonWorker>,
 }
-
 
 #[async_trait]
 impl QueryRunner for DirectQueryRunner {
@@ -1043,7 +1285,7 @@ impl QueryRunner for DirectQueryRunner {
         Ok(
             self.py_worker
                 .on_query(query, params, param_types, do_describe, connection_id)
-                .await,                     // QueryResult, no rebuilding
+                .await, // QueryResult, no rebuilding
         )
     }
 
@@ -1060,10 +1302,9 @@ pub struct RiffqProcessor {
 }
 
 use datafusion::{
-    logical_expr::{create_udf, Volatility, ColumnarValue},
     common::ScalarValue,
+    logical_expr::{ColumnarValue, Volatility, create_udf},
 };
-
 
 impl RiffqProcessor {
     fn get_ctx(&self) -> Arc<SessionContext> {
@@ -1074,7 +1315,11 @@ impl RiffqProcessor {
     where
         C: ClientInfo + ?Sized,
     {
-        if let Some(db) = client.metadata().get(pgwire::api::METADATA_DATABASE).cloned() {
+        if let Some(db) = client
+            .metadata()
+            .get(pgwire::api::METADATA_DATABASE)
+            .cloned()
+        {
             if let Some(base) = self.ctx_map.get(&db) {
                 let new_ctx = Arc::new(SessionContext::new_with_state(base.state().clone()));
                 *self.ctx.lock().unwrap() = new_ctx.clone();
@@ -1091,18 +1336,28 @@ impl RiffqProcessor {
         static KEY: &str = "current_database";
 
         let ctx = self.get_ctx();
-        if ctx.state().scalar_functions().contains_key(KEY){
+        if ctx.state().scalar_functions().contains_key(KEY) {
             return Ok(());
         }
 
-        if let Some(db) = client.metadata().get(pgwire::api::METADATA_DATABASE).cloned() {
+        if let Some(db) = client
+            .metadata()
+            .get(pgwire::api::METADATA_DATABASE)
+            .cloned()
+        {
             let fun = Arc::new(move |_args: &[ColumnarValue]| {
                 Ok(ColumnarValue::Scalar(ScalarValue::Utf8(Some(db.clone()))))
             });
             let udf = create_udf(KEY, vec![], DataType::Utf8, Volatility::Stable, fun.clone());
             ctx.register_udf(udf);
             // udf.with_aliases("pg_catalog.current_database");
-            let udf = create_udf("pg_catalog.current_database", vec![], DataType::Utf8, Volatility::Stable, fun.clone());
+            let udf = create_udf(
+                "pg_catalog.current_database",
+                vec![],
+                DataType::Utf8,
+                Volatility::Stable,
+                fun.clone(),
+            );
             ctx.register_udf(udf);
         }
 
@@ -1115,7 +1370,7 @@ impl RiffqProcessor {
     {
         static KEY: &str = "session_user";
         let ctx = self.get_ctx();
-        if ctx.state().scalar_functions().contains_key(KEY){
+        if ctx.state().scalar_functions().contains_key(KEY) {
             return Ok(());
         }
 
@@ -1163,10 +1418,7 @@ impl RiffqProcessor {
     fn show_variable_response(&self, name: &str, format: FieldFormat) -> Option<Response> {
         let ctx = self.get_ctx();
         let state = ctx.state();
-        let opts = state
-            .config_options()
-            .extensions
-            .get::<ClientOpts>()?;
+        let opts = state.config_options().extensions.get::<ClientOpts>()?;
 
         let value = match name {
             "application_name" => opts.application_name.as_str(),
@@ -1176,9 +1428,13 @@ impl RiffqProcessor {
             _ => return None,
         };
 
-        let fields = Arc::new(vec![
-            FieldInfo::new(name.to_string(), None, None, Type::TEXT, format),
-        ]);
+        let fields = Arc::new(vec![FieldInfo::new(
+            name.to_string(),
+            None,
+            None,
+            Type::TEXT,
+            format,
+        )]);
 
         let mut encoder = DataRowEncoder::new(fields.clone());
         encoder.encode_field(&Some(value)).ok()?;
@@ -1224,7 +1480,9 @@ impl StartupHandler for RiffqProcessor {
                 if self.py_worker.authentication_enabled() {
                     client.set_state(PgWireConnectionState::AuthenticationInProgress);
                     client
-                        .send(PgWireBackendMessage::Authentication(Authentication::CleartextPassword))
+                        .send(PgWireBackendMessage::Authentication(
+                            Authentication::CleartextPassword,
+                        ))
                         .await?;
                 } else {
                     let id = CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -1238,16 +1496,25 @@ impl StartupHandler for RiffqProcessor {
                     // Obtain server_name (SNI) via pgwire ClientInfo helper
                     let allowed = self
                         .py_worker
-                        .on_connect(id, addr.ip().to_string(), addr.port(), client.sni_server_name())
+                        .on_connect(
+                            id,
+                            addr.ip().to_string(),
+                            addr.port(),
+                            client.sni_server_name(),
+                        )
                         .await;
                     if !allowed.allowed {
-                        let err_info = allowed.error.unwrap_or_else(|| Box::new(ErrorInfo::new(
-                            "FATAL".to_string(),
-                            "28000".to_string(),
-                            "Connection rejected".to_string(),
-                        )));
+                        let err_info = allowed.error.unwrap_or_else(|| {
+                            Box::new(ErrorInfo::new(
+                                "FATAL".to_string(),
+                                "28000".to_string(),
+                                "Connection rejected".to_string(),
+                            ))
+                        });
                         let error = ErrorResponse::from(*err_info);
-                        client.feed(PgWireBackendMessage::ErrorResponse(error)).await?;
+                        client
+                            .feed(PgWireBackendMessage::ErrorResponse(error))
+                            .await?;
                         client.close().await?;
                         return Ok(());
                     }
@@ -1276,13 +1543,17 @@ impl StartupHandler for RiffqProcessor {
                     )
                     .await;
                 if !allowed.allowed {
-                    let err_info = allowed.error.unwrap_or_else(|| Box::new(ErrorInfo::new(
-                        "FATAL".to_string(),
-                        "28P01".to_string(),
-                        "Authentication failed".to_string(),
-                    )));
+                    let err_info = allowed.error.unwrap_or_else(|| {
+                        Box::new(ErrorInfo::new(
+                            "FATAL".to_string(),
+                            "28P01".to_string(),
+                            "Authentication failed".to_string(),
+                        ))
+                    });
                     let error = ErrorResponse::from(*err_info);
-                    client.feed(PgWireBackendMessage::ErrorResponse(error)).await?;
+                    client
+                        .feed(PgWireBackendMessage::ErrorResponse(error))
+                        .await?;
                     client.close().await?;
                     return Ok(());
                 }
@@ -1290,16 +1561,25 @@ impl StartupHandler for RiffqProcessor {
                 let addr = client.socket_addr();
                 let allowed = self
                     .py_worker
-                    .on_connect(id, addr.ip().to_string(), addr.port(), client.sni_server_name())
+                    .on_connect(
+                        id,
+                        addr.ip().to_string(),
+                        addr.port(),
+                        client.sni_server_name(),
+                    )
                     .await;
                 if !allowed.allowed {
-                    let err_info = allowed.error.unwrap_or_else(|| Box::new(ErrorInfo::new(
-                        "FATAL".to_string(),
-                        "28000".to_string(),
-                        "Connection rejected".to_string(),
-                    )));
+                    let err_info = allowed.error.unwrap_or_else(|| {
+                        Box::new(ErrorInfo::new(
+                            "FATAL".to_string(),
+                            "28000".to_string(),
+                            "Connection rejected".to_string(),
+                        ))
+                    });
                     let error = ErrorResponse::from(*err_info);
-                    client.feed(PgWireBackendMessage::ErrorResponse(error)).await?;
+                    client
+                        .feed(PgWireBackendMessage::ErrorResponse(error))
+                        .await?;
                     client.close().await?;
                     return Ok(());
                 }
@@ -1310,7 +1590,10 @@ impl StartupHandler for RiffqProcessor {
         }
 
         let user = client.metadata().get(pgwire::api::METADATA_USER).cloned();
-        let database = client.metadata().get(pgwire::api::METADATA_DATABASE).cloned();
+        let database = client
+            .metadata()
+            .get(pgwire::api::METADATA_DATABASE)
+            .cloned();
         log::debug!("database: {:?} {:?}", database, user);
         self.update_ctx_from_client(client);
 
@@ -1318,18 +1601,13 @@ impl StartupHandler for RiffqProcessor {
         let _ = self.register_session_user(client);
         let _ = self.register_current_user(client);
 
-
         Ok(())
     }
 }
 
 #[async_trait]
 impl SimpleQueryHandler for RiffqProcessor {
-    async fn do_query<C>(
-        &self,
-        client: &mut C,
-        query: &str,
-    ) -> PgWireResult<Vec<Response>>
+    async fn do_query<C>(&self, client: &mut C, query: &str) -> PgWireResult<Vec<Response>>
     where
         C: ClientInfo + Sink<PgWireBackendMessage> + Unpin + Send + Sync,
         C::Error: std::fmt::Debug,
@@ -1354,7 +1632,8 @@ impl SimpleQueryHandler for RiffqProcessor {
             let rows = stream::iter(vec![Ok(row)]);
             return Ok(vec![Response::Query(QueryResponse::new(field_infos, rows))]);
         } else if let Some(var) = Self::parse_show_variable(lowercase.as_str()) {
-            if let Some(resp) = self.show_variable_response(&var.to_lowercase(), FieldFormat::Text) {
+            if let Some(resp) = self.show_variable_response(&var.to_lowercase(), FieldFormat::Text)
+            {
                 return Ok(vec![resp]);
             }
         } else if lowercase == "" {
@@ -1379,7 +1658,10 @@ impl SimpleQueryHandler for RiffqProcessor {
                 // Simple query protocol always uses text format
                 let formats: Vec<FieldFormat> = vec![FieldFormat::Text; schema.fields().len()];
                 let (schema, data_row_stream) = arrow_to_pg_rows(batches, schema, &formats);
-                Ok(vec![Response::Query(QueryResponse::new(schema, data_row_stream))])
+                Ok(vec![Response::Query(QueryResponse::new(
+                    schema,
+                    data_row_stream,
+                ))])
             }
             QueryResult::Tag(tag) => Ok(vec![Response::Execution(Tag::new(&tag))]),
             QueryResult::Error(e) => Err(PgWireError::UserError(e)),
@@ -1445,7 +1727,6 @@ impl pgwire::api::stmt::QueryParser for MyQueryParser {
     }
 }
 
-
 #[async_trait]
 impl ExtendedQueryHandler for RiffqProcessor {
     type Statement = MyStatement;
@@ -1454,7 +1735,6 @@ impl ExtendedQueryHandler for RiffqProcessor {
     fn query_parser(&self) -> Arc<Self::QueryParser> {
         Arc::new(MyQueryParser)
     }
-
 
     async fn do_query<C>(
         &self,
@@ -1471,7 +1751,10 @@ impl ExtendedQueryHandler for RiffqProcessor {
         debug!(
             "[PGWIRE EXTENDED] do_query: {} {}",
             portal.statement.statement.query,
-            _debug_parameters(&portal.parameters, &resolve_param_types(&portal.statement.parameter_types))
+            _debug_parameters(
+                &portal.parameters,
+                &resolve_param_types(&portal.statement.parameter_types)
+            )
         );
 
         let query = query.trim().to_lowercase();
@@ -1495,9 +1778,10 @@ impl ExtendedQueryHandler for RiffqProcessor {
             let rows = stream::iter(vec![Ok(row)]);
             return Ok(Response::Query(QueryResponse::new(field_infos, rows)));
         } else if let Some(var) = Self::parse_show_variable(query.as_str()) {
-            if let Some(resp) =
-                self.show_variable_response(&var.to_lowercase(), portal.result_column_format.format_for(0))
-            {
+            if let Some(resp) = self.show_variable_response(
+                &var.to_lowercase(),
+                portal.result_column_format.format_for(0),
+            ) {
                 return Ok(resp);
             }
         }
@@ -1561,9 +1845,9 @@ impl ExtendedQueryHandler for RiffqProcessor {
             .query_runner
             .execute(
                 query.to_string(),
-                None,                         // no parameter values at statement describe
-                Some(param_types.clone()),    // but pass parameter type hints
-                true,                         // describe mode to get only schema
+                None,                      // no parameter values at statement describe
+                Some(param_types.clone()), // but pass parameter type hints
+                true,                      // describe mode to get only schema
                 connection_id,
             )
             .await
@@ -1590,7 +1874,6 @@ impl ExtendedQueryHandler for RiffqProcessor {
             .collect();
         Ok(DescribeStatementResponse::new(param_types, fields))
     }
-
 
     async fn do_describe_portal<C>(
         &self,
@@ -1644,7 +1927,6 @@ impl ExtendedQueryHandler for RiffqProcessor {
         info!("sending back the describe portal {:?}", fields);
         Ok(DescribePortalResponse::new(fields))
     }
-
 }
 
 struct RiffqProcessorFactory {
@@ -1794,10 +2076,7 @@ fn opt_bool_or(d: &Bound<'_, PyDict>, key: &str, default: bool) -> DFResult<bool
 }
 
 /// Downcast the Python value a source returned into a list of row dicts.
-fn row_dicts<'py>(
-    method: &str,
-    list: &Bound<'py, PyAny>,
-) -> DFResult<Vec<Bound<'py, PyDict>>> {
+fn row_dicts<'py>(method: &str, list: &Bound<'py, PyAny>) -> DFResult<Vec<Bound<'py, PyDict>>> {
     let list: &Bound<'py, PyList> = list.downcast().map_err(|e| {
         DataFusionError::Execution(format!("{method}() must pass a list of dicts: {e}"))
     })?;
@@ -1850,7 +2129,7 @@ fn parse_relations(list: &Bound<'_, PyAny>) -> DFResult<Vec<RelationDef>> {
                 Some(other) => {
                     return Err(DataFusionError::Execution(format!(
                         "unknown relation kind '{other}' (use table/view/materialized_view)"
-                    )))
+                    )));
                 }
             };
             Ok(RelationDef {
@@ -1922,20 +2201,9 @@ impl PyLazyCatalogSource {
     /// Call `method` on the Python source with `str_args` followed by a fresh
     /// callback, returning whatever list the callback captured (or `None` if the
     /// source never invoked it).
-    fn pull(
-        &self,
-        py: Python<'_>,
-        method: &str,
-        str_args: &[&str],
-    ) -> DFResult<Option<Py<PyAny>>> {
+    fn pull(&self, py: Python<'_>, method: &str, str_args: &[&str]) -> DFResult<Option<Py<PyAny>>> {
         let cell: Arc<Mutex<Option<Py<PyAny>>>> = Arc::new(Mutex::new(None));
-        let wrapper = Py::new(
-            py,
-            CatalogCallback {
-                rows: cell.clone(),
-            },
-        )
-        .map_err(py_to_df)?;
+        let wrapper = Py::new(py, CatalogCallback { rows: cell.clone() }).map_err(py_to_df)?;
 
         let mut items: Vec<Py<PyAny>> = Vec::with_capacity(str_args.len() + 1);
         for s in str_args {
@@ -2160,20 +2428,31 @@ impl Server {
             m.insert(name_str, ColumnDef { col_type, nullable });
             cols.push(m);
         }
-        self.tables.push((database_name, schema_name, table_name, cols));
+        self.tables
+            .push((database_name, schema_name, table_name, cols));
         Ok(())
     }
 
-
     #[pyo3(signature = (tls=false, catalog_emulation=false, server_version=None))]
-    fn start(&self, py: Python, tls: bool, catalog_emulation: bool, server_version: Option<String>) -> PyResult<()> {
+    fn start(
+        &self,
+        py: Python,
+        tls: bool,
+        catalog_emulation: bool,
+        server_version: Option<String>,
+    ) -> PyResult<()> {
         // surface a failed bind (e.g. the port is taken) as a python OSError
         // instead of panicking the worker process.
         py.detach(|| self.run_server(tls, catalog_emulation, server_version))
             .map_err(|err| pyo3::exceptions::PyOSError::new_err(err.to_string()))
     }
 
-    fn run_server(&self, tls: bool, catalog_emulation: bool, server_version: Option<String>) -> std::io::Result<()> {
+    fn run_server(
+        &self,
+        tls: bool,
+        catalog_emulation: bool,
+        server_version: Option<String>,
+    ) -> std::io::Result<()> {
         let addr = self.addr.clone();
         let query_cb = self.on_query_cb.clone();
         let connect_cb = self.on_connect_cb.clone();
@@ -2192,7 +2471,12 @@ impl Server {
             .unwrap();
 
         rt.block_on(async move {
-            let py_worker = Arc::new(PythonWorker::new(query_cb, connect_cb, disconnect_cb, auth_cb));
+            let py_worker = Arc::new(PythonWorker::new(
+                query_cb,
+                connect_cb,
+                disconnect_cb,
+                auth_cb,
+            ));
             let mut ctx_map: HashMap<String, Arc<SessionContext>> = HashMap::new();
 
             // Clone the Python lazy-catalog source out of the server, if one was set.
@@ -2222,7 +2506,14 @@ impl Server {
                 ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
             } else if self.databases.is_empty() {
                 if catalog_emulation {
-                    let (raw_ctx, _) = get_base_session_context(None, "datafusion".to_string(), "public".to_string(), None).await.unwrap();
+                    let (raw_ctx, _) = get_base_session_context(
+                        None,
+                        "datafusion".to_string(),
+                        "public".to_string(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
                     ctx_map.insert("datafusion".to_string(), Arc::new(raw_ctx));
                 } else {
                     let raw_ctx = SessionContext::new();
@@ -2230,9 +2521,10 @@ impl Server {
                 }
             } else {
                 for db in &self.databases {
-                    let (raw_ctx, _) = get_base_session_context(None,
-                                                                                db.to_string(),
-                                                                                "main".to_string(), None).await.unwrap();
+                    let (raw_ctx, _) =
+                        get_base_session_context(None, db.to_string(), "main".to_string(), None)
+                            .await
+                            .unwrap();
                     ctx_map.insert(db.clone(), Arc::new(raw_ctx));
                 }
             }
@@ -2254,7 +2546,9 @@ impl Server {
 
                 for (db, schema, table, cols) in &self.tables {
                     if let Some(c) = ctx_map.get(db) {
-                        register_user_tables(c, db, schema, table, cols.clone()).await.unwrap();
+                        register_user_tables(c, db, schema, table, cols.clone())
+                            .await
+                            .unwrap();
                     }
                 }
             }
@@ -2266,7 +2560,11 @@ impl Server {
             info!("Listening on {}", addr);
 
             let server_task = tokio::spawn({
-                let tls_acceptor = if tls { self.tls_acceptor.lock().unwrap().clone() } else { None };
+                let tls_acceptor = if tls {
+                    self.tls_acceptor.lock().unwrap().clone()
+                } else {
+                    None
+                };
                 let py_worker = py_worker.clone();
                 let ctx_map = ctx_map.clone();
                 let default_ctx = default_ctx.clone();
@@ -2275,20 +2573,24 @@ impl Server {
                     loop {
                         let (socket, addr) = listener.accept().await.unwrap();
                         if let Some(socket) = detect_gssencmode(socket).await {
-                            let conn_ctx = SessionContext::new_with_state(
-                                default_ctx.state().clone(),
-                            );
+                            let conn_ctx =
+                                SessionContext::new_with_state(default_ctx.state().clone());
                             let conn_ctx = Arc::new(conn_ctx);
 
                             let query_runner: Arc<dyn QueryRunner> = if catalog_emulation {
-                                Arc::new(RouterQueryRunner { py_worker: py_worker.clone(), catalog_ctx: Arc::new(Mutex::new(conn_ctx.clone())) })
+                                Arc::new(RouterQueryRunner {
+                                    py_worker: py_worker.clone(),
+                                    catalog_ctx: Arc::new(Mutex::new(conn_ctx.clone())),
+                                })
                             } else {
-                                Arc::new(DirectQueryRunner { py_worker: py_worker.clone() })
+                                Arc::new(DirectQueryRunner {
+                                    py_worker: py_worker.clone(),
+                                })
                             };
 
                             let tls_acceptor_ref = tls_acceptor.clone();
                             let (id_tx, id_rx) = oneshot::channel();
-                            
+
                             let handler = Arc::new(RiffqProcessor {
                                 ctx: Arc::new(Mutex::new(conn_ctx.clone())),
                                 ctx_map: ctx_map.clone(),
@@ -2301,13 +2603,15 @@ impl Server {
                                 handler: handler.clone(),
                                 extended_handler: handler.clone(),
                             });
-                            
+
                             let py_worker_clone = py_worker.clone();
                             let ip = addr.ip().to_string();
                             let port = addr.port();
-                            
+
                             tokio::spawn(async move {
-                                if let Err(e) = process_socket(socket, tls_acceptor_ref, factory).await {
+                                if let Err(e) =
+                                    process_socket(socket, tls_acceptor_ref, factory).await
+                                {
                                     error!("process_socket error: {:?}", e);
                                 }
                                 let connection_id = id_rx.await.unwrap_or(0);
@@ -2388,7 +2692,8 @@ fn run_shutdown_callback(shutdown_cb: &Arc<Mutex<Option<Py<PyAny>>>>) {
 
 #[pymodule]
 fn _riffq(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).try_init();
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .try_init();
 
     module.add_class::<Server>()?;
     Ok(())

@@ -1576,6 +1576,7 @@ dependencies = [
  "futures",
  "log",
  "once_cell",
+ "paste",
  "pgwire",
  "regex",
  "serde",

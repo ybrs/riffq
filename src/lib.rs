@@ -14,7 +14,7 @@ use tokio::net::TcpStream;
 use pyo3::types::{PyDict, PyList, PyTuple, PyCapsule};
 use std::fs::File;
 use std::io::{BufReader, Error as IOError, ErrorKind};
-use rustls_pemfile::{certs, pkcs8_private_keys};
+use rustls_pemfile::{certs, private_key};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
@@ -1672,11 +1672,21 @@ impl PgWireServerHandlers for RiffqProcessorFactory {
     }
 }
 
+/// How long to wait for a client's first bytes when sniffing for a GSSAPI
+/// encryption request. Well-behaved clients send SSLRequest/StartupMessage
+/// immediately after connecting; on timeout the socket is handed to the
+/// protocol handler untouched.
+const GSSENCMODE_DETECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 async fn detect_gssencmode(mut socket: TcpStream) -> Option<TcpStream> {
     let mut buf = [0u8; 8];
 
-    if let Ok(n) = socket.peek(&mut buf).await {
-        if n == 8 {
+    // peek() waits until the client sends something, so it must be bounded:
+    // a client that connects and stays silent would otherwise pin this future
+    // until the peer goes away -- potentially forever if the peer vanishes
+    // without FIN/RST.
+    match tokio::time::timeout(GSSENCMODE_DETECT_TIMEOUT, socket.peek(&mut buf)).await {
+        Ok(Ok(n)) if n == 8 => {
             let request_code = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
             if request_code == 80877104 {
                 if let Err(e) = socket.read_exact(&mut buf).await {
@@ -1687,6 +1697,10 @@ async fn detect_gssencmode(mut socket: TcpStream) -> Option<TcpStream> {
                 }
             }
         }
+        Ok(_) => {}
+        Err(_) => {
+            debug!("no data within gssencmode detection window; continuing without GSSAPI sniffing");
+        }
     }
 
     Some(socket)
@@ -1696,10 +1710,15 @@ fn setup_tls(cert_path: &str, key_path: &str) -> Result<TlsAcceptor, IOError> {
     let cert = certs(&mut BufReader::new(File::open(cert_path)?))
         .collect::<Result<Vec<CertificateDer>, IOError>>()?;
 
-    let key = pkcs8_private_keys(&mut BufReader::new(File::open(key_path)?))
-        .map(|key| key.map(PrivateKeyDer::from))
-        .collect::<Result<Vec<PrivateKeyDer>, IOError>>()?
-        .remove(0);
+    // private_key() understands PKCS#8, PKCS#1 and SEC1 PEM. The previous
+    // pkcs8-only parse produced an empty Vec for e.g. "BEGIN RSA PRIVATE KEY"
+    // files, and the .remove(0) panicked -- which, through pyo3, killed the
+    // calling thread instead of raising a catchable error.
+    let key: PrivateKeyDer = private_key(&mut BufReader::new(File::open(key_path)?))?
+        .ok_or_else(|| IOError::new(
+            ErrorKind::InvalidInput,
+            format!("no PEM private key found in {key_path} (expected PKCS#8, PKCS#1 or SEC1)"),
+        ))?;
 
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
@@ -2215,8 +2234,20 @@ impl Server {
                 let server_version = server_version.clone();
                 async move {
                     loop {
-                        let (socket, addr) = listener.accept().await.unwrap();
-                        if let Some(socket) = detect_gssencmode(socket).await {
+                        // accept() fails transiently (EMFILE/ENFILE on fd
+                        // exhaustion, ECONNABORTED, ...). Panicking here via
+                        // unwrap() killed the accept task and dropped the
+                        // listener: the process kept running but the port
+                        // stayed dead until a restart.
+                        let (socket, addr) = match listener.accept().await {
+                            Ok(conn) => conn,
+                            Err(e) => {
+                                error!("Failed to accept connection: {:?}; retrying", e);
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                continue;
+                            }
+                        };
+                        {
                             let conn_ctx = SessionContext::new_with_state(
                                 default_ctx.state().clone(),
                             );
@@ -2249,6 +2280,17 @@ impl Server {
                             let port = addr.port();
                             
                             tokio::spawn(async move {
+                                // detect_gssencmode waits for the client's first
+                                // bytes, so it must run inside the per-connection
+                                // task. When it was awaited inline in the accept
+                                // loop, a single client that connected and never
+                                // sent anything blocked ALL accepts: the kernel
+                                // kept completing handshakes into the listen
+                                // backlog, but no connection was ever served.
+                                let socket = match detect_gssencmode(socket).await {
+                                    Some(socket) => socket,
+                                    None => return,
+                                };
                                 if let Err(e) = process_socket(socket, tls_acceptor_ref, factory).await {
                                     error!("process_socket error: {:?}", e);
                                 }

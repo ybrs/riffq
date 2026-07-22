@@ -12,3 +12,6 @@ example/data/*
 pysrc/riffq/_riffq*.so
 teleduck/testd.db
 docs-site/
+
+# TLS material certbot writes here - a live private key, never in the repo
+teleduck/certs/

@@ -1564,6 +1564,7 @@ dependencies = [
 [[package]]
 name = "datafusion_pg_catalog"
 version = "0.1.0"
+source = "git+https://github.com/ybrs/pg_catalog?rev=984e4962e977058fba33516e69e89a347683afcf#984e4962e977058fba33516e69e89a347683afcf"
 dependencies = [
  "anyhow",
  "arrow",

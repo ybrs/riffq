@@ -30,7 +30,6 @@ static CONNECTION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use bytes::Bytes;
 use futures::stream;
-use std::ffi::c_void;
 use std::pin::Pin;
 
 use arrow::array::{
@@ -208,7 +207,24 @@ impl CallbackWrapper {
                 debug!("[RUST] result python type: {}", type_name);
                 if let Ok(capsule) = result_bound.extract::<Bound<PyCapsule>>() {
                     debug!("[RUST] received PyCapsule");
-                    let ptr = capsule.pointer() as *mut c_void;
+
+                    // The Arrow PyCapsule interface names a stream capsule
+                    // "arrow_array_stream". Reading the pointer by that name
+                    // rejects a capsule carrying some other kind of C pointer,
+                    // which the cast below would otherwise reinterpret as an
+                    // ArrowArrayStream -- undefined behaviour rather than an error.
+                    let ptr = match capsule.pointer_checked(Some(c"arrow_array_stream")) {
+                        Ok(ptr) => ptr.as_ptr(),
+                        Err(err) => {
+                            let err_info = ErrorInfo::new(
+                                "ERROR".to_string(),
+                                "XX000".to_string(),
+                                format!("query callback returned an unusable capsule: {err}"),
+                            );
+                            let _ = sender.send(QueryResult::Error(Box::new(err_info)));
+                            return;
+                        }
+                    };
 
                     // `ptr` is a live ArrowArrayStream* produced by PyArrow
                     // (CallbackWrapper received it directly from Python).
@@ -352,8 +368,7 @@ fn arrow_to_pg_rows(
                             return Some((Err(e), (row_idx + 1, remaining_batches)));
                         }
                     }
-                    let row = enc.finish();
-                    return Some((row, (row_idx + 1, remaining_batches)));
+                    return Some((Ok(enc.take_row()), (row_idx + 1, remaining_batches)));
                 }
             }
         }
@@ -1446,7 +1461,7 @@ impl RiffqProcessor {
 
         let mut encoder = DataRowEncoder::new(fields.clone());
         encoder.encode_field(&Some(value)).ok()?;
-        let row = encoder.finish().ok()?;
+        let row = encoder.take_row();
         let rows = stream::iter(vec![Ok(row)]);
         Some(Response::Query(QueryResponse::new(fields, rows)))
     }
@@ -1635,7 +1650,7 @@ impl SimpleQueryHandler for RiffqProcessor {
 
             let mut encoder = DataRowEncoder::new(field_infos.clone());
             encoder.encode_field(&Some("read committed"))?;
-            let row = encoder.finish()?;
+            let row = encoder.take_row();
 
             let rows = stream::iter(vec![Ok(row)]);
             return Ok(vec![Response::Query(QueryResponse::new(field_infos, rows))]);
@@ -1782,7 +1797,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
 
             let mut encoder = DataRowEncoder::new(field_infos.clone());
             encoder.encode_field(&Some("read committed"))?;
-            let row = encoder.finish()?;
+            let row = encoder.take_row();
             let rows = stream::iter(vec![Ok(row)]);
             return Ok(Response::Query(QueryResponse::new(field_infos, rows)));
         } else if let Some(var) = Self::parse_show_variable(query.as_str()) {
@@ -2108,12 +2123,12 @@ fn opt_bool_or(d: &Bound<'_, PyDict>, key: &str, default: bool) -> DFResult<bool
 
 /// Downcast the Python value a source returned into a list of row dicts.
 fn row_dicts<'py>(method: &str, list: &Bound<'py, PyAny>) -> DFResult<Vec<Bound<'py, PyDict>>> {
-    let list: &Bound<'py, PyList> = list.downcast().map_err(|e| {
+    let list: &Bound<'py, PyList> = list.cast().map_err(|e| {
         DataFusionError::Execution(format!("{method}() must pass a list of dicts: {e}"))
     })?;
     let mut out = Vec::with_capacity(list.len());
     for item in list.iter() {
-        let d: Bound<'py, PyDict> = item.downcast_into().map_err(|e| {
+        let d: Bound<'py, PyDict> = item.cast_into().map_err(|e| {
             DataFusionError::Execution(format!("{method}() rows must be dicts: {e}"))
         })?;
         out.push(d);
@@ -2435,10 +2450,10 @@ impl Server {
         table_name: String,
         columns: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let list: &Bound<'_, PyList> = columns.downcast()?;
+        let list: &Bound<'_, PyList> = columns.cast()?;
         let mut cols: Vec<BTreeMap<String, ColumnDef>> = Vec::new();
         for item in list.iter() {
-            let mapping: &Bound<'_, PyDict> = item.downcast()?;
+            let mapping: &Bound<'_, PyDict> = item.cast()?;
             if mapping.len() != 1 {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "each column must be a single-key dict",
@@ -2446,7 +2461,7 @@ impl Server {
             }
             let (name, def_obj) = mapping.iter().next().unwrap();
             let name_str: String = name.extract()?;
-            let def_dict: &Bound<'_, PyDict> = def_obj.downcast()?;
+            let def_dict: &Bound<'_, PyDict> = def_obj.cast()?;
             let col_type: String = def_dict
                 .get_item("type")?
                 .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("missing type"))?
@@ -2719,6 +2734,7 @@ fn bind_listener(addr: &str) -> std::io::Result<TcpListener> {
     socket.listen(1024)
 }
 
+#[cfg(unix)]
 async fn wait_for_shutdown_signal() {
     // Resolves on SIGINT (ctrl-c) or SIGTERM (the signal kill/docker stop/k8s
     // send for graceful shutdown). tokio drives these through its own reactor,
@@ -2731,6 +2747,28 @@ async fn wait_for_shutdown_signal() {
             result.expect("Failed to listen for SIGINT");
         }
         _ = sigterm.recv() => {}
+    }
+}
+
+#[cfg(windows)]
+async fn wait_for_shutdown_signal() {
+    // Windows has no SIGTERM, and tokio::signal::unix does not exist there, so
+    // the equivalent "you are being asked to stop" events are console control
+    // events: CTRL_CLOSE_EVENT when the console window is closed and
+    // CTRL_SHUTDOWN_EVENT when the system is shutting down. Note the OS gives a
+    // service only a few seconds after these before killing the process, so the
+    // shutdown callback must be quick to finish on this platform.
+    let mut ctrl_close =
+        signal::windows::ctrl_close().expect("Failed to install CTRL_CLOSE handler");
+    let mut ctrl_shutdown =
+        signal::windows::ctrl_shutdown().expect("Failed to install CTRL_SHUTDOWN handler");
+
+    tokio::select! {
+        result = signal::ctrl_c() => {
+            result.expect("Failed to listen for ctrl-c");
+        }
+        _ = ctrl_close.recv() => {}
+        _ = ctrl_shutdown.recv() => {}
     }
 }
 

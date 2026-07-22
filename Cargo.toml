@@ -1,6 +1,6 @@
 [package]
 name = "riffq"
-version = "0.1.10"
+version = ""
 edition = "2024"
 
 [lib]

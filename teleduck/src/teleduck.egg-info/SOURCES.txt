@@ -17,3 +17,4 @@ tests/test_duckdb_catalog.py
 tests/test_lazy_catalog.py
 tests/test_read_only.py
 tests/test_sql_init.py
+tests/test_type_mapping.py

@@ -37,9 +37,14 @@ sqlparser = "0.62"
 chrono = "0.4.41"
 log = "0.4"
 datafusion = "54.0.0"
+# Building against the pg_catalog checkout next to this one, so changes there are
+# picked up without a push. RESTORE THE GIT PIN BELOW BEFORE PUSHING - the rev is the
+# commit every other machine and CI builds from, and a path dependency does not exist
+# for them.
+datafusion_pg_catalog = { path = "../pg_catalog", package = "datafusion_pg_catalog" }
 # Pinned to a pg_catalog main commit (DataFusion 54). Bump the rev to pull in
 # newer pg_catalog changes.
-datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", rev = "7423815bdde319b58011005c8f5a5bed7e44ab22", package = "datafusion_pg_catalog" }
+# datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", rev = "7423815bdde319b58011005c8f5a5bed7e44ab22", package = "datafusion_pg_catalog" }
 
 env_logger = "0.11.8"
 

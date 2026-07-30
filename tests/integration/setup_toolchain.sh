@@ -36,6 +36,7 @@ JDK_DIR="$TOOLCHAIN/jdk"
 JARS_DIR="$TOOLCHAIN/jars"
 ETC_DIR="$TOOLCHAIN/etc"
 DOTNET_DIR="$TOOLCHAIN/dotnet"
+POSTGRESQL_DIR="$TOOLCHAIN/postgresql"
 
 # NuGet package cache for the .NET harness build. Kept inside the toolchain so
 # the build never writes to ~/.nuget and a wiped .toolchain really is a cold
@@ -62,6 +63,16 @@ UNIXODBC_ARTIFACT="unixODBC-2.3.12.tar.gz|https://www.unixodbc.org/unixODBC-2.3.
 PSQLODBC_ARTIFACT="psqlodbc-16.00.0000.tar.gz|https://ftp.postgresql.org/pub/odbc/versions.old/src/psqlodbc-16.00.0000.tar.gz|afd892f89d2ecee8d3f3b2314f1bd5bf2d02201872c6e3431e5c31096eca4c8b"
 PGJDBC_ARTIFACT="postgresql-42.7.13.jar|https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.13/postgresql-42.7.13.jar|6e0e4cc2d8cae902084f8a2b18728b073a6fd9d1f87c9d8bff8f298c18185b93"
 JDK_ARTIFACT="OpenJDK21U-jdk_x64_linux_hotspot_21.0.11_10.tar.gz|https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.11%2B10/OpenJDK21U-jdk_x64_linux_hotspot_21.0.11_10.tar.gz|4b2220e232a97997b436ca6ab15cbf70171ecff52958a46159dfa5a8c44ca4de"
+
+# The PostgreSQL binary distribution the psql tier runs. psql's backslash
+# commands are handwritten catalog SQL that changes between major releases, so
+# the version is pinned here and asserted by the tier: an unpinned psql would
+# silently change which queries the catalog is being tested against. The
+# distribution is relocatable (psql's RPATH resolves its own libpq under
+# ../lib), so it runs from the toolchain directory with nothing on
+# LD_LIBRARY_PATH. Only the client is used; the server binaries come along
+# because upstream ships one archive.
+POSTGRESQL_ARTIFACT="postgresql-17.4.0-x86_64-unknown-linux-gnu.tar.gz|https://github.com/theseus-rs/postgresql-binaries/releases/download/17.4.0/postgresql-17.4.0-x86_64-unknown-linux-gnu.tar.gz|945de95d7e391a9010908fb4b66d7f89058efacd84bbd8572e044286bc626087"
 
 # Older pgjdbc releases the JDBC suite also runs against, so a catalog change
 # cannot silently break the driver versions deployed clients actually carry:
@@ -242,6 +253,21 @@ build_dotnet_harness() {
     )
 }
 
+extract_postgresql_client() {
+    # Unpack the PostgreSQL distribution the psql tier drives. psql is invoked
+    # by absolute path from the tests, so nothing is added to PATH and no
+    # system PostgreSQL install is touched.
+    if [ -x "$POSTGRESQL_DIR/bin/psql" ]; then
+        log "psql already extracted"
+        return 0
+    fi
+    log "extracting PostgreSQL client"
+    rm -rf "$POSTGRESQL_DIR"
+    mkdir -p "$POSTGRESQL_DIR"
+    tar xzf "$DOWNLOADS/postgresql-17.4.0-x86_64-unknown-linux-gnu.tar.gz" \
+        -C "$POSTGRESQL_DIR" --strip-components=1
+}
+
 install_cloudbeaver() {
     # Unpack CloudBeaver from its container image.
     #
@@ -357,6 +383,7 @@ main() {
     fetch "$PGJDBC_ARTIFACT"
     fetch "$JDK_ARTIFACT"
     fetch "$DOTNET_ARTIFACT"
+    fetch "$POSTGRESQL_ARTIFACT"
     echo "$PGJDBC_MATRIX_ARTIFACTS" | while read -r spec; do
         [ -n "$spec" ] || continue
         fetch "$spec"
@@ -367,6 +394,8 @@ main() {
     extract_jdk
     place_pgjdbc
     place_pgjdbc_matrix
+
+    extract_postgresql_client
 
     extract_dotnet
     build_dotnet_harness

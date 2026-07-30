@@ -7,9 +7,9 @@
 # added here is a check the hook enforces, with no second list to keep in step.
 #
 # Nothing in it is conditional on which files changed: a docs-only edit rebuilds
-# the extension and runs the ODBC, JDBC, .NET and CloudBeaver tiers exactly as a
-# rewrite of the wire protocol would. Run it by hand any time; it only reads the
-# tree, never rewrites it (`cargo fmt --check` reports, the hook is what
+# the extension and runs the ODBC, JDBC, .NET, CloudBeaver and psql tiers exactly
+# as a rewrite of the wire protocol would. Run it by hand any time; it only reads
+# the tree, never rewrites it (`cargo fmt --check` reports, the hook is what
 # reformats).
 #
 # Expect roughly half an hour: the pgjdbc matrix alone runs the JDBC tier once
@@ -88,7 +88,9 @@ step "unittest test_concurrency/" $PYTHON -m unittest discover -s test_concurren
 step "unittest teleduck/tests/" $PYTHON -m unittest discover -s teleduck/tests
 
 # The driver tiers: real unixODBC/psqlodbc, a real JDK with pgjdbc, the .NET SDK
-# with Npgsql, and a containerised CloudBeaver. `make integration-test` sets
+# with Npgsql, a containerised CloudBeaver, and psql running its backslash
+# commands (handwritten catalog SQL, not a driver's metadata API).
+# `make integration-test` sets
 # LD_LIBRARY_PATH before python starts, which is the only moment the dynamic
 # loader reads it, so the pyodbc wheel resolves this toolchain's unixODBC rather
 # than the system one - which is why this goes through make rather than calling

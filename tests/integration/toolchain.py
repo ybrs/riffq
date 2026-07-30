@@ -2,11 +2,13 @@
 
 setup_toolchain.sh builds and downloads everything into ``.toolchain/`` next to
 this file. This module turns that directory into typed locators (the ODBC
-drivers, the JDK, the pgjdbc jar, the optional SQL Workbench/J jar), the runtime
-environment the ODBC driver manager needs, and ``unittest`` skip decorators whose
-messages name the exact missing artifact and point at the setup script. When the
-toolchain is absent -- as on a bare machine -- the integration tests skip in one
-line each and ``make test`` stays green.
+drivers, the JDK, the pgjdbc jar, the psql client, the optional SQL Workbench/J
+jar), the runtime environment the ODBC driver manager needs, and ``unittest``
+skip decorators whose messages name the exact missing artifact and point at the
+setup script. When the toolchain is absent -- as on a bare machine -- those
+integration tests skip in one line each and ``make test`` stays green. The psql
+tier is the exception: ``require_psql`` raises instead of skipping, because a
+green run that never exercised psql's catalog SQL is worse than a loud failure.
 
 Runtime environment note: the pyodbc wheel loads ``libodbc.so.2`` at process
 start via the dynamic loader, which reads ``LD_LIBRARY_PATH`` once at startup and
@@ -42,6 +44,14 @@ DOTNET_HARNESS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "d
 DOTNET_HARNESS_DLL = os.path.join(
     DOTNET_HARNESS_DIR, "bin", "Release", "net9.0", "RiffqNpgsqlHarness.dll"
 )
+
+# The psql client, from the PostgreSQL distribution setup_toolchain.sh unpacks.
+# The version is pinned because psql's backslash commands are handwritten
+# catalog SQL that differs between major releases: the tier asserts the binary
+# reports this version so a swapped psql shows up as a version mismatch rather
+# than as changed catalog behaviour.
+PSQL = os.path.join(TOOLCHAIN_DIR, "postgresql", "bin", "psql")
+PSQL_VERSION = "17.4"
 
 # CloudBeaver, unpacked from its container image by setup_toolchain.sh. The
 # image bundles the JRE the server runs on, so this tier does not use the
@@ -150,6 +160,11 @@ def has_dotnet():
     return os.path.exists(DOTNET) and os.path.exists(DOTNET_HARNESS_DLL)
 
 
+def has_psql():
+    """Return True when the pinned psql client is present."""
+    return os.path.exists(PSQL)
+
+
 def has_cloudbeaver():
     """Return True when CloudBeaver's launcher and its bundled JRE exist."""
     return os.path.exists(CLOUDBEAVER_LAUNCHER) and os.path.exists(CLOUDBEAVER_JAVA_BIN)
@@ -187,6 +202,27 @@ def require_cloudbeaver():
     return unittest.skipUnless(
         has_cloudbeaver(), f"CloudBeaver not installed; {_SETUP_HINT}"
     )
+
+
+def require_psql():
+    """Return the psql binary's path, raising when the toolchain does not have it.
+
+    Deliberately not a skip decorator like the guards above. psql's backslash
+    commands are handwritten catalog SQL -- the queries this project exists to
+    answer -- so a machine without psql must fail the tier rather than report
+    a green run for a suite that never executed.
+
+    Returns:
+        The absolute path of the pinned psql binary.
+
+    Raises:
+        FileNotFoundError: If the binary is absent, naming the setup script.
+    """
+    if not has_psql():
+        raise FileNotFoundError(
+            f"psql {PSQL_VERSION} not found at {PSQL}; {_SETUP_HINT}"
+        )
+    return PSQL
 
 
 def require_jdbc_tool():

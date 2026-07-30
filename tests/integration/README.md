@@ -1,7 +1,7 @@
 # Driver integration tests (pyodbc + JDBC)
 
 These tests prove that riffq's PostgreSQL wire protocol and its `pg_catalog` /
-`information_schema` emulation work under two client stacks beyond psycopg:
+`information_schema` emulation work under the client stacks beyond psycopg:
 
 - ODBC: `pyodbc` on unixODBC and the official PostgreSQL ODBC driver
   (`psqlodbc`), both the Unicode and ANSI flavours.
@@ -16,6 +16,13 @@ These tests prove that riffq's PostgreSQL wire protocol and its `pg_catalog` /
   `pg_class`, `pg_namespace`, and `pg_attribute` rather than going through
   pgjdbc's `DatabaseMetaData`, so it covers a catalog surface no other tier
   reaches.
+- psql: the PostgreSQL client itself, running its backslash commands. These are
+  not a driver's metadata API at all -- they are handwritten catalog SQL, and
+  they are the queries this project exists to answer. `\dt` reads `pg_class`
+  and `pg_namespace`, `\l` reads `pg_database` through `array_length` and
+  `array_to_string`, `\dT` reads `pg_type` through `format_type` and
+  `obj_description`, `\dC` joins `pg_cast` to `pg_type` twice, and the verbose
+  forms add `pg_table_size`, `pg_database_size` and `pg_size_pretty`.
 
 These drivers issue their own catalog SQL on connect and on every metadata call
 (`SQLTables`, `SQLColumns`, `DatabaseMetaData.getTables`, `getColumns`,
@@ -39,6 +46,19 @@ Add the optional SQL Workbench/J client with:
 ```
 make integration-toolchain ARGS=--with-jdbc-tool
 ```
+
+### The pinned psql version
+
+`\dt`, `\d+` and friends are rewritten between PostgreSQL major releases, so
+the tier is tied to one client: `PSQL_VERSION` in `toolchain.py` and the
+`POSTGRESQL_ARTIFACT` pin in `setup_toolchain.sh`, currently 17.4.
+`test_psql_is_the_pinned_version` compares the two, so a toolchain holding some
+other psql fails as a version mismatch rather than as changed catalog
+behaviour. Re-pinning means changing both together.
+
+Unlike the other tiers, a missing psql is not a skip: `require_psql` raises. A
+green run that never exercised psql's catalog SQL would be worse than a loud
+failure, so the tier fails until `setup_toolchain.sh` has been run.
 
 ### The pgjdbc version matrix
 
@@ -127,6 +147,8 @@ importable), or via `make integration-test` which sets the paths up.
 - `cloudbeaver_server.py`, `cloudbeaver_client.py` -- start CloudBeaver and
   drive its GraphQL API.
 - `test_cloudbeaver.py` -- the DBeaver-metadata tier.
+- `psql_client.py` -- runs psql and parses its records.
+- `test_psql_backslash.py` -- the psql tier.
 - `test_fixture_smoke.py` -- validates the fixture with plain psycopg.
 - `test_pyodbc_catalog.py`, `test_pyodbc_queries.py` -- ODBC tests.
 - `test_jdbc_metadata.py`, `test_jdbc_extended.py` -- JDBC tests.
@@ -183,6 +205,47 @@ The DBeaver tier's two gaps turned out to be a single bug and are fixed:
 canonical oid 2200 plus a generated one), and DBeaver bound the empty one when
 listing a schema's relations. Covered by the namespace-shadowing tests in
 `pg_catalog/tests/lazy_pg_catalog.rs`.
+
+The psql tier found six gaps. Four are fixed and are now plain assertions:
+
+- `pg_catalog.array_length` was unregistered, so `\l` could not read a
+  database's access privileges. It is now an alias of DataFusion's own
+  `array_length`.
+- `obj_description` / `col_description` / `shobj_description` were missing, so
+  every verbose describe command failed. They report no comment, which is what
+  PostgreSQL returns for an object that carries none.
+- `pg_size_pretty`, `pg_table_size` and `pg_database_size` were missing, so
+  `\dt+` and `\l+` failed. The sizes report zero -- the relations are views
+  over DuckDB, not heap files -- and `pg_size_pretty` formats a byte count
+  exactly as PostgreSQL does.
+- The `*_is_visible` family only covered tables, functions and types, so `\dc`
+  and `\do` failed. Conversions, operators, operator classes and families,
+  collations, statistics objects and the text-search objects are covered now.
+
+Two more were fixed while chasing `\d` and `\d+`:
+
+- The rewriter lifted a sub-query that still named an outer alias into a CTE
+  that could not resolve it. It now recognises the situation and declines to
+  lift, so the rewriter is never itself the thing emitting unresolvable SQL.
+- A set-returning function's output column now answers to its table alias, the
+  way PostgreSQL names it: `FROM unnest(c.reloptions) x` makes `x` the column
+  as well as the relation.
+
+Three remain, guarded by `expectedFailure` tests in `test_psql_backslash.py`:
+
+- `\d+ <table>` and `\dp` share one cause: a correlated `ARRAY(SELECT ...)`
+  returning many rows -- storage options in one, column privileges and policies
+  in the other. The ARRAY rewrite leaves a scalar subquery, which the analyzer
+  rejects for returning more than one row.
+- `\d <table>`. Its publication lookup iterates the published columns with
+  `generate_series(0, array_upper(pr.prattrs, 1))`. DataFusion's
+  generate_series takes literal bounds only, and a table function yields one
+  static provider, so no decorrelation reaches it -- the construct itself has
+  to be rewritten.
+
+`\dD` needs `pg_get_constraintdef` (the same gap the .NET tier reported), and
+`\dx` casts the schema-qualified literal `'pg_catalog.pg_extension'` to
+`regclass`, which resolves bare relation names only.
 
 If a future driver or version surfaces a new gap, record it here and guard it
 with an `expectedFailure` test (naming its cause) until it is fixed -- an

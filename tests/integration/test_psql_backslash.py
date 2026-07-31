@@ -17,10 +17,10 @@ toolchain holds a different one.
 
 ``make psql-matrix`` runs this file once per release in PSQL_MATRIX_VERSIONS.
 That matters because the rewrites are real: psql 18's ``\\d`` calls
-pg_get_constraintdef, which 17.4's does not, and its ``\\dx`` joins
-pg_available_extensions() as a function where 17.4 selects from the relation.
-A command can therefore work under one release and fail under another, which is
-what ``expected_failure_under_psql`` below is for.
+pg_get_constraintdef and pg_partition_ancestors, neither of which 17.4's does,
+and its ``\\dx`` joins pg_available_extensions() as a function where 17.4
+selects from the relation. A command can therefore work under one release and
+fail under another, which is what ``expected_failure_under_psql`` below is for.
 
 Commands that do not work yet are covered by ``expectedFailure`` tests naming
 their cause rather than left out, so the day the catalog can answer them
@@ -279,10 +279,11 @@ class PsqlBackslashTest(FixtureServerCase):
     def test_describe_table_reports_the_fixture_columns(self):
         """\\d <table> describes the table, columns and all -- on psql 17.
 
-        psql 18 rewrote the constraint listing to call
-        ``pg_catalog.pg_get_constraintdef(r.oid, true)``, which this catalog
-        advertises in pg_proc but has never implemented (task 245), so the same
-        command fails there. 17.4 does not call it.
+        psql 18 asks for two functions 17.4 does not.
+        ``pg_get_constraintdef`` was the first and is implemented (task 245);
+        behind it psql 18 calls ``pg_partition_ancestors`` in the query listing
+        the foreign keys that reference the table, and that one is still
+        missing (task 274).
 
         The command that took the longest to get working, and the one this
         tier was written for: it needed a correlated string_agg to be grouped
@@ -305,8 +306,8 @@ class PsqlBackslashTest(FixtureServerCase):
         Asserting on a column \\d does not report keeps this from passing on a
         server that answered \\d+ with \\d's narrower query.
 
-        Expected to fail on psql 18 for the same reason as the plain form: its
-        constraint listing calls pg_get_constraintdef (task 245).
+        Expected to fail on psql 18 for the same reason as the plain form:
+        pg_partition_ancestors is missing (task 274).
         """
         rows = self.run_command(rf"\d+ {fixture_dataset.SCHEMA_NAME}.customers")
         self.assertEqual(
@@ -319,12 +320,14 @@ class PsqlBackslashTest(FixtureServerCase):
             f"the verbose form reports a storage mode per column: {rows}",
         )
 
-    @unittest.expectedFailure
-    def test_list_domains(self):
-        """\\dD fails: pg_get_constraintdef is not implemented.
+    def test_list_domains_runs(self):
+        """\\dD renders a domain's CHECK constraints through pg_get_constraintdef.
 
-        The same gap the .NET tier reported; \\dD calls it to render a domain's
-        CHECK constraints.
+        That function is a resolver slot rather than a deparser: with nothing
+        installed it answers NULL, so the Check column comes back empty instead
+        of the command failing. The fixture defines no domains, so the useful
+        assertion is that the command completes -- the emptiness is the
+        fixture's, not the catalog's.
         """
         self.run_command(r"\dD")
 

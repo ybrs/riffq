@@ -263,21 +263,28 @@ Five more were fixed while chasing `\d`, `\d+` and `\dy`:
   static provider, so no decorrelation reaches it. The construct is now
   rewritten to the membership test it stands for, `attnum = ANY(pr.prattrs)`.
 
-Three remain under psql 17.4, guarded by `expectedFailure` tests in
+Two remain under psql 17.4, guarded by `expectedFailure` tests in
 `test_psql_backslash.py`:
 
 - `\dp` correlates through a column psql writes unqualified
   (`oid = ANY (polroles)`). The rewriter detects correlation by matching
   `alias.column`, so a bare name reads as uncorrelated and the analyzer then
   rejects the multi-row scalar sub-query.
-- `\dD` needs `pg_get_constraintdef`, the same gap the .NET tier reported.
 - `\dx` casts the schema-qualified literal `'pg_catalog.pg_extension'` to
   `regclass`, which resolves bare relation names only.
 
+`pg_get_constraintdef` was the sixth gap and is now a resolver slot: it answers
+NULL until an embedder installs a `ConstraintDefinitionResolver`, because
+rendering a constraint back to SQL means deparsing a node tree this catalog does
+not hold. NULL is what its callers degrade through -- pgAdmin wraps it in
+`substring(...)`, and psql renders an empty Check column. That promoted `\dD` on
+both releases.
+
 Two more are expected failures under psql 18.4 only, via
-`expected_failure_under_psql`: `\d` and `\d+`, because 18's constraint listing
-calls `pg_get_constraintdef` where 17.4's does not. Fixing that one gap
-promotes `\dD` on both releases and both describe commands on 18.
+`expected_failure_under_psql`: `\d` and `\d+`. Fixing `pg_get_constraintdef`
+was expected to promote them and did not -- 18's `\d` then asks for
+`pg_partition_ancestors`, which this catalog also lacks, in the query listing
+the foreign keys that reference the table.
 
 If a future driver or version surfaces a new gap, record it here and guard it
 with an `expectedFailure` test (naming its cause) until it is fixed -- an

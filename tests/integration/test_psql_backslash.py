@@ -15,6 +15,13 @@ same reason the pgjdbc matrix pins its jars -- each major release rewrites some
 of these queries -- and ``test_psql_is_the_pinned_version`` fails loudly if the
 toolchain holds a different one.
 
+``make psql-matrix`` runs this file once per release in PSQL_MATRIX_VERSIONS.
+That matters because the rewrites are real: psql 18's ``\\d`` calls
+pg_get_constraintdef, which 17.4's does not, and its ``\\dx`` joins
+pg_available_extensions() as a function where 17.4 selects from the relation.
+A command can therefore work under one release and fail under another, which is
+what ``expected_failure_under_psql`` below is for.
+
 Commands that do not work yet are covered by ``expectedFailure`` tests naming
 their cause rather than left out, so the day the catalog can answer them
 unittest reports an unexpected success. See the "Known gaps" section of
@@ -25,7 +32,34 @@ import unittest
 import fixture_dataset
 import psql_client
 from server_case import FixtureServerCase
-from toolchain import PSQL_VERSION
+from toolchain import PSQL_VERSION, selected_psql_version
+
+
+def expected_failure_under_psql(*versions):
+    """Mark a test as an expected failure only under the psql versions named.
+
+    A plain ``expectedFailure`` says "this never works". Some commands work
+    under one psql release and not another, because psql rewrote the query
+    between them, and marking those unconditionally would hide the release
+    where they DO work -- unittest reports a passing expected failure as an
+    unexpected success, so the run would go red on the good version.
+
+    Args:
+        *versions: The versions the test is expected to fail under, as they
+            appear in PSQL_MATRIX_VERSIONS.
+
+    Returns:
+        A decorator that marks the test expected-to-fail when this run's psql
+        is one of `versions`, and leaves it a plain assertion otherwise.
+    """
+
+    def decorate(test):
+        if selected_psql_version() in versions:
+            return unittest.expectedFailure(test)
+        return test
+
+    return decorate
+
 
 # Column positions in the records psql returns, one constant per command shape
 # so the assertions below read as names rather than as indexes. psql prints
@@ -241,8 +275,14 @@ class PsqlBackslashTest(FixtureServerCase):
         with self.assertRaises(psql_client.PsqlError):
             self.run_command("SELECT * FROM public.no_such_table")
 
+    @expected_failure_under_psql("18.4")
     def test_describe_table_reports_the_fixture_columns(self):
-        """\\d <table> describes the table, columns and all.
+        """\\d <table> describes the table, columns and all -- on psql 17.
+
+        psql 18 rewrote the constraint listing to call
+        ``pg_catalog.pg_get_constraintdef(r.oid, true)``, which this catalog
+        advertises in pg_proc but has never implemented (task 245), so the same
+        command fails there. 17.4 does not call it.
 
         The command that took the longest to get working, and the one this
         tier was written for: it needed a correlated string_agg to be grouped
@@ -258,11 +298,15 @@ class PsqlBackslashTest(FixtureServerCase):
             "\\d should list the fixture table's own columns, in ordinal order",
         )
 
+    @expected_failure_under_psql("18.4")
     def test_describe_table_verbose_reports_storage(self):
         """\\d+ <table> adds the per-column storage the plain form omits.
 
         Asserting on a column \\d does not report keeps this from passing on a
         server that answered \\d+ with \\d's narrower query.
+
+        Expected to fail on psql 18 for the same reason as the plain form: its
+        constraint listing calls pg_get_constraintdef (task 245).
         """
         rows = self.run_command(rf"\d+ {fixture_dataset.SCHEMA_NAME}.customers")
         self.assertEqual(

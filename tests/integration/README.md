@@ -47,14 +47,33 @@ Add the optional SQL Workbench/J client with:
 make integration-toolchain ARGS=--with-jdbc-tool
 ```
 
-### The pinned psql version
+### The psql version matrix
 
 `\dt`, `\d+` and friends are rewritten between PostgreSQL major releases, so
-the tier is tied to one client: `PSQL_VERSION` in `toolchain.py` and the
-`POSTGRESQL_ARTIFACT` pin in `setup_toolchain.sh`, currently 17.4.
-`test_psql_is_the_pinned_version` compares the two, so a toolchain holding some
-other psql fails as a version mismatch rather than as changed catalog
-behaviour. Re-pinning means changing both together.
+every run is tied to one client: `PSQL_MATRIX_VERSIONS` in `toolchain.py` and
+the `POSTGRESQL_ARTIFACT` / `POSTGRESQL_MATRIX_ARTIFACTS` pins in
+`setup_toolchain.sh`, currently 17.4 and 18.4.
+`test_psql_is_the_pinned_version` checks the binary reports the version the run
+selected, so a toolchain holding some other psql fails as a version mismatch
+rather than as changed catalog behaviour. Adding a release means changing both
+files together.
+
+`make integration-test` runs the tier against the default (17.4).
+`make psql-matrix` runs it once per release:
+
+```
+make psql-matrix                 # 17.4, 18.4
+RIFFQ_PSQL_VERSION=18.4 python -m unittest discover -s . -t . -k psql
+```
+
+The rewrites between releases are not hypothetical, which is why this is a
+matrix and not a single pin: psql 18's `\d` calls `pg_get_constraintdef` where
+17.4's does not, and its `\dx` joins `pg_available_extensions()` as a function
+where 17.4 selects from the relation. A command can therefore pass under one
+release and fail under another, so `expected_failure_under_psql(...)` marks a
+test expected-to-fail on named versions only -- an unconditional
+`expectedFailure` would be reported as an unexpected success on the release
+where the command works, turning a good result red.
 
 Unlike the other tiers, a missing psql is not a skip: `require_psql` raises. A
 green run that never exercised psql's catalog SQL would be worse than a loud
@@ -222,7 +241,7 @@ The psql tier found six gaps. Four are fixed and are now plain assertions:
   and `\do` failed. Conversions, operators, operator classes and families,
   collations, statistics objects and the text-search objects are covered now.
 
-Two more were fixed while chasing `\d` and `\d+`:
+Five more were fixed while chasing `\d`, `\d+` and `\dy`:
 
 - The rewriter lifted a sub-query that still named an outer alias into a CTE
   that could not resolve it. It now recognises the situation and declines to
@@ -230,22 +249,35 @@ Two more were fixed while chasing `\d` and `\d+`:
 - A set-returning function's output column now answers to its table alias, the
   way PostgreSQL names it: `FROM unnest(c.reloptions) x` makes `x` the column
   as well as the relation.
-
-Three remain, guarded by `expectedFailure` tests in `test_psql_backslash.py`:
-
-- `\d+ <table>` and `\dp` share one cause: a correlated `ARRAY(SELECT ...)`
-  returning many rows -- storage options in one, column privileges and policies
-  in the other. The ARRAY rewrite leaves a scalar subquery, which the analyzer
-  rejects for returning more than one row.
-- `\d <table>`. Its publication lookup iterates the published columns with
-  `generate_series(0, array_upper(pr.prattrs, 1))`. DataFusion's
+- `ARRAY(SELECT ... FROM unnest(<outer column>) x)` -- storage options in
+  `\d+`, tags in `\dy` -- is now written as an expression over the array
+  itself. Correlating through a table function's argument leaves no join key to
+  decorrelate on, and every spelling that kept the correlation died at physical
+  planning on `OuterReferenceColumn`, so the sub-query had to stop being one.
+- A correlated `string_agg` was never grouped: the lift decides whether its CTE
+  needs a GROUP BY from a list of aggregate names, and `string_agg` was not on
+  it. `\d`'s publication lookup uses it.
+- `\d`'s publication lookup iterated the published columns with
+  `generate_series(0, array_upper(pr.prattrs, 1)) ... prattrs[s]`. DataFusion's
   generate_series takes literal bounds only, and a table function yields one
-  static provider, so no decorrelation reaches it -- the construct itself has
-  to be rewritten.
+  static provider, so no decorrelation reaches it. The construct is now
+  rewritten to the membership test it stands for, `attnum = ANY(pr.prattrs)`.
 
-`\dD` needs `pg_get_constraintdef` (the same gap the .NET tier reported), and
-`\dx` casts the schema-qualified literal `'pg_catalog.pg_extension'` to
-`regclass`, which resolves bare relation names only.
+Three remain under psql 17.4, guarded by `expectedFailure` tests in
+`test_psql_backslash.py`:
+
+- `\dp` correlates through a column psql writes unqualified
+  (`oid = ANY (polroles)`). The rewriter detects correlation by matching
+  `alias.column`, so a bare name reads as uncorrelated and the analyzer then
+  rejects the multi-row scalar sub-query.
+- `\dD` needs `pg_get_constraintdef`, the same gap the .NET tier reported.
+- `\dx` casts the schema-qualified literal `'pg_catalog.pg_extension'` to
+  `regclass`, which resolves bare relation names only.
+
+Two more are expected failures under psql 18.4 only, via
+`expected_failure_under_psql`: `\d` and `\d+`, because 18's constraint listing
+calls `pg_get_constraintdef` where 17.4's does not. Fixing that one gap
+promotes `\dD` on both releases and both describe commands on 18.
 
 If a future driver or version surfaces a new gap, record it here and guard it
 with an `expectedFailure` test (naming its cause) until it is fixed -- an

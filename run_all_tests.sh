@@ -102,5 +102,12 @@ step "driver integration tests" make integration-test
 # has to fail here.
 step "pgjdbc version matrix" make integration-matrix
 
+# The psql backslash tier once per pinned psql release. Same argument as the
+# pgjdbc matrix, for the client whose queries are handwritten rather than
+# generated: psql rewrites its backslash SQL between major versions, so a
+# catalog change made for one release can break another on queries nobody here
+# wrote.
+step "psql version matrix" make psql-matrix
+
 echo
 echo "run_all_tests: everything passed"

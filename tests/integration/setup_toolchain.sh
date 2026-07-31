@@ -74,6 +74,17 @@ JDK_ARTIFACT="OpenJDK21U-jdk_x64_linux_hotspot_21.0.11_10.tar.gz|https://github.
 # because upstream ships one archive.
 POSTGRESQL_ARTIFACT="postgresql-17.4.0-x86_64-unknown-linux-gnu.tar.gz|https://github.com/theseus-rs/postgresql-binaries/releases/download/17.4.0/postgresql-17.4.0-x86_64-unknown-linux-gnu.tar.gz|945de95d7e391a9010908fb4b66d7f89058efacd84bbd8572e044286bc626087"
 
+# Further psql releases the backslash tier also runs against. psql rewrites its
+# backslash SQL between major releases, so a catalog that answers 17 can fail 18
+# on queries nobody here wrote: 18 calls pg_get_constraintdef in `\d` and joins
+# pg_available_extensions() in `\dx`, and 17.4 does neither. Each entry is
+# "<version> <artifact spec>"; the version is the one psql reports and names the
+# directory it unpacks to, and it must match PSQL_MATRIX_VERSIONS in
+# toolchain.py.
+POSTGRESQL_MATRIX_ARTIFACTS="
+18.4|postgresql-18.4.0-x86_64-unknown-linux-gnu.tar.gz|https://github.com/theseus-rs/postgresql-binaries/releases/download/18.4.0/postgresql-18.4.0-x86_64-unknown-linux-gnu.tar.gz|65c06cf318b9a57525d842d658d6d18cd461d12b3a89b57d6d8ed7cccbe2db53
+"
+
 # Older pgjdbc releases the JDBC suite also runs against, so a catalog change
 # cannot silently break the driver versions deployed clients actually carry:
 # 42.7.8 is the release Tableau ships, and the 42.2 line is the long-lived
@@ -268,6 +279,24 @@ extract_postgresql_client() {
         -C "$POSTGRESQL_DIR" --strip-components=1
 }
 
+extract_postgresql_matrix_clients() {
+    # Unpack every other psql the matrix runs, each beside the default as
+    # postgresql-<version>/. Only the client is used out of each; the server
+    # binaries come along because upstream ships one archive per release.
+    echo "$POSTGRESQL_MATRIX_ARTIFACTS" | while IFS='|' read -r version archive _url _sha; do
+        [ -n "$version" ] || continue
+        target="$POSTGRESQL_DIR-$version"
+        if [ -x "$target/bin/psql" ]; then
+            log "psql $version already extracted"
+            continue
+        fi
+        log "extracting PostgreSQL client $version"
+        rm -rf "$target"
+        mkdir -p "$target"
+        tar xzf "$DOWNLOADS/$archive" -C "$target" --strip-components=1
+    done
+}
+
 install_cloudbeaver() {
     # Unpack CloudBeaver from its container image.
     #
@@ -388,6 +417,12 @@ main() {
         [ -n "$spec" ] || continue
         fetch "$spec"
     done
+    # The matrix entries carry a leading "<version>|", which fetch does not
+    # want, so strip it back off here rather than teaching fetch about it.
+    echo "$POSTGRESQL_MATRIX_ARTIFACTS" | while IFS='|' read -r version archive url sha; do
+        [ -n "$version" ] || continue
+        fetch "$archive|$url|$sha"
+    done
 
     # JDBC pieces first: they are simple copies/extracts and must not be
     # blocked by the more fragile ODBC driver-manager path.
@@ -396,6 +431,7 @@ main() {
     place_pgjdbc_matrix
 
     extract_postgresql_client
+    extract_postgresql_matrix_clients
 
     extract_dotnet
     build_dotnet_harness

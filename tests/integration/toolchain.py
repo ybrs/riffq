@@ -45,13 +45,68 @@ DOTNET_HARNESS_DLL = os.path.join(
     DOTNET_HARNESS_DIR, "bin", "Release", "net9.0", "RiffqNpgsqlHarness.dll"
 )
 
-# The psql client, from the PostgreSQL distribution setup_toolchain.sh unpacks.
-# The version is pinned because psql's backslash commands are handwritten
+# The psql clients, from the PostgreSQL distributions setup_toolchain.sh
+# unpacks. Versions are pinned because psql's backslash commands are handwritten
 # catalog SQL that differs between major releases: the tier asserts the binary
-# reports this version so a swapped psql shows up as a version mismatch rather
-# than as changed catalog behaviour.
-PSQL = os.path.join(TOOLCHAIN_DIR, "postgresql", "bin", "psql")
-PSQL_VERSION = "17.4"
+# reports the version it selected, so a swapped psql shows up as a version
+# mismatch rather than as changed catalog behaviour.
+#
+# The default version's distribution sits at postgresql/; every other version
+# gets its own postgresql-<version>/ beside it, the way the pgjdbc jars are
+# laid out above.
+PSQL_DEFAULT_VERSION = "17.4"
+PSQL_DIR = os.path.join(TOOLCHAIN_DIR, "postgresql")
+
+# Environment variable psql-matrix runs set to pick one version per run.
+PSQL_VERSION_ENV = "RIFFQ_PSQL_VERSION"
+
+# The psql releases the backslash tier runs against, newest last. Major
+# versions are what matter: psql rewrites its backslash SQL between them, so a
+# catalog that answers 17 can fail 18 on queries no one here wrote. 18.4 was
+# added after a sweep found it calls pg_get_constraintdef in `\d` and joins
+# pg_available_extensions() in `\dx`, neither of which 17.4 does.
+PSQL_MATRIX_VERSIONS = (PSQL_DEFAULT_VERSION, "18.4")
+
+
+def psql_for(version):
+    """The psql binary's path for one version of the matrix.
+
+    Args:
+        version: A version string from PSQL_MATRIX_VERSIONS.
+
+    Returns:
+        The absolute path of that version's psql.
+    """
+    if version == PSQL_DEFAULT_VERSION:
+        return os.path.join(PSQL_DIR, "bin", "psql")
+    return os.path.join(f"{PSQL_DIR}-{version}", "bin", "psql")
+
+
+def selected_psql_version():
+    """The psql version this run drives, from the environment or the default.
+
+    Returns:
+        The value of RIFFQ_PSQL_VERSION when set, else PSQL_DEFAULT_VERSION.
+
+    Raises:
+        ValueError: If the variable names a version the matrix does not carry,
+            which is a typo rather than a version worth silently ignoring.
+    """
+    version = os.environ.get(PSQL_VERSION_ENV)
+    if not version:
+        return PSQL_DEFAULT_VERSION
+    if version not in PSQL_MATRIX_VERSIONS:
+        raise ValueError(
+            f"{PSQL_VERSION_ENV}={version} is not one of "
+            f"{', '.join(PSQL_MATRIX_VERSIONS)}"
+        )
+    return version
+
+
+PSQL = psql_for(selected_psql_version())
+# The version the selected binary must report. Named as it was before the
+# matrix existed so the tier's assertion reads the same.
+PSQL_VERSION = selected_psql_version()
 
 # CloudBeaver, unpacked from its container image by setup_toolchain.sh. The
 # image bundles the JRE the server runs on, so this tier does not use the

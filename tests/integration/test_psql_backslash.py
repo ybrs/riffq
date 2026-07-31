@@ -19,8 +19,11 @@ toolchain holds a different one.
 That matters because the rewrites are real: psql 18's ``\\d`` calls
 pg_get_constraintdef and pg_partition_ancestors, neither of which 17.4's does,
 and its ``\\dx`` joins pg_available_extensions() as a function where 17.4
-selects from the relation. A command can therefore work under one release and
-fail under another, which is what ``expected_failure_under_psql`` below is for.
+selects from the relation. Every command these tests cover currently behaves
+the same under both releases; when one does not, mark it expected-to-fail for
+that release alone, since unittest reports a passing expectedFailure as an
+unexpected success and an unconditional marker would turn the working release
+red.
 
 Commands that do not work yet are covered by ``expectedFailure`` tests naming
 their cause rather than left out, so the day the catalog can answer them
@@ -32,33 +35,7 @@ import unittest
 import fixture_dataset
 import psql_client
 from server_case import FixtureServerCase
-from toolchain import PSQL_VERSION, selected_psql_version
-
-
-def expected_failure_under_psql(*versions):
-    """Mark a test as an expected failure only under the psql versions named.
-
-    A plain ``expectedFailure`` says "this never works". Some commands work
-    under one psql release and not another, because psql rewrote the query
-    between them, and marking those unconditionally would hide the release
-    where they DO work -- unittest reports a passing expected failure as an
-    unexpected success, so the run would go red on the good version.
-
-    Args:
-        *versions: The versions the test is expected to fail under, as they
-            appear in PSQL_MATRIX_VERSIONS.
-
-    Returns:
-        A decorator that marks the test expected-to-fail when this run's psql
-        is one of `versions`, and leaves it a plain assertion otherwise.
-    """
-
-    def decorate(test):
-        if selected_psql_version() in versions:
-            return unittest.expectedFailure(test)
-        return test
-
-    return decorate
+from toolchain import PSQL_VERSION
 
 
 # Column positions in the records psql returns, one constant per command shape
@@ -275,15 +252,14 @@ class PsqlBackslashTest(FixtureServerCase):
         with self.assertRaises(psql_client.PsqlError):
             self.run_command("SELECT * FROM public.no_such_table")
 
-    @expected_failure_under_psql("18.4")
     def test_describe_table_reports_the_fixture_columns(self):
-        """\\d <table> describes the table, columns and all -- on psql 17.
+        """\\d <table> describes the table, columns and all, on both releases.
 
-        psql 18 asks for two functions 17.4 does not.
-        ``pg_get_constraintdef`` was the first and is implemented (task 245);
-        behind it psql 18 calls ``pg_partition_ancestors`` in the query listing
-        the foreign keys that reference the table, and that one is still
-        missing (task 274).
+        The command that took the longest to get working, and it needed a
+        different pair of fixes per release: 17.4 wanted a correlated
+        string_agg grouped by its join key and psql's index-walk publication
+        lookup rewritten, and 18.4 additionally wanted pg_get_constraintdef
+        (task 245) and pg_partition_ancestors (task 274).
 
         The command that took the longest to get working, and the one this
         tier was written for: it needed a correlated string_agg to be grouped
@@ -299,15 +275,13 @@ class PsqlBackslashTest(FixtureServerCase):
             "\\d should list the fixture table's own columns, in ordinal order",
         )
 
-    @expected_failure_under_psql("18.4")
     def test_describe_table_verbose_reports_storage(self):
         """\\d+ <table> adds the per-column storage the plain form omits.
 
         Asserting on a column \\d does not report keeps this from passing on a
         server that answered \\d+ with \\d's narrower query.
 
-        Expected to fail on psql 18 for the same reason as the plain form:
-        pg_partition_ancestors is missing (task 274).
+        Runs on both releases, for the same reasons the plain form does.
         """
         rows = self.run_command(rf"\d+ {fixture_dataset.SCHEMA_NAME}.customers")
         self.assertEqual(

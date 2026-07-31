@@ -67,13 +67,15 @@ RIFFQ_PSQL_VERSION=18.4 python -m unittest discover -s . -t . -k psql
 ```
 
 The rewrites between releases are not hypothetical, which is why this is a
-matrix and not a single pin: psql 18's `\d` calls `pg_get_constraintdef` where
-17.4's does not, and its `\dx` joins `pg_available_extensions()` as a function
-where 17.4 selects from the relation. A command can therefore pass under one
-release and fail under another, so `expected_failure_under_psql(...)` marks a
-test expected-to-fail on named versions only -- an unconditional
-`expectedFailure` would be reported as an unexpected success on the release
-where the command works, turning a good result red.
+matrix and not a single pin: psql 18's `\d` calls `pg_get_constraintdef` and
+`pg_partition_ancestors`, neither of which 17.4's does, and its `\dx` joins
+`pg_available_extensions()` as a function where 17.4 selects from the relation.
+Adding 18.4 to the matrix is what found all three.
+
+Every command these tests cover currently behaves the same under both releases.
+When one does not, mark it expected-to-fail for that release alone rather than
+unconditionally: unittest reports a passing `expectedFailure` as an unexpected
+success, so a blanket marker turns the release where the command *works* red.
 
 Unlike the other tiers, a missing psql is not a skip: `require_psql` raises. A
 green run that never exercised psql's catalog SQL would be worse than a loud
@@ -280,11 +282,17 @@ not hold. NULL is what its callers degrade through -- pgAdmin wraps it in
 `substring(...)`, and psql renders an empty Check column. That promoted `\dD` on
 both releases.
 
-Two more are expected failures under psql 18.4 only, via
-`expected_failure_under_psql`: `\d` and `\d+`. Fixing `pg_get_constraintdef`
-was expected to promote them and did not -- 18's `\d` then asks for
-`pg_partition_ancestors`, which this catalog also lacks, in the query listing
-the foreign keys that reference the table.
+`pg_partition_ancestors` was the last gap between `\d` / `\d+` and psql 18.
+It answers the relation it was handed: PostgreSQL declares it `setof regclass`
+-- a partition's ancestors, including itself -- and this catalog models no
+partitioning, so that one row is the whole answer. It is a scalar function
+rather than a table function because psql calls it in a SELECT list, where a
+table function cannot be reached; that substitution is exact only while nothing
+is partitioned, which a test asserts.
+
+Both describe commands now pass under both releases, and the two sweeps agree:
+54 of 63 commands answer under 17.4 and under 18.4, with the same nine
+failures.
 
 If a future driver or version surfaces a new gap, record it here and guard it
 with an `expectedFailure` test (naming its cause) until it is fixed -- an

@@ -72,10 +72,12 @@ matrix and not a single pin: psql 18's `\d` calls `pg_get_constraintdef` and
 `pg_available_extensions()` as a function where 17.4 selects from the relation.
 Adding 18.4 to the matrix is what found all three.
 
-Every command these tests cover currently behaves the same under both releases.
-When one does not, mark it expected-to-fail for that release alone rather than
-unconditionally: unittest reports a passing `expectedFailure` as an unexpected
-success, so a blanket marker turns the release where the command *works* red.
+`expected_failure_under_psql(...)` marks a test expected-to-fail for named
+releases only. Use it rather than a blanket `expectedFailure` whenever a command
+works on one release and not another: unittest reports a passing
+`expectedFailure` as an unexpected success, so an unconditional marker turns the
+release where the command *works* red. `\dx` is the current case -- it lists
+extensions under 17.4 and asks for `pg_available_extensions()` under 18.4.
 
 Unlike the other tiers, a missing psql is not a skip: `require_psql` raises. A
 green run that never exercised psql's catalog SQL would be worse than a loud
@@ -265,15 +267,27 @@ Five more were fixed while chasing `\d`, `\d+` and `\dy`:
   static provider, so no decorrelation reaches it. The construct is now
   rewritten to the membership test it stands for, `attnum = ANY(pr.prattrs)`.
 
-Two remain under psql 17.4, guarded by `expectedFailure` tests in
-`test_psql_backslash.py`:
+One remains under psql 17.4, guarded by an `expectedFailure` test in
+`test_psql_backslash.py`: `\dp` correlates through a column psql writes
+unqualified (`oid = ANY (polroles)`). The rewriter detects correlation by
+matching `alias.column`, so a bare name reads as uncorrelated and the analyzer
+then rejects the multi-row scalar sub-query.
 
-- `\dp` correlates through a column psql writes unqualified
-  (`oid = ANY (polroles)`). The rewriter detects correlation by matching
-  `alias.column`, so a bare name reads as uncorrelated and the analyzer then
-  rejects the multi-row scalar sub-query.
-- `\dx` casts the schema-qualified literal `'pg_catalog.pg_extension'` to
-  `regclass`, which resolves bare relation names only.
+`\dx`, `\dfn` and `\dft` were fixed together. All three cast a string literal
+to a schema-qualified object-identifier type -- `'pg_catalog.pg_extension'
+::pg_catalog.regclass`, `'pg_catalog.trigger'::pg_catalog.regtype` -- which was
+flattened to text before anything could resolve the name to an oid, leaving the
+planner comparing a string against an integer column. The rule turns on the
+OPERAND, not the type: a string literal is a name to resolve, anything else is a
+value to re-type. `\d` casts a *column* with `conrelid::pg_catalog.regclass`,
+and writing the rule about the type instead broke `\d`, `\d+`, `\dX` and `\dP`
+while fixing `\dx`.
+
+`\drg` was fixed separately: psql writes `pg_catalog.concat_ws`, and
+DataFusion knows the function only under its bare name. An audit over every
+`pg_catalog.<fn>(` call psql and the captured clients make found that one, so
+the fix registers `pg_catalog` spellings for a list of builtins rather than the
+single name that happened to be reported.
 
 `pg_get_constraintdef` was the sixth gap and is now a resolver slot: it answers
 NULL until an embedder installs a `ConstraintDefinitionResolver`, because

@@ -35,7 +35,33 @@ import unittest
 import fixture_dataset
 import psql_client
 from server_case import FixtureServerCase
-from toolchain import PSQL_VERSION
+from toolchain import PSQL_VERSION, selected_psql_version
+
+
+def expected_failure_under_psql(*versions):
+    """Mark a test as an expected failure only under the psql versions named.
+
+    A plain ``expectedFailure`` says "this never works". Some commands work
+    under one psql release and not another, because psql rewrote the query
+    between them, and marking those unconditionally would hide the release
+    where they DO work -- unittest reports a passing expected failure as an
+    unexpected success, so the run would go red on the good version.
+
+    Args:
+        *versions: The versions the test is expected to fail under, as they
+            appear in PSQL_MATRIX_VERSIONS.
+
+    Returns:
+        A decorator that marks the test expected-to-fail when this run's psql
+        is one of `versions`, and leaves it a plain assertion otherwise.
+    """
+
+    def decorate(test):
+        if selected_psql_version() in versions:
+            return unittest.expectedFailure(test)
+        return test
+
+    return decorate
 
 
 # Column positions in the records psql returns, one constant per command shape
@@ -212,6 +238,17 @@ class PsqlBackslashTest(FixtureServerCase):
         """\\do reads pg_operator through pg_operator_is_visible."""
         self.run_command(r"\do")
 
+    def test_list_role_grants_runs(self):
+        """\\dg+ ... \\drg renders a role's grant options with concat_ws.
+
+        psql writes it schema-qualified as ``pg_catalog.concat_ws``, which
+        DataFusion knew only under its bare name, so the command failed with
+        "function pg_catalog.concat_ws() does not exist" while the function was
+        registered all along. The fixture grants no roles to other roles, so
+        the assertion is that the command completes.
+        """
+        self.run_command(r"\drg")
+
     def test_list_event_triggers_runs(self):
         """\\dy renders an event trigger's tags from an array column.
 
@@ -305,17 +342,31 @@ class PsqlBackslashTest(FixtureServerCase):
         """
         self.run_command(r"\dD")
 
-    @unittest.expectedFailure
-    def test_list_extensions(self):
-        """\\dx fails on a schema-qualified regclass literal.
+    @expected_failure_under_psql("18.4")
+    def test_list_extensions_runs(self):
+        """\\dx lists extensions -- on psql 17.
 
         It joins pg_description on
-        ``'pg_catalog.pg_extension'::pg_catalog.regclass``. The regclass cast
-        resolves a bare relation name to an oid, so the qualified spelling
-        reaches simplify_expressions as a string being cast to int32 and the
-        rule fails with "Cannot cast string 'pg_catalog.pg_extension'".
+        ``'pg_catalog.pg_extension'::pg_catalog.regclass``, a schema-qualified
+        regclass literal that used to be flattened to text before anything
+        could resolve it to an oid.
+
+        psql 18 rewrote the query to join ``pg_available_extensions()`` as a
+        FUNCTION where 17.4 selects from the relation of that name, and only
+        the relation exists here (task 269), so it still fails there.
         """
         self.run_command(r"\dx")
+
+    def test_list_functions_filtered_by_return_type_runs(self):
+        """\\dfn and \\dft filter on a regtype literal.
+
+        Both write ``p.prorettype <> 'pg_catalog.trigger'::pg_catalog.regtype``,
+        where prorettype holds an oid -- so the literal has to resolve to the
+        type's oid rather than stay a string, or the comparison asks the planner
+        to read 'pg_catalog.trigger' as an integer.
+        """
+        self.run_command(r"\dfn")
+        self.run_command(r"\dft")
 
     @unittest.expectedFailure
     def test_list_privileges(self):

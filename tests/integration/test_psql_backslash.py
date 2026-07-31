@@ -201,6 +201,17 @@ class PsqlBackslashTest(FixtureServerCase):
         """\\do reads pg_operator through pg_operator_is_visible."""
         self.run_command(r"\do")
 
+    def test_list_event_triggers_runs(self):
+        """\\dy renders an event trigger's tags from an array column.
+
+        Its Tags column is ``array_to_string(array(select x from
+        unnest(evttags) as t(x)), ', ')`` -- an ARRAY over a table function
+        reading an outer column, written unqualified. That correlation has no
+        physical plan, so this command worked only once the ARRAY-over-unnest
+        rewrite turned the sub-query into an expression over the array itself.
+        """
+        self.run_command(r"\dy")
+
     def test_select_returns_the_fixture_rows(self):
         """A plain SELECT through psql returns the fixture's rows in order.
 
@@ -246,14 +257,17 @@ class PsqlBackslashTest(FixtureServerCase):
 
     @unittest.expectedFailure
     def test_describe_table_verbose(self):
-        """\\d+ <table> fails on the same gap as \\dp: a correlated ARRAY().
+        """\\d+ <table> fails on the same gap as \\d: generate_series.
 
-        The relation's storage options are read with
-        ``array(select 'toast.' || x from unnest(tc.reloptions) x)``, which is
-        correlated to the outer ``tc`` and returns a row per array element. The
-        rewriter no longer lifts it into a CTE that could not resolve ``tc``,
-        so it now reaches the planner, which rejects a correlated scalar
-        subquery returning more than one row.
+        Its storage-options column used to be the blocker -- an ARRAY over
+        ``unnest(tc.reloptions)`` correlated to the outer ``tc``. That is fixed:
+        the ARRAY-over-unnest rewrite turns it into an expression over the
+        array, and \\d+ now gets as far as the publication lookup that \\d
+        already failed on, where ``generate_series`` is handed a per-row bound
+        it will not take.
+
+        So this expected failure and test_describe_table above now share one
+        cause, and one fix will promote both.
         """
         self.run_command(rf"\d+ {fixture_dataset.SCHEMA_NAME}.customers")
 

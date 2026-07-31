@@ -241,35 +241,39 @@ class PsqlBackslashTest(FixtureServerCase):
         with self.assertRaises(psql_client.PsqlError):
             self.run_command("SELECT * FROM public.no_such_table")
 
-    @unittest.expectedFailure
-    def test_describe_table(self):
-        """\\d <table> fails: generate_series will not take a per-row bound.
+    def test_describe_table_reports_the_fixture_columns(self):
+        """\\d <table> describes the table, columns and all.
 
-        The last query \\d issues looks up the table's publications, and its
-        column list iterates the published columns with
-        ``generate_series(0, array_upper(pr.prattrs, 1))``. DataFusion's
-        generate_series requires literal bounds, so an expression over a column
-        is rejected with "Argument #2 must be an INTEGER or NULL". A table
-        function returns one static provider, so no amount of decorrelation
-        reaches it; the construct has to be rewritten instead.
+        The command that took the longest to get working, and the one this
+        tier was written for: it needed a correlated string_agg to be grouped
+        by its join key, string_agg to answer to its pg_catalog name, and
+        psql's ``generate_series(0, array_upper(prattrs, 1)) ... prattrs[s]``
+        publication lookup to be rewritten as a membership test, because
+        DataFusion's generate_series will not take a per-row bound.
         """
-        self.run_command(rf"\d {fixture_dataset.SCHEMA_NAME}.customers")
+        rows = self.run_command(rf"\d {fixture_dataset.SCHEMA_NAME}.customers")
+        self.assertEqual(
+            [column.name for column in fixture_dataset.TABLE_COLUMNS["customers"]],
+            [row[0] for row in rows],
+            "\\d should list the fixture table's own columns, in ordinal order",
+        )
 
-    @unittest.expectedFailure
-    def test_describe_table_verbose(self):
-        """\\d+ <table> fails on the same gap as \\d: generate_series.
+    def test_describe_table_verbose_reports_storage(self):
+        """\\d+ <table> adds the per-column storage the plain form omits.
 
-        Its storage-options column used to be the blocker -- an ARRAY over
-        ``unnest(tc.reloptions)`` correlated to the outer ``tc``. That is fixed:
-        the ARRAY-over-unnest rewrite turns it into an expression over the
-        array, and \\d+ now gets as far as the publication lookup that \\d
-        already failed on, where ``generate_series`` is handed a per-row bound
-        it will not take.
-
-        So this expected failure and test_describe_table above now share one
-        cause, and one fix will promote both.
+        Asserting on a column \\d does not report keeps this from passing on a
+        server that answered \\d+ with \\d's narrower query.
         """
-        self.run_command(rf"\d+ {fixture_dataset.SCHEMA_NAME}.customers")
+        rows = self.run_command(rf"\d+ {fixture_dataset.SCHEMA_NAME}.customers")
+        self.assertEqual(
+            [column.name for column in fixture_dataset.TABLE_COLUMNS["customers"]],
+            [row[0] for row in rows],
+        )
+        # Column, Type, Collation, Nullable, Default, Storage, ...
+        self.assertTrue(
+            all(row[5] for row in rows),
+            f"the verbose form reports a storage mode per column: {rows}",
+        )
 
     @unittest.expectedFailure
     def test_list_domains(self):

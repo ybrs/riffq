@@ -57,22 +57,15 @@ class NpgsqlTest(FixtureServerCase):
         """The harness ran against the Npgsql version the project pins."""
         self.assertTrue(self.meta["npgsqlVersion"].startswith("9.0."))
 
-    @unittest.expectedFailure
     def test_tables_are_listed(self):
         """GetSchema("Tables") returns the three fixture tables.
 
-        Blocked on a predicate over information_schema.tables.table_type
-        matching nothing once the same query also binds a parameter. Npgsql's
-        Tables query does both: it filters
-        table_type IN ('BASE TABLE', 'FOREIGN', 'FOREIGN TABLE') and binds the
-        schema restriction as $1, so it comes back empty.
-
-        Isolated with claude-scripts/isolate_npgsql_get_tables_query.py: the
-        same query returns all three rows with the schema inlined as a literal,
-        and returns them with the parameter bound as long as no table_type
-        predicate is present. Selecting table_type on the parameterized path
-        does yield "BASE TABLE", so the stored value is right and only the
-        comparison fails.
+        This was the tier's one expected failure. Npgsql's Tables query filters
+        ``table_type IN ('BASE TABLE', 'FOREIGN', 'FOREIGN TABLE')`` and binds
+        the schema as a parameter, and binding a parameter used to lower-case
+        the whole statement - so 'BASE TABLE' became 'base table' and matched no
+        row. Fixed in the extended-query path; see
+        test_extended_protocol_literals.py for the mechanism.
         """
         listed = [t for t in self.meta["tables"] if t in fixture_dataset.TABLE_NAMES]
         self.assertEqual(sorted(listed), sorted(fixture_dataset.TABLE_NAMES))

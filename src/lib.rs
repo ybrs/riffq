@@ -2704,13 +2704,20 @@ impl ExtendedQueryHandler for RiffqProcessor {
             )
         );
 
-        let query = query.trim().to_lowercase();
+        // Lowercase a COPY for the command matching below, and run the query as
+        // the client wrote it. Shadowing `query` with the lowercased text - which
+        // this did - rewrites every string LITERAL in the statement too, so
+        // `WHERE table_type = 'BASE TABLE'` silently matched nothing and
+        // `SELECT 'MiXeD CaSe'` came back as 'mixed case'. The simple-query path
+        // in execute_simple_statement already keeps the two separate.
+        let query = query.trim();
+        let lowercase = query.to_lowercase();
 
-        if query.is_empty() {
+        if lowercase.is_empty() {
             return Ok(Response::Execution(Tag::new("")));
-        } else if query.starts_with("discard all") {
+        } else if lowercase.starts_with("discard all") {
             return Ok(Response::Execution(Tag::new("DISCARD ALL")));
-        } else if query == "show transaction isolation level" {
+        } else if lowercase == "show transaction isolation level" {
             let field_infos = Arc::new(vec![FieldInfo::new(
                 "transaction_isolation".to_string(),
                 None,
@@ -2724,7 +2731,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
             let row = encoder.take_row();
             let rows = stream::iter(vec![Ok(row)]);
             return Ok(Response::Query(QueryResponse::new(field_infos, rows)));
-        } else if let Some(var) = Self::parse_show_variable(query.as_str())
+        } else if let Some(var) = Self::parse_show_variable(lowercase.as_str())
             && let Some(resp) = self.show_variable_response(
                 &var.to_lowercase(),
                 portal.result_column_format.format_for(0),
@@ -2744,7 +2751,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
         let result = self
             .query_runner
             .execute(
-                query.clone(),
+                query.to_string(),
                 Some(portal.parameters.clone()),
                 Some(resolve_param_types(&portal.statement.parameter_types)),
                 false,

@@ -2,7 +2,7 @@
 //!
 //! Keep this in one place so the encoder, DESCRIBE-only execution
 //! and any future planner code all agree on column OIDs.
-use log::info;
+use log::debug;
 
 use arrow::datatypes::DataType;
 use pgwire::api::Type;
@@ -28,7 +28,7 @@ use pgwire::api::Type;
 /// extend this function – **never** add ad-hoc matches elsewhere.
 pub fn arrow_type_to_pgwire(dt: &DataType) -> Type {
     use DataType::*;
-    info!("Datatype -> {:?}", dt);
+    debug!("Datatype -> {:?}", dt);
     match dt {
         /* ── integers ───────────────────────────── */
         Int8 | UInt8 => Type::INT2, // SMALLINT

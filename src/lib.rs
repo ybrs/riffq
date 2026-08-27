@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use datafusion::sql::sqlparser::dialect::PostgreSqlDialect;
 use datafusion_pg_catalog::session::ClientOpts;
 use futures::{Sink, SinkExt, Stream};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use pyo3::prelude::*;
-use pyo3::types::{PyCapsule, PyDict, PyList, PyTuple};
+use pyo3::types::{PyCapsule, PyDict, PyList, PyString, PyTuple};
 use pyo3::{Bound, IntoPyObjectExt, PyAny};
 use rustls_pemfile::{certs, private_key};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
@@ -93,7 +93,8 @@ pub enum WorkerMessage {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-        responder: oneshot::Sender<QueryResult>,
+        client_metadata: HashMap<String, String>,
+        responder: tokio::sync::mpsc::UnboundedSender<QueryResult>,
     },
     Connect {
         connection_id: u64,
@@ -124,7 +125,7 @@ pub struct BoolCallbackResult {
 
 #[pyclass]
 struct CallbackWrapper {
-    responder: Arc<Mutex<Option<oneshot::Sender<QueryResult>>>>,
+    responder: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<QueryResult>>>>,
 }
 
 #[pyclass]
@@ -169,143 +170,252 @@ impl BoolCallbackWrapper {
     }
 }
 
+fn parse_arrow_capsule(capsule: &Bound<'_, PyCapsule>) -> PyResult<QueryResult> {
+    let ptr = match capsule.pointer_checked(Some(c"arrow_array_stream")) {
+        Ok(ptr) => ptr.as_ptr(),
+        Err(err) => {
+            let err_info = ErrorInfo::new(
+                "ERROR".to_string(),
+                "XX000".to_string(),
+                format!("query callback returned an unusable capsule: {err}"),
+            );
+            return Ok(QueryResult::Error(Box::new(err_info)));
+        }
+    };
+
+    unsafe {
+        let mut reader = ArrowArrayStreamReader::from_raw(ptr as *mut _).unwrap();
+        let mut batches = Vec::new();
+        while let Some(batch) = reader.next().transpose().unwrap() {
+            batches.push(batch);
+        }
+        let schema = reader.schema();
+        Ok(QueryResult::Arrow(batches, schema))
+    }
+}
+
+fn parse_result_item<'py>(
+    py: Python<'py>,
+    result_bound: &Bound<'py, PyAny>,
+    is_tag: bool,
+    is_error: bool,
+) -> PyResult<Option<QueryResult>> {
+    if is_tag {
+        let tag = result_bound.extract::<String>().unwrap_or_default();
+        return Ok(Some(QueryResult::Tag(tag)));
+    }
+    if is_error {
+        let err_tuple = result_bound
+            .extract::<(String, String, String)>()
+            .unwrap_or_else(|_| {
+                (
+                    "ERROR".to_string(),
+                    "XX000".to_string(),
+                    "unknown error".to_string(),
+                )
+            });
+        let err_info = ErrorInfo::new(err_tuple.0, err_tuple.1, err_tuple.2);
+        return Ok(Some(QueryResult::Error(Box::new(err_info))));
+    }
+
+    // Typed Dict checks (TagResult or ErrorResult)
+    if let Ok(dict) = result_bound.cast::<PyDict>() {
+        if let Ok(Some(tag_val)) = dict.get_item("tag") {
+            let tag = tag_val.extract::<String>()?;
+            return Ok(Some(QueryResult::Tag(tag)));
+        }
+        if let Ok(Some(err_val)) = dict.get_item("error") {
+            let msg = err_val.extract::<String>()?;
+            let sql_state = dict
+                .get_item("sql_state")?
+                .map(|v| v.extract::<String>())
+                .transpose()?
+                .unwrap_or_else(|| "XX000".to_string());
+            let severity = dict
+                .get_item("severity")?
+                .map(|v| v.extract::<String>())
+                .transpose()?
+                .unwrap_or_else(|| "ERROR".to_string());
+            return Ok(Some(QueryResult::Error(Box::new(ErrorInfo::new(
+                severity, sql_state, msg,
+            )))));
+        }
+    }
+
+    // Direct Arrow PyCapsule
+    if let Ok(capsule) = result_bound.cast::<PyCapsule>() {
+        return Ok(Some(parse_arrow_capsule(capsule)?));
+    }
+
+    // Checking for __arrow_c_stream__ directly (e.g. pa.RecordBatchReader)
+    if result_bound.hasattr("__arrow_c_stream__")? {
+        let stream_obj = result_bound.call_method0("__arrow_c_stream__")?;
+        if let Ok(capsule) = stream_obj.cast::<PyCapsule>() {
+            return Ok(Some(parse_arrow_capsule(capsule)?));
+        }
+    }
+
+    // PyBytes (Arrow IPC fallback)
+    if let Ok(pybytes) = result_bound.cast::<pyo3::types::PyBytes>() {
+        let data = pybytes.as_bytes();
+        let cursor = std::io::Cursor::new(data);
+        let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid Arrow IPC bytes: {}", e))
+        })?;
+        let schema = reader.schema().clone();
+        let batches: Vec<RecordBatch> = reader.collect::<Result<_, _>>().map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Failed to collect Arrow IPC batches: {}",
+                e
+            ))
+        })?;
+        return Ok(Some(QueryResult::Arrow(batches, schema)));
+    }
+
+    // Tuple fallback (schema_desc, rows)
+    if let Ok((schema_desc, py_rows)) =
+        result_bound.extract::<(Vec<HashMap<String, String>>, Vec<Vec<Py<PyAny>>>)>()
+    {
+        let rows: Vec<Vec<Option<String>>> = py_rows
+            .into_iter()
+            .map(|row| {
+                row.into_iter()
+                    .map(|val| {
+                        let val_bound = val.bind(py);
+                        if val_bound.is_none() {
+                            None
+                        } else {
+                            val_bound.extract::<String>().ok()
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let fields: Vec<Field> = schema_desc
+            .iter()
+            .map(|c| Field::new(c.get("name").unwrap(), DataType::Utf8, true))
+            .collect();
+
+        let mut builders: Vec<StringBuilder> =
+            fields.iter().map(|_| StringBuilder::new()).collect();
+
+        for row in &rows {
+            for (i, cell) in row.iter().enumerate() {
+                match cell {
+                    Some(s) => builders[i].append_value(s),
+                    None => builders[i].append_null(),
+                }
+            }
+        }
+
+        let arrays: Vec<ArrayRef> = builders
+            .into_iter()
+            .map(|mut b| Arc::new(b.finish()) as ArrayRef)
+            .collect();
+
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        return Ok(Some(QueryResult::Arrow(vec![batch], schema)));
+    }
+
+    Ok(None)
+}
+
 #[pymethods]
 impl CallbackWrapper {
     #[pyo3(signature = (result, *, is_tag=false, is_error=false))]
     fn __call__(&self, result: Py<PyAny>, is_tag: bool, is_error: bool) {
         if let Some(sender) = self.responder.lock().unwrap().take() {
             Python::attach(|py| {
-                if is_tag {
-                    let tag = result.extract::<String>(py).unwrap_or_default();
-                    let ret = sender.send(QueryResult::Tag(tag));
-                    if ret.is_err() {
-                        error!("return for tag errored");
-                    }
-                    return;
-                }
-                if is_error {
-                    let err_tuple = result
-                        .extract::<(String, String, String)>(py)
-                        .unwrap_or_else(|_| {
-                            (
-                                "ERROR".to_string(),
-                                "XX000".to_string(),
-                                "unknown error".to_string(),
-                            )
-                        });
-                    let err_info = ErrorInfo::new(err_tuple.0, err_tuple.1, err_tuple.2);
-                    let _ = sender.send(QueryResult::Error(Box::new(err_info)));
-                    return;
-                }
-                // Try Arrow C stream pointer first
                 let result_bound = result.bind(py);
-                let type_name = result_bound
-                    .get_type()
-                    .name()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| "<unknown>".to_string());
-                debug!("[RUST] result python type: {}", type_name);
-                if let Ok(capsule) = result_bound.extract::<Bound<PyCapsule>>() {
-                    debug!("[RUST] received PyCapsule");
 
-                    // The Arrow PyCapsule interface names a stream capsule
-                    // "arrow_array_stream". Reading the pointer by that name
-                    // rejects a capsule carrying some other kind of C pointer,
-                    // which the cast below would otherwise reinterpret as an
-                    // ArrowArrayStream -- undefined behaviour rather than an error.
-                    let ptr = match capsule.pointer_checked(Some(c"arrow_array_stream")) {
-                        Ok(ptr) => ptr.as_ptr(),
-                        Err(err) => {
-                            let err_info = ErrorInfo::new(
+                match parse_result_item(py, &result_bound, is_tag, is_error) {
+                    Ok(Some(res)) => {
+                        let _ = sender.send(res);
+                    }
+                    Ok(None) => {
+                        // Check if it can be safely iterated
+                        if let Ok(iterator) = result_bound.try_iter() {
+                            if result_bound.is_instance_of::<PyString>() {
+                                let _ = sender.send(QueryResult::Error(Box::new(ErrorInfo::new(
+                                    "ERROR".to_string(),
+                                    "XX000".to_string(),
+                                    "Result cannot be a bare string iterator".to_string(),
+                                ))));
+                            } else {
+                                for item in iterator {
+                                    match item {
+                                        Ok(item_bound) => {
+                                            match parse_result_item(py, &item_bound, false, false) {
+                                                Ok(Some(parsed)) => {
+                                                    let _ = sender.send(parsed);
+                                                }
+                                                Ok(None) => {
+                                                    let type_name = item_bound
+                                                        .get_type()
+                                                        .name()
+                                                        .map(|s| s.to_string_lossy().into_owned())
+                                                        .unwrap_or_else(|_| {
+                                                            "<unknown>".to_string()
+                                                        });
+                                                    let _ = sender.send(QueryResult::Error(
+                                                        Box::new(ErrorInfo::new(
+                                                            "ERROR".to_string(),
+                                                            "XX000".to_string(),
+                                                            format!("Yielded item not recognized as a valid result (type: {})", type_name),
+                                                        )),
+                                                    ));
+                                                    break;
+                                                }
+                                                Err(e) => {
+                                                    let _ = sender.send(QueryResult::Error(
+                                                        Box::new(ErrorInfo::new(
+                                                            "ERROR".to_string(),
+                                                            "XX000".to_string(),
+                                                            format!("Error parsing yielded item: {}", e),
+                                                        )),
+                                                    ));
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let _ = sender.send(QueryResult::Error(Box::new(
+                                                ErrorInfo::new(
+                                                    "ERROR".to_string(),
+                                                    "XX000".to_string(),
+                                                    format!("Error iterating result: {}", e),
+                                                ),
+                                            )));
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            let type_name = result_bound
+                                .get_type()
+                                .name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|_| "<unknown>".to_string());
+                            let _ = sender.send(QueryResult::Error(Box::new(ErrorInfo::new(
                                 "ERROR".to_string(),
                                 "XX000".to_string(),
-                                format!("query callback returned an unusable capsule: {err}"),
-                            );
-                            let _ = sender.send(QueryResult::Error(Box::new(err_info)));
-                            return;
-                        }
-                    };
-
-                    // `ptr` is a live ArrowArrayStream* produced by PyArrow
-                    // (CallbackWrapper received it directly from Python).
-                    // ArrowArrayStreamReader takes ownership and will call `release`
-                    // *when the reader itself is dropped*.  We read every batch,
-                    // clone them into `batches`, clone the schema, and only then let
-                    // `reader` fall out of scope, so the underlying C buffers stay
-                    // alive as long as any RecordBatch/Schema clones do.  No
-                    // use-after-free possible.
-                    unsafe {
-                        let mut reader = ArrowArrayStreamReader::from_raw(ptr as *mut _).unwrap();
-                        let mut batches = Vec::new();
-                        while let Some(batch) = reader.next().transpose().unwrap() {
-                            batches.push(batch);
-                        }
-                        let schema = reader.schema();
-                        let _ = sender.send(QueryResult::Arrow(batches, schema));
-                    }
-                    return;
-                }
-
-                // First try to treat the result as Arrow IPC bytes. When the
-                // callback returns bytes we assume they contain an Arrow IPC
-                // stream produced by ``pyarrow``.
-                if let Ok(pybytes) = result_bound.extract::<Bound<pyo3::types::PyBytes>>() {
-                    let data = pybytes.as_bytes();
-                    let cursor = std::io::Cursor::new(data);
-                    let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).unwrap();
-                    let schema = reader.schema().clone();
-                    let batches: Vec<RecordBatch> = reader.collect::<Result<_, _>>().unwrap();
-                    let _ = sender.send(QueryResult::Arrow(batches, schema));
-                    return;
-                }
-
-                // Fallback: assume (schema_desc, rows) tuple, build batches
-                let parsed: PyResult<(Vec<HashMap<String, String>>, Vec<Vec<Py<PyAny>>>)> =
-                    result_bound.extract::<(Vec<HashMap<String, String>>, Vec<Vec<Py<PyAny>>>)>();
-                if let Ok((schema_desc, py_rows)) = parsed {
-                    // turn PyObjects into Rust Option<String>
-                    let rows: Vec<Vec<Option<String>>> = py_rows
-                        .into_iter()
-                        .map(|row| {
-                            row.into_iter()
-                                .map(|val| {
-                                    let val_bound = val.bind(py);
-                                    if val_bound.is_none() {
-                                        None
-                                    } else {
-                                        val_bound.extract::<String>().ok()
-                                    }
-                                })
-                                .collect()
-                        })
-                        .collect();
-
-                    // build arrow arrays column-wise
-                    let fields: Vec<Field> = schema_desc
-                        .iter()
-                        .map(|c| Field::new(c.get("name").unwrap(), DataType::Utf8, true))
-                        .collect();
-
-                    let mut builders: Vec<StringBuilder> =
-                        fields.iter().map(|_| StringBuilder::new()).collect();
-
-                    for row in &rows {
-                        for (i, cell) in row.iter().enumerate() {
-                            match cell {
-                                Some(s) => builders[i].append_value(s),
-                                None => builders[i].append_null(),
-                            }
+                                format!(
+                                    "Result not recognized as a valid callback result or iterable (type: {})",
+                                    type_name
+                                ),
+                            ))));
                         }
                     }
-
-                    let arrays: Vec<ArrayRef> = builders
-                        .into_iter()
-                        .map(|mut b| Arc::new(b.finish()) as ArrayRef)
-                        .collect();
-
-                    let schema = Arc::new(Schema::new(fields));
-                    let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
-                    let _ = sender.send(QueryResult::Arrow(vec![batch], schema));
+                    Err(e) => {
+                        let _ = sender.send(QueryResult::Error(Box::new(ErrorInfo::new(
+                            "ERROR".to_string(),
+                            "XX000".to_string(),
+                            format!("Error parsing callback result: {}", e),
+                        ))));
+                    }
                 }
             });
         }
@@ -839,6 +949,7 @@ impl PythonWorker {
                             param_types,
                             do_describe,
                             connection_id,
+                            client_metadata,
                             responder,
                         } => {
                             debug!("[PY_WORKER] received query: {} -- {}", connection_id, query);
@@ -872,6 +983,13 @@ impl PythonWorker {
 
                                     // Connection identifier
                                     kwargs.set_item("connection_id", connection_id).unwrap();
+
+                                    // Add client metadata
+                                    let py_metadata = PyDict::new(py);
+                                    for (k, v) in client_metadata.iter() {
+                                        py_metadata.set_item(k, v).unwrap();
+                                    }
+                                    kwargs.set_item("client_metadata", py_metadata).unwrap();
 
                                     // Add query_args if present
                                     if let (Some(params), Some(param_types)) =
@@ -943,7 +1061,7 @@ impl PythonWorker {
                                                             }
                                                         }
                                                         _ => {
-                                                            info!(
+                                                            warn!(
                                                                 "unknown query argument type {:}?",
                                                                 ty
                                                             );
@@ -1114,8 +1232,9 @@ impl PythonWorker {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-    ) -> QueryResult {
-        let (tx, rx) = oneshot::channel::<QueryResult>();
+        client_metadata: HashMap<String, String>,
+    ) -> Vec<QueryResult> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<QueryResult>();
         debug!("[RUST] Sending query to worker: {}", query);
         self.sender
             .send(WorkerMessage::Query {
@@ -1124,14 +1243,16 @@ impl PythonWorker {
                 param_types,
                 do_describe,
                 connection_id,
+                client_metadata,
                 responder: tx,
             })
             .expect("Send failed!");
 
-        rx.await.unwrap_or_else(|e| {
-            error!("[RUST] Worker failed: {:?}", e);
-            QueryResult::Arrow(Vec::new(), Arc::new(Schema::empty()))
-        })
+        let mut results = Vec::new();
+        while let Some(res) = rx.recv().await {
+            results.push(res);
+        }
+        results
     }
 
     pub async fn on_connect(
@@ -1203,7 +1324,8 @@ trait QueryRunner: Send + Sync {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-    ) -> datafusion::error::Result<QueryResult>;
+        client_metadata: HashMap<String, String>,
+    ) -> datafusion::error::Result<Vec<QueryResult>>;
 
     fn set_ctx(&self, _ctx: Arc<SessionContext>) {}
 }
@@ -1213,17 +1335,6 @@ pub enum QueryResult {
     Tag(String),
     Error(Box<ErrorInfo>),
 }
-
-#[derive(Debug)]
-struct UserQueryError(Box<ErrorInfo>);
-
-impl std::fmt::Display for UserQueryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for UserQueryError {}
 
 struct RouterQueryRunner {
     py_worker: Arc<PythonWorker>,
@@ -1239,50 +1350,38 @@ impl QueryRunner for RouterQueryRunner {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-    ) -> datafusion::error::Result<QueryResult> {
+        client_metadata: HashMap<String, String>,
+    ) -> datafusion::error::Result<Vec<QueryResult>> {
         let ctx = self.catalog_ctx.lock().unwrap().clone();
         let py_worker = self.py_worker.clone();
 
-        let tag_holder = Arc::new(Mutex::new(None));
-        let tag_clone = tag_holder.clone();
+        let results_holder = Arc::new(Mutex::new(None));
+        let results_clone = results_holder.clone();
 
         let handler = move |_ctx: &SessionContext, sql: &str, p, t| {
             let py_worker = py_worker.clone();
-            let tag_store = tag_clone.clone();
+            let results_store = results_clone.clone();
             let sql_owned = sql.to_string();
+            let client_metadata_clone = client_metadata.clone();
             async move {
-                match py_worker
-                    .on_query(sql_owned, p, t, do_describe, connection_id)
-                    .await
-                {
-                    QueryResult::Arrow(b, s) => Ok((b, s)),
-                    QueryResult::Tag(tag) => {
-                        *tag_store.lock().unwrap() = Some(tag);
-                        Ok((Vec::new(), Arc::new(Schema::empty())))
-                    }
-                    QueryResult::Error(e) => Err(datafusion::error::DataFusionError::External(
-                        Box::new(UserQueryError(e)),
-                    )),
-                }
+                let results = py_worker
+                    .on_query(sql_owned, p, t, do_describe, connection_id, client_metadata_clone)
+                    .await;
+                *results_store.lock().unwrap() = Some(results);
+                Ok((Vec::new(), Arc::new(Schema::empty())))
             }
         };
 
         let (batches, schema) =
             match dispatch_query(&ctx, &query, params, param_types, handler).await {
                 Ok(v) => v,
-                Err(datafusion::error::DataFusionError::External(e)) => {
-                    match e.downcast::<UserQueryError>() {
-                        Ok(user_err) => return Ok(QueryResult::Error(user_err.0)),
-                        Err(e) => return Err(datafusion::error::DataFusionError::External(e)),
-                    }
-                }
                 Err(e) => return Err(e),
             };
 
-        if let Some(tag) = tag_holder.lock().unwrap().take() {
-            Ok(QueryResult::Tag(tag))
+        if let Some(results) = results_holder.lock().unwrap().take() {
+            Ok(results)
         } else {
-            Ok(QueryResult::Arrow(batches, schema))
+            Ok(vec![QueryResult::Arrow(batches, schema)])
         }
     }
 
@@ -1304,11 +1403,19 @@ impl QueryRunner for DirectQueryRunner {
         param_types: Option<Vec<Type>>,
         do_describe: bool,
         connection_id: u64,
-    ) -> datafusion::error::Result<QueryResult> {
+        client_metadata: HashMap<String, String>,
+    ) -> datafusion::error::Result<Vec<QueryResult>> {
         Ok(
             self.py_worker
-                .on_query(query, params, param_types, do_describe, connection_id)
-                .await, // QueryResult, no rebuilding
+                .on_query(
+                    query,
+                    params,
+                    param_types,
+                    do_describe,
+                    connection_id,
+                    client_metadata,
+                )
+                .await,
         )
     }
 
@@ -1373,7 +1480,6 @@ impl RiffqProcessor {
             });
             let udf = create_udf(KEY, vec![], DataType::Utf8, Volatility::Stable, fun.clone());
             ctx.register_udf(udf);
-            // udf.with_aliases("pg_catalog.current_database");
             let udf = create_udf(
                 "pg_catalog.current_database",
                 vec![],
@@ -1670,31 +1776,40 @@ impl SimpleQueryHandler for RiffqProcessor {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let result = self
+        let results = self
             .query_runner
-            .execute(query.to_string(), None, None, false, connection_id)
+            .execute(
+                query.to_string(),
+                None,
+                None,
+                false,
+                connection_id,
+                client.metadata().clone(),
+            )
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
-        match result {
-            QueryResult::Arrow(batches, schema) => {
-                // Simple query protocol always uses text format
-                let formats: Vec<FieldFormat> = vec![FieldFormat::Text; schema.fields().len()];
-                let (schema, data_row_stream) = arrow_to_pg_rows(batches, schema, &formats);
-                Ok(vec![Response::Query(QueryResponse::new(
-                    schema,
-                    data_row_stream,
-                ))])
+        let mut responses = Vec::new();
+        for result in results {
+            match result {
+                QueryResult::Arrow(batches, schema) => {
+                    // Simple query protocol always uses text format
+                    let formats: Vec<FieldFormat> = vec![FieldFormat::Text; schema.fields().len()];
+                    let (schema, data_row_stream) = arrow_to_pg_rows(batches, schema, &formats);
+                    responses.push(Response::Query(QueryResponse::new(schema, data_row_stream)));
+                }
+                QueryResult::Tag(tag) => {
+                    responses.push(Response::Execution(Tag::new(&tag)));
+                }
+                QueryResult::Error(e) => {
+                    return Err(PgWireError::UserError(e));
+                }
             }
-            QueryResult::Tag(tag) => Ok(vec![Response::Execution(Tag::new(&tag))]),
-            QueryResult::Error(e) => Err(PgWireError::UserError(e)),
         }
+        Ok(responses)
     }
 }
 
-// pub struct MyExtendedQueryHandler {
-//     query_runner: Arc<dyn QueryRunner>,
-// }
 #[derive(Clone)]
 pub struct MyStatement {
     pub query: String,
@@ -1707,11 +1822,9 @@ fn resolve_param_types(types: &[Option<Type>]) -> Vec<Type> {
     // types, so fall back to UNKNOWN for any unspecified parameter, matching the
     // pre-0.40 behavior where parameter_types was a plain Vec<Type>.
     let mut resolved = Vec::with_capacity(types.len());
-
     for ty in types {
         resolved.push(ty.clone().unwrap_or(Type::UNKNOWN));
     }
-
     resolved
 }
 
@@ -1810,14 +1923,14 @@ impl ExtendedQueryHandler for RiffqProcessor {
         }
 
         let _ = max_rows; // currently unused until partial fetch is supported
-
+        
         let connection_id = client
             .metadata()
             .get("connection_id")
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let result = self
+        let mut results = self
             .query_runner
             .execute(
                 query.to_string(),
@@ -1825,10 +1938,16 @@ impl ExtendedQueryHandler for RiffqProcessor {
                 Some(resolve_param_types(&portal.statement.parameter_types)),
                 false,
                 connection_id,
+                client.metadata().clone(),
             )
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
+        if results.is_empty() {
+            return Ok(Response::Execution(Tag::new("")));
+        }
+        
+        let result = results.remove(0);
         match result {
             QueryResult::Arrow(batches, schema) => {
                 // Extract formats from portal for each column
@@ -1864,17 +1983,24 @@ impl ExtendedQueryHandler for RiffqProcessor {
         let query = &statement.statement.query;
         let param_types = resolve_param_types(&statement.parameter_types);
 
-        let result = self
+        let mut results = self
             .query_runner
             .execute(
                 query.to_string(),
                 None,                      // no parameter values at statement describe
                 Some(param_types.clone()), // but pass parameter type hints
-                true,                      // describe mode to get only schema
+                true,                      // describe mode to get only schema                
                 connection_id,
+                client.metadata().clone(),
             )
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+
+        let result = if results.is_empty() {
+            QueryResult::Tag("".to_string())
+        } else {
+            results.remove(0)
+        };
 
         let schema = match result {
             QueryResult::Arrow(_, schema) => schema,
@@ -1916,7 +2042,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
 
-        let result = self
+        let mut results = self
             .query_runner
             .execute(
                 query.to_string(),
@@ -1924,9 +2050,17 @@ impl ExtendedQueryHandler for RiffqProcessor {
                 Some(resolve_param_types(&portal.statement.parameter_types)),
                 true,
                 connection_id,
+                client.metadata().clone(),
             )
             .await
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
+        
+        let result = if results.is_empty() {
+            QueryResult::Tag("".to_string())
+        } else {
+            results.remove(0)
+        };
+
         let schema = match result {
             QueryResult::Arrow(_, schema) => schema,
             QueryResult::Tag(_) => Arc::new(Schema::empty()),
@@ -1947,7 +2081,7 @@ impl ExtendedQueryHandler for RiffqProcessor {
                 )
             })
             .collect();
-        info!("sending back the describe portal {:?}", fields);
+        debug!("sending back the describe portal {:?}", fields);
         Ok(DescribePortalResponse::new(fields))
     }
 }

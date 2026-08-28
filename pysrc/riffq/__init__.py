@@ -14,6 +14,7 @@ Exports:
 from ._riffq import Server  # Rust class
 from . import connection
 from .connection import BaseConnection, RiffqServer
+from .contracts import *
 
 # Re‑exports for a tidy public API
 BaseConnection = connection.BaseConnection

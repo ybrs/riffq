@@ -1,5 +1,44 @@
 # Release Notes
 
+## release-0.3.0
+
+### Breaking: no hashing in riffq - `riffq.helpers.stable_oid` is removed
+
+Deriving an OID from a name is not the catalog's job, and a 31-bit hash space
+collides silently at scale. Declared objects now get their OIDs from a
+persistent registry instead (below); a lazy source that derives its own
+identifiers owns that derivation itself, including uniqueness (teleduck does
+this over DuckDB's information schema, with a probe-on-collision fallback).
+
+### OIDs come from a registry; pass `oid_registry_path` to persist them
+
+`start(catalog_emulation=True, oid_registry_path="catalog-oids.redb")` records
+every declared object's OID in a redb file (pure Rust, ACID). The first
+registration of a name allocates the next OID; every later run - after a
+restart, after reordering declarations - gets the recorded value back, so
+clients that cache OIDs keep resolving. Allocation is one cluster-wide counter,
+as PostgreSQL's own is: two databases' objects no longer share numbers.
+
+Without `oid_registry_path`, an in-memory registry stands in and `start()`
+emits a `DeprecationWarning`: OIDs are then stable only while declaration
+order does not change between runs. This fallback will become an error.
+
+### Breaking: duplicate registrations raise instead of being skipped
+
+`register_database`, `register_schema` and `register_table` now raise
+`ValueError` ("... already exists") for a name already registered, as
+PostgreSQL refuses CREATE for an existing name. Previously a duplicate was
+silently skipped.
+
+### Breaking: declared+lazy name collisions are errors, not shadowing
+
+With both `register_*` declarations and `set_lazy_catalog` configured, a
+database or relation name reported by BOTH is refused at scan time, naming the
+object - previously the declared side silently won. A shared SCHEMA name still
+merges; that is how a live source mounts tables into a declared database's
+`public`.
+
+
 ## release-0.2.0
 
 ### Breaking: a registered database is the only connectable database

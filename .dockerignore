@@ -1,0 +1,8 @@
+target/
+venv/
+.git/
+.pytest_cache/
+tests/
+test_concurrency/
+example/
+claude-scripts/

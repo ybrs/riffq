@@ -86,6 +86,49 @@ class SessionIdentityTest(unittest.TestCase):
                 cur.execute("SELECT current_user")
                 self.assertEqual(cur.fetchone()[0], "alice")
 
+    def test_every_spelling_postgresql_accepts_reports_the_connecting_role(self):
+        """Each way PostgreSQL lets a client ask "who am I" answers here too.
+
+        ``current_user`` and ``session_user`` are the only two sqlparser models
+        as parenthesis-less function calls. ``current_role`` arrived as a bare
+        column reference and ``user`` as a call to a name nothing was registered
+        under, so both failed with "No field named ..."; the schema-qualified
+        forms did not parse at all. All four are ordinary spellings a client may
+        send, and a real PostgreSQL answers every one -- verified against the
+        bundled 17.4 server, not assumed.
+
+        Over the wire rather than in-process because the fix has two halves and
+        this is the only place both are exercised: the statement has to be
+        RECOGNISED as the catalog's to answer (the router inspects function
+        calls, and a bare column reference is not one, so these used to be
+        forwarded to the Python host) and then resolved.
+        """
+        for statement in (
+            "SELECT current_user",
+            "SELECT session_user",
+            "SELECT current_role",
+            "SELECT user",
+            "SELECT pg_catalog.current_user()",
+            "SELECT pg_catalog.session_user()",
+        ):
+            with self.subTest(statement=statement):
+                with self._connect_as("alice") as conn, conn.cursor() as cur:
+                    cur.execute(statement)
+                    self.assertEqual(cur.fetchone()[0], "alice")
+
+    def test_current_catalog_and_current_schema_answer_without_parentheses(self):
+        """The two non-role identity keywords, which take no parentheses either.
+
+        ``current_catalog`` is the SQL-standard spelling of
+        ``current_database()`` and ``current_schema`` of ``current_schema()``.
+        Both were "No field named ..." for the same reason as ``current_role``.
+        """
+        with self._connect_as("alice") as conn, conn.cursor() as cur:
+            cur.execute("SELECT current_catalog")
+            self.assertEqual(cur.fetchone()[0], "db")
+            cur.execute("SELECT current_schema")
+            self.assertEqual(cur.fetchone()[0], "public")
+
     def test_a_view_body_sees_the_connecting_role(self):
         # applicable_roles is one of the information_schema views whose body
         # compares CURRENT_USER. It is planned once when the database's context

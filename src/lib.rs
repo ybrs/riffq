@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use datafusion::sql::sqlparser::dialect::PostgreSqlDialect;
-use datafusion_pg_catalog::session::{ClientOpts, set_session_user};
+use datafusion_pg_catalog::session::{ClientOpts, execute_sql, set_session_user};
 use futures::{Sink, SinkExt, Stream};
 use log::{debug, error, info};
 use pyo3::prelude::*;
@@ -48,11 +48,15 @@ use arrow::datatypes::{
 use arrow::record_batch::RecordBatchReader;
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::context::SessionContext;
+use datafusion_pg_catalog::catalog_oid_registry::{
+    CatalogOidRegistry, InMemoryCatalogOidRegistry, RedbCatalogOidRegistry,
+};
+use datafusion_pg_catalog::combined_catalog_source::CombinedCatalogSource;
+use datafusion_pg_catalog::declared_catalog_source::DeclaredCatalogSource;
 use datafusion_pg_catalog::{
     ColumnDef, ColumnSpec, ConfigSettingDef, DatabaseDef, LazyCatalogOptions, LazyCatalogSource,
-    RelationDef, RelationKind, SchemaDef, SettingDef, dispatch_query, get_base_session_context,
-    get_base_session_context_with_lazy_catalog, register_schema, register_user_database,
-    register_user_tables,
+    RelationDef, RelationKind, SchemaDef, SetStatementDisposition, SettingDef,
+    classify_set_statement, dispatch_query, get_base_session_context_with_lazy_catalog,
 };
 use postgres_types::FromSql;
 
@@ -1716,6 +1720,10 @@ impl PythonWorker {
 /// The implementation is chosen once per connection: a catalog-emulating server
 /// answers `pg_catalog` and `information_schema` itself and forwards only user
 /// queries, while a plain server passes every statement straight to the host.
+// async_trait marks the boxed future `must_use` on top of the `Result`'s
+// own, which clippy 1.99 reports as a double `must_use`; the attribute is
+// the macro's, not written here.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 trait QueryRunner: Send + Sync {
     /// Run one statement and produce its rows, its command tag, or its error.
@@ -1877,48 +1885,38 @@ impl QueryRunner for DirectQueryRunner {
 /// name, followed by its columns.
 ///
 /// Each column is its own single-entry map of column name to definition, which
-/// is how the Python caller spells a column list and what `register_user_tables`
-/// expects, so the order of the list is the order of the columns.
+/// is how the Python caller spells a column list and what
+/// `DeclaredCatalogSource` consumes, so the order of the list is the order of
+/// the columns.
 type RegisteredTable = (String, String, String, Vec<BTreeMap<String, ColumnDef>>);
 
-/// How a server was told which databases it has and what each one contains.
+/// The one catalog source a catalog-emulating server serves its databases
+/// from, however the host described them.
 ///
-/// The two ways are mutually exclusive: installing a lazy source makes it
-/// authoritative for user objects and the eager `register_*` calls are ignored.
-enum CatalogRegistrations {
-    /// A Python object reporting databases, schemas, relations and columns. It
-    /// is consulted afresh on every catalog scan, so a database created after
-    /// the server started is connectable without a restart.
-    LazySource(Py<PyAny>),
-    /// What `register_database` / `register_schema` / `register_table` recorded
-    /// before `start()` was called. Fixed for the life of the server.
-    Declared {
-        databases: Vec<String>,
-        schemas: Vec<(String, String)>,
-        tables: Vec<RegisteredTable>,
-    },
+/// A host either installs a live source (`set_lazy_catalog`), consulted afresh
+/// on every catalog scan so a database created after startup is connectable
+/// without a restart, or declares its objects up front (`register_database` /
+/// `register_schema` / `register_table`), which are wrapped in a
+/// [`DeclaredCatalogSource`]. Both are the SAME mechanism from here on: one
+/// trait, one merge path, one set of semantics. The declared wrapper is what
+/// retired the second, INSERT-based registration path.
+struct CatalogSource {
+    /// The source every context is built over, shared by all databases.
+    source: Arc<dyn LazyCatalogSource>,
 }
 
-impl CatalogRegistrations {
+impl CatalogSource {
     /// The databases a client may connect to.
     ///
-    /// Asked afresh every time rather than cached, because a lazy source can
+    /// Asked afresh every time rather than cached, because a live source can
     /// gain a database while the server runs and refusing to connect to it
     /// until a restart is the thing lazy building exists to avoid.
     fn connectable_databases(&self) -> DFResult<Vec<String>> {
-        match self {
-            CatalogRegistrations::LazySource(obj) => {
-                let source = PyLazyCatalogSource {
-                    obj: Python::attach(|py| obj.clone_ref(py)),
-                };
-                let mut names = Vec::new();
-                source.databases(&mut |defs| {
-                    names.extend(defs.into_iter().map(|def| def.datname));
-                })?;
-                Ok(names)
-            }
-            CatalogRegistrations::Declared { databases, .. } => Ok(databases.clone()),
-        }
+        let mut names = Vec::new();
+        self.source.databases(&mut |defs| {
+            names.extend(defs.into_iter().map(|def| def.datname));
+        })?;
+        Ok(names)
     }
 
     /// Build one database's catalog context, in full, from scratch.
@@ -1930,58 +1928,21 @@ impl CatalogRegistrations {
     /// is why `default_catalog` is the database name - `current_database()`
     /// reports the session's default catalog, so a context whose two names
     /// disagree serves one database's rows while naming another.
+    ///
+    /// The default schema is "public", matching `PostgreSQL`'s own default: the
+    /// router substitutes it for "$user" when probing whether a name is a user
+    /// table, and reports an unresolvable name under it.
     async fn build_context(&self, database: &str) -> DFResult<SessionContext> {
-        match self {
-            CatalogRegistrations::LazySource(obj) => {
-                let source: Arc<dyn LazyCatalogSource> = Arc::new(PyLazyCatalogSource {
-                    obj: Python::attach(|py| obj.clone_ref(py)),
-                });
-                let (ctx, _log) = get_base_session_context_with_lazy_catalog(
-                    None,
-                    database.to_string(),
-                    "public".to_string(),
-                    source,
-                    LazyCatalogOptions::all(),
-                    database.to_string(),
-                )
-                .await?;
-                Ok(ctx)
-            }
-            CatalogRegistrations::Declared {
-                databases,
-                schemas,
-                tables,
-            } => {
-                // "public", matching the lazy path and PostgreSQL's own default.
-                // The default schema is what the router substitutes for "$user"
-                // when probing whether a name is a user table, and what an
-                // unresolvable name is reported under, so the two paths naming it
-                // differently made those answers depend on how the host had
-                // registered its catalog.
-                let (ctx, _log) =
-                    get_base_session_context(None, database.to_string(), "public".to_string())
-                        .await?;
-
-                // pg_database lists every database on the server, seen from any
-                // of them, which is how PostgreSQL answers "\l".
-                for db in databases {
-                    register_user_database(&ctx, db).await?;
-                }
-
-                // Schemas and relations, by contrast, belong to one database and
-                // only that database's context registers them.
-                for (db, schema) in schemas.iter().filter(|(db, _)| db == database) {
-                    register_schema(&ctx, db, schema).await?;
-                }
-                for (db, schema, table, cols) in tables.iter().filter(|(db, ..)| db == database) {
-                    // register_user_tables identifies the schema by OID; register_schema
-                    // is idempotent and returns the OID of the existing-or-created schema.
-                    let schema_oid = register_schema(&ctx, db, schema).await?;
-                    register_user_tables(&ctx, db, schema_oid, table, cols.clone()).await?;
-                }
-                Ok(ctx)
-            }
-        }
+        let (ctx, _log) = get_base_session_context_with_lazy_catalog(
+            None,
+            database.to_string(),
+            "public".to_string(),
+            self.source.clone(),
+            LazyCatalogOptions::all(),
+            database.to_string(),
+        )
+        .await?;
+        Ok(ctx)
     }
 }
 
@@ -1993,17 +1954,17 @@ impl CatalogRegistrations {
 /// context is never evicted: a database the host stops reporting keeps its
 /// context until restart.
 struct CatalogContexts {
-    registrations: CatalogRegistrations,
+    catalog_source: CatalogSource,
     /// One cell per database. The `Mutex` guards which databases have a cell;
     /// the cell itself guards the build.
     contexts: Mutex<HashMap<String, Arc<OnceCell<Arc<SessionContext>>>>>,
 }
 
 impl CatalogContexts {
-    /// Wrap `registrations` with an empty context cache.
-    fn new(registrations: CatalogRegistrations) -> Self {
+    /// Wrap `catalog_source` with an empty context cache.
+    fn new(catalog_source: CatalogSource) -> Self {
         Self {
-            registrations,
+            catalog_source,
             contexts: Mutex::new(HashMap::new()),
         }
     }
@@ -2025,7 +1986,7 @@ impl CatalogContexts {
 
         cell.get_or_try_init(|| async {
             let started = std::time::Instant::now();
-            let ctx = self.registrations.build_context(database).await?;
+            let ctx = self.catalog_source.build_context(database).await?;
             info!(
                 "built catalog context for database {} in {:?}",
                 database,
@@ -2119,7 +2080,7 @@ impl RiffqProcessor {
         }
 
         let connectable = catalog
-            .registrations
+            .catalog_source
             .connectable_databases()
             .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
         if !connectable.contains(&database) {
@@ -2185,6 +2146,12 @@ impl RiffqProcessor {
             return Self::single_text_response(name, TRANSACTION_ISOLATION_LEVEL, format);
         }
 
+        // `SHOW ALL` lists every tracked variable rather than one value, so
+        // it has its own multi-row response.
+        if name == "all" {
+            return self.show_all_variables_response(format);
+        }
+
         // No context means no ClientOpts to read: either the server does not
         // emulate the catalog, or this variable was asked for before the startup
         // message named a database. Answering None lets the host handle it.
@@ -2196,11 +2163,114 @@ impl RiffqProcessor {
             "application_name" => opts.application_name.as_str(),
             "datestyle" => opts.datestyle.as_str(),
             "search_path" => opts.search_path.as_str(),
+            "timezone" => opts.timezone.as_str(),
+            // `session_user` and its GUC spelling `session_authorization`
+            // report the authenticated role, so `SHOW session_user` agrees
+            // with `SELECT session_user` instead of reaching the host.
+            "session_user" | "session_authorization" => opts.session_user.as_str(),
             "server_version" => self.server_version.as_str(),
             _ => return None,
         };
 
         Self::single_text_response(name, value, format)
+    }
+
+    /// Build the `SHOW ALL` result: one `name` / `setting` / `description`
+    /// row per session variable riffq tracks, plus `server_version` and the
+    /// fixed isolation level.
+    ///
+    /// Returns None when the connection has no catalog context to read, so
+    /// the caller lets the host answer the statement.
+    fn show_all_variables_response(&self, format: FieldFormat) -> Option<Response> {
+        use datafusion::common::config::ExtensionOptions;
+
+        let ctx = self.get_ctx()?;
+        let state = ctx.state();
+        let opts = state.config_options().extensions.get::<ClientOpts>()?;
+
+        let fields = Arc::new(vec![
+            FieldInfo::new("name".to_string(), None, None, Type::TEXT, format),
+            FieldInfo::new("setting".to_string(), None, None, Type::TEXT, format),
+            FieldInfo::new("description".to_string(), None, None, Type::TEXT, format),
+        ]);
+
+        let mut entries: Vec<(String, String, String)> = opts
+            .entries()
+            .into_iter()
+            .map(|entry| {
+                (
+                    entry.key,
+                    entry.value.unwrap_or_default(),
+                    entry.description.to_string(),
+                )
+            })
+            .collect();
+        entries.push((
+            "server_version".to_string(),
+            self.server_version.clone(),
+            String::new(),
+        ));
+        entries.push((
+            TRANSACTION_ISOLATION_VARIABLE.to_string(),
+            TRANSACTION_ISOLATION_LEVEL.to_string(),
+            String::new(),
+        ));
+
+        let mut rows = Vec::with_capacity(entries.len());
+        for (name, setting, description) in &entries {
+            let mut encoder = DataRowEncoder::new(fields.clone());
+            encoder.encode_field(&Some(name.as_str())).ok()?;
+            encoder.encode_field(&Some(setting.as_str())).ok()?;
+            encoder.encode_field(&Some(description.as_str())).ok()?;
+            rows.push(Ok(encoder.take_row()));
+        }
+        Some(Response::Query(QueryResponse::new(
+            fields,
+            stream::iter(rows),
+        )))
+    }
+
+    /// Answer a `SET` on a session variable the catalog stores, or None to
+    /// let the host see the statement.
+    ///
+    /// This is what puts the `SET` command tag on the wire for the variables
+    /// riffq is the authority on: forwarded to a host, a `SET search_path`
+    /// either got whatever tag the host chose to supply or none at all, and
+    /// the catalog's own session state never changed - `SHOW search_path`
+    /// kept answering the old value (task 27). A `SET` on any other variable
+    /// still reaches the host, which may be its real owner (a `DuckDB` host
+    /// owns `memory_limit`), and a server without catalog emulation has no
+    /// session state of its own, so every `SET` is the host's there.
+    ///
+    /// A `SET LOCAL` on an owned variable is acknowledged without applying:
+    /// LOCAL scopes the value to the enclosing transaction, which riffq does
+    /// not model, and `PostgreSQL` outside a transaction warns and changes
+    /// nothing - so the tag without the effect is the faithful answer.
+    ///
+    /// `param_values` and `param_types` are the extended-protocol bindings
+    /// of the statement, forwarded untouched: a driver that prepares its
+    /// `SET` sends the value as `$1`, and the catalog can only apply the
+    /// statement with the bound value in hand. The simple protocol passes
+    /// `None` for both.
+    async fn session_set_response(
+        &self,
+        sql: &str,
+        param_values: Option<Vec<Option<Bytes>>>,
+        param_types: Option<Vec<Type>>,
+    ) -> Option<PgWireResult<Response>> {
+        let ctx = self.get_ctx()?;
+        match classify_set_statement(sql) {
+            SetStatementDisposition::ApplyToSession => Some(
+                match execute_sql(&ctx, sql, param_values, param_types).await {
+                    Ok(_) => Ok(Response::Execution(Tag::new("SET"))),
+                    Err(e) => Err(PgWireError::ApiError(Box::new(e))),
+                },
+            ),
+            SetStatementDisposition::AcknowledgeWithoutApplying => {
+                Some(Ok(Response::Execution(Tag::new("SET"))))
+            }
+            SetStatementDisposition::NotASessionSet => None,
+        }
     }
 
     /// The variable name of a statement that is exactly one `SHOW <name>`, or
@@ -2523,6 +2593,10 @@ impl RiffqProcessor {
             return Ok(resp);
         }
 
+        if let Some(response) = self.session_set_response(statement, None, None).await {
+            return response;
+        }
+
         let result = self
             .query_runner
             .execute(statement.to_string(), None, None, false, connection_id)
@@ -2738,6 +2812,17 @@ impl ExtendedQueryHandler for RiffqProcessor {
             )
         {
             return Ok(resp);
+        }
+
+        if let Some(response) = self
+            .session_set_response(
+                query,
+                Some(portal.parameters.clone()),
+                Some(resolve_param_types(&portal.statement.parameter_types)),
+            )
+            .await
+        {
+            return response;
         }
 
         let _ = max_rows; // currently unused until partial fetch is supported
@@ -3442,11 +3527,19 @@ impl Server {
     /// `databases(callback)`, `schemas(database, callback)`,
     /// `relations(database, schema, callback)`, and
     /// `columns(database, schema, relation, callback)` methods each call their
-    /// `callback` with a list of row dicts. When set, the base catalog context is
-    /// built with the lazy providers (so `pg_catalog`/`information_schema` reflect
-    /// the source live on every scan) and the eager `register_database`/
-    /// `register_schema`/`register_table` registrations are skipped. Requires
-    /// `start(catalog_emulation=True)` for the catalog queries to be routed here.
+    /// `callback` with a list of row dicts. The source is consulted afresh on
+    /// every catalog scan, so `pg_catalog`/`information_schema` reflect it
+    /// live.
+    ///
+    /// Composable with the `register_*` declarations: with both configured the
+    /// catalog serves their UNION - declared base databases plus whatever the
+    /// source reports, a database both contribute to merging its contents. A
+    /// database or relation NAME both report is refused at scan time with an
+    /// error naming it, so a runtime mount can never silently shadow a base
+    /// the host pinned explicitly; a shared schema name merges to the declared
+    /// side, which is how live tables mount into a declared database's public.
+    /// Requires `start(catalog_emulation=True)` for the catalog queries to be
+    /// routed here.
     fn set_lazy_catalog(&mut self, _py: Python, source: Py<PyAny>) {
         *self.lazy_catalog_source.lock().unwrap() = Some(source);
     }
@@ -3454,26 +3547,51 @@ impl Server {
     /// Declare a database clients may connect to.
     ///
     /// Every registered database appears in `pg_database` from any connection,
-    /// which is what makes `\l` list them all. Ignored when a lazy catalog
-    /// source is installed, since the source is then authoritative.
-    fn register_database(&mut self, database_name: String) {
+    /// which is what makes `\l` list them all. Composable with
+    /// `set_lazy_catalog`: with both configured the declarations and the
+    /// source are merged, and a name both report is refused at scan time.
+    ///
+    /// Raises `ValueError` for a name already registered, as `PostgreSQL`
+    /// refuses CREATE DATABASE for an existing name.
+    fn register_database(&mut self, database_name: String) -> PyResult<()> {
+        if self.databases.contains(&database_name) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "database \"{database_name}\" already exists"
+            )));
+        }
         self.databases.push(database_name);
+        Ok(())
     }
 
     /// Declare a schema inside an already registered database.
     ///
     /// Unlike databases, a schema is only visible from its own database's
     /// connections.
-    fn register_schema(&mut self, database_name: String, schema_name: String) {
+    ///
+    /// Raises `ValueError` for a schema already registered under that
+    /// database, as `PostgreSQL` refuses CREATE SCHEMA for an existing name.
+    fn register_schema(&mut self, database_name: String, schema_name: String) -> PyResult<()> {
+        if self
+            .schemas
+            .iter()
+            .any(|(db, schema)| *db == database_name && *schema == schema_name)
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "schema \"{schema_name}\" already exists in database \"{database_name}\""
+            )));
+        }
         self.schemas.push((database_name, schema_name));
+        Ok(())
     }
 
     /// Declare a table and its columns inside a database and schema.
     ///
     /// `columns` is a list of single-key dicts, `[{"id": {"type": "int4",
     /// "nullable": False}}, ...]`, in column order. Raises `ValueError` for a
-    /// column dict with more than one key or missing `type`/`nullable`. The
-    /// schema is created if `register_schema` did not already declare it.
+    /// column dict with more than one key, missing `type`/`nullable`, or a
+    /// table already registered under that schema - as `PostgreSQL` refuses
+    /// CREATE TABLE for an existing name. The schema is created if
+    /// `register_schema` did not already declare it.
     fn register_table(
         &mut self,
         _py: Python,
@@ -3482,6 +3600,14 @@ impl Server {
         table_name: String,
         columns: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        if self.tables.iter().any(|(db, schema, table, _)| {
+            *db == database_name && *schema == schema_name && *table == table_name
+        }) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "relation \"{table_name}\" already exists in schema \
+                 \"{database_name}\".\"{schema_name}\""
+            )));
+        }
         let list: &Bound<'_, PyList> = columns.cast()?;
         let mut cols: Vec<BTreeMap<String, ColumnDef>> = Vec::new();
         for item in list.iter() {
@@ -3532,13 +3658,14 @@ impl Server {
     /// user queries; otherwise every statement goes to the host.
     /// `server_version` overrides what clients are told during startup and by
     /// `SHOW server_version`.
-    #[pyo3(signature = (tls=false, catalog_emulation=false, server_version=None))]
+    #[pyo3(signature = (tls=false, catalog_emulation=false, server_version=None, oid_registry_path=None))]
     fn start(
         &self,
         py: Python,
         tls: bool,
         catalog_emulation: bool,
         server_version: Option<String>,
+        oid_registry_path: Option<String>,
     ) -> PyResult<()> {
         // A catalog-emulating server serves one context per registered database
         // and refuses any other, so with nothing registered it would bind a port
@@ -3556,9 +3683,29 @@ impl Server {
             ));
         }
 
+        // Declared objects get their oids from the registry. With no path the
+        // in-memory registry stands in - stable within this run only - and
+        // that fallback is deprecated, so the host is told rather than finding
+        // out when a client's cached oids stop resolving after a restart.
+        let declared_anything =
+            !self.databases.is_empty() || !self.schemas.is_empty() || !self.tables.is_empty();
+        if catalog_emulation && declared_anything && oid_registry_path.is_none() {
+            let message = "no oid_registry_path given: declared objects use the in-memory \
+                 oid registry, so their oids are not stable across server restarts. This \
+                 default is deprecated and will become an error; pass \
+                 start(oid_registry_path=...) to persist them.";
+            log::warn!("{message}");
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
+                &std::ffi::CString::new(message).expect("static message has no NUL"),
+                1,
+            )?;
+        }
+
         // surface a failed bind (e.g. the port is taken) as a python OSError
         // instead of panicking the worker process.
-        py.detach(|| self.run_server(tls, catalog_emulation, server_version))
+        py.detach(|| self.run_server(tls, catalog_emulation, server_version, oid_registry_path))
             .map_err(|err| pyo3::exceptions::PyOSError::new_err(err.to_string()))
     }
 
@@ -3579,6 +3726,7 @@ impl Server {
         tls: bool,
         catalog_emulation: bool,
         server_version: Option<String>,
+        oid_registry_path: Option<String>,
     ) -> std::io::Result<()> {
         let addr = self.addr.clone();
         let query_cb = self.on_query_cb.clone();
@@ -3605,7 +3753,9 @@ impl Server {
                 disconnect_cb,
                 auth_cb,
             ));
-            let catalog = self.catalog_to_serve(catalog_emulation);
+            let catalog = self
+                .catalog_to_serve(catalog_emulation, oid_registry_path.as_deref())
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
 
             let listener = bind_listener(&addr)?;
             info!("Listening on {addr}");
@@ -3640,20 +3790,30 @@ impl Server {
     /// The catalog this server will serve, or None when it is not emulating one
     /// and the host answers catalog queries itself.
     ///
-    /// A lazy source wins over the eager `register_*` declarations rather than
-    /// being merged with them: a source is authoritative for user objects, and
-    /// mixing the two would let a stale registration contradict what the source
-    /// reports now.
+    /// A live source and the `register_*` declarations are MERGED, not ranked:
+    /// with both configured the catalog serves their union, a database or
+    /// relation name both report refused at scan time and a shared schema name
+    /// merging (how live tables mount into a declared database's public).
     ///
-    /// Nothing is built here. Each database's context is built the first time a
-    /// client connects to it, so the server binds immediately and a database
-    /// that appears later needs no restart.
+    /// Built here: the declared source itself - the oid registry is opened and
+    /// every declared oid resolved, so a bad registry path or a duplicate
+    /// declaration fails `start()`, not the first connection. The per-database
+    /// CONTEXTS stay lazy: each is built the first time a client connects to
+    /// that database, so the server binds immediately and a database the live
+    /// source gains later needs no restart.
     ///
     /// # Panics
     ///
     /// Panics if the lazy-source lock is poisoned, which means a previous caller
     /// panicked while holding it.
-    fn catalog_to_serve(&self, catalog_emulation: bool) -> Option<Arc<CatalogContexts>> {
+    fn catalog_to_serve(
+        &self,
+        catalog_emulation: bool,
+        oid_registry_path: Option<&str>,
+    ) -> DFResult<Option<Arc<CatalogContexts>>> {
+        if !catalog_emulation {
+            return Ok(None);
+        }
         let lazy_source = self
             .lazy_catalog_source
             .lock()
@@ -3661,17 +3821,42 @@ impl Server {
             .as_ref()
             .map(|o| Python::attach(|py| o.clone_ref(py)));
 
-        catalog_emulation.then(|| {
-            let registrations = match lazy_source {
-                Some(obj) => CatalogRegistrations::LazySource(obj),
-                None => CatalogRegistrations::Declared {
-                    databases: self.databases.clone(),
-                    schemas: self.schemas.clone(),
-                    tables: self.tables.clone(),
-                },
+        // All origins produce the SAME kind of source. Up-front register_*
+        // declarations are wrapped in a DeclaredCatalogSource, their oids
+        // resolved through the registry so they survive restarts and
+        // declaration reordering; a live Python object is wrapped as-is.
+        //
+        // A host may use BOTH: declared base databases plus a live source for
+        // what appears at runtime. The two are then merged; a database or
+        // relation name both report is refused at scan time, while a shared
+        // schema name merges - that is how live tables mount into a declared
+        // database's public.
+        let declared_anything =
+            !self.databases.is_empty() || !self.schemas.is_empty() || !self.tables.is_empty();
+        let declared = || -> DFResult<Arc<DeclaredCatalogSource>> {
+            let registry: Box<dyn CatalogOidRegistry> = match oid_registry_path {
+                Some(path) => Box::new(RedbCatalogOidRegistry::open(std::path::Path::new(path))?),
+                // Deprecated fallback; start() has already warned the host.
+                None => Box::new(InMemoryCatalogOidRegistry::new()),
             };
-            Arc::new(CatalogContexts::new(registrations))
-        })
+            Ok(Arc::new(DeclaredCatalogSource::from_declarations(
+                &self.databases,
+                &self.schemas,
+                &self.tables,
+                registry.as_ref(),
+            )?))
+        };
+        let source: Arc<dyn LazyCatalogSource> = match lazy_source {
+            Some(obj) if declared_anything => Arc::new(CombinedCatalogSource::new(vec![
+                declared()?,
+                Arc::new(PyLazyCatalogSource { obj }),
+            ])),
+            Some(obj) => Arc::new(PyLazyCatalogSource { obj }),
+            None => declared()?,
+        };
+        Ok(Some(Arc::new(CatalogContexts::new(CatalogSource {
+            source,
+        }))))
     }
 }
 

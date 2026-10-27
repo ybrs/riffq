@@ -342,20 +342,75 @@ class PsqlBackslashTest(FixtureServerCase):
         """
         self.run_command(r"\dD")
 
-    @expected_failure_under_psql("18.4")
-    def test_list_extensions_runs(self):
-        """\\dx lists extensions -- on psql 17.
+    def test_list_extensions_reports_plpgsql(self):
+        """\\dx lists the snapshot's installed extension, on both releases.
 
-        It joins pg_description on
-        ``'pg_catalog.pg_extension'::pg_catalog.regclass``, a schema-qualified
-        regclass literal that used to be flattened to text before anything
-        could resolve it to an oid.
-
-        psql 18 rewrote the query to join ``pg_available_extensions()`` as a
-        FUNCTION where 17.4 selects from the relation of that name, and only
-        the relation exists here (task 269), so it still fails there.
+        Two generations of fixes meet here. 17.4's query joins pg_description
+        on ``'pg_catalog.pg_extension'::pg_catalog.regclass``, a
+        schema-qualified regclass literal that used to be flattened to text
+        (task 249). 18.4 additionally joins ``pg_available_extensions()`` as a
+        FUNCTION - which is how PostgreSQL itself defines the view - where
+        17.4 selects from the relation of that name; the function form now
+        exists (task 269), so the last version-scoped expected failure in this
+        file is gone.
         """
-        self.run_command(r"\dx")
+        rows = self.run_command(r"\dx")
+        self.assertIn("plpgsql", [row[0] for row in rows])
+
+    def test_list_extension_contents_names_each_member_object(self):
+        """\\dx+ describes every object the extension owns, per release.
+
+        The output is pg_describe_object over the extension's pg_depend rows
+        (task 261), and the four strings are byte-for-byte what a real
+        PostgreSQL 17.4 prints for plpgsql - measured, not assumed. Asserted
+        as exact rows so a rendering drift (a lost argument list, a wrong
+        relkind label) fails loudly rather than passing as "some rows came
+        back".
+        """
+        rows = self.run_command(r"\dx+ plpgsql")
+        self.assertEqual(
+            [row[0] for row in rows],
+            [
+                "function plpgsql_call_handler()",
+                "function plpgsql_inline_handler(internal)",
+                "function plpgsql_validator(oid)",
+                "language plpgsql",
+            ],
+        )
+
+    def test_show_function_definition_prints_the_real_source(self):
+        """\\sf prints the function's CREATE OR REPLACE statement (task 262).
+
+        psql resolves the name through a regproc cast and then calls
+        pg_get_functiondef(oid), which did not exist - so \\sf failed outright.
+        The definition asserted here is the REAL one: the snapshot's pg_proc
+        row carries prosrc and every flag captured from a live server, and
+        these five lines are byte-for-byte what a real PostgreSQL 17.4 prints
+        for \\sf now. Exact lines, not "some output": a drifted flag order or
+        a lost argument list must fail loudly.
+        """
+        rows = self.run_command(r"\sf now")
+        lines = [row[0] for row in rows] if rows and len(rows[0]) == 1 else rows
+        self.assertEqual(
+            "\n".join(line if isinstance(line, str) else line[0] for line in lines),
+            "CREATE OR REPLACE FUNCTION pg_catalog.now()\n"
+            " RETURNS timestamp with time zone\n"
+            " LANGUAGE internal\n"
+            " STABLE PARALLEL SAFE STRICT\n"
+            "AS $function$now$function$",
+        )
+
+    def test_list_collations_runs(self):
+        """\\dO filters on pg_char_to_encoding(getdatabaseencoding()).
+
+        The name-to-id direction of the encoding table did not exist (task
+        260), so the whole command failed before any collation could be
+        considered. Zero data rows is the CORRECT answer - the bundled
+        PostgreSQL 17.4 also lists none for a plain \\dO, since the snapshot's
+        collations all live in pg_catalog - so the assertion is that the
+        command completes.
+        """
+        self.run_command(r"\dO")
 
     def test_list_functions_filtered_by_return_type_runs(self):
         """\\dfn and \\dft filter on a regtype literal.
@@ -368,17 +423,31 @@ class PsqlBackslashTest(FixtureServerCase):
         self.run_command(r"\dfn")
         self.run_command(r"\dft")
 
-    @unittest.expectedFailure
-    def test_list_privileges(self):
-        """\\dp fails: "Correlated scalar subquery must be aggregated".
+    def test_list_privileges_names_the_fixture_tables(self):
+        """\\dp lists every relation, privileges and policies columns included.
 
-        Its column-privileges and policies columns are both
-        ``array_to_string(ARRAY(SELECT ... WHERE attrelid = c.oid), ...)``, a
-        correlated subquery returning many rows. The ARRAY rewrite leaves it as
-        a scalar subquery, which the analyzer then rejects for returning more
-        than one row.
+        The command that needed the whole correlated-ARRAY chain. Both its
+        column-privileges and policies columns are
+        ``array_to_string(ARRAY(SELECT ... WHERE attrelid = c.oid), ...)`` --
+        a correlated sub-query returning many rows, which the ARRAY rewrite
+        used to leave as a scalar sub-query for the analyzer to reject (task
+        248). The policies column then nests a second ARRAY inside the first
+        and correlates it on ``oid = ANY (polroles)``, where ``polroles``
+        belongs to the enclosing ``pg_policy`` and psql writes it WITHOUT a
+        table qualifier -- invisible to the lifter until it could resolve which
+        relation declares which column (task 257).
         """
-        self.run_command(r"\dp")
+        rows = self.run_command(r"\dp")
+        listed = {row[RELATION_NAME] for row in rows}
+        for table in fixture_dataset.TABLE_NAMES:
+            self.assertIn(table, listed)
+        for row in rows:
+            if row[RELATION_NAME] in fixture_dataset.TABLE_NAMES:
+                self.assertEqual(
+                    row[RELATION_SCHEMA],
+                    fixture_dataset.SCHEMA_NAME,
+                    row[RELATION_NAME],
+                )
 
 
 if __name__ == "__main__":

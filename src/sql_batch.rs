@@ -234,10 +234,10 @@ mod tests {
     /// Input that carries no statement text at all produces no statements.
     #[test]
     fn blank_and_semicolon_only_input_yields_nothing() {
-        assert!(split_statements("").is_empty());
-        assert!(split_statements("   ").is_empty());
-        assert!(split_statements(";;;").is_empty());
-        assert!(split_statements("; ; ").is_empty());
+        assert_eq!(split_statements(""), Vec::<&str>::new());
+        assert_eq!(split_statements("   "), Vec::<&str>::new());
+        assert_eq!(split_statements(";;;"), Vec::<&str>::new());
+        assert_eq!(split_statements("; ; "), Vec::<&str>::new());
     }
 
     /// Whitespace and newlines around a statement are stripped from the slice.

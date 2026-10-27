@@ -1,8 +1,9 @@
 import atexit
+import threading
+
 import duckdb
 import pyarrow as pa
 import riffq
-from riffq.helpers import stable_oid
 import logging
 from pathlib import Path
 from typing import Iterable, Optional
@@ -63,11 +64,74 @@ def duckdb_type_to_oid(data_type: str) -> int:
     return 25  # text / varchar / everything else
 
 
-# One OID derivation, riffq's shipped one, rather than a second implementation
-# here: a catalog source has to hand the same object the same OID on every scan
-# and every restart, and two hash functions maintained separately drift apart
-# without anything failing loudly.
-_stable_oid = stable_oid
+# PostgreSQL reserves OIDs below this for its own built-in objects; everything
+# teleduck derives stays at or above it.
+_FIRST_USER_OID = 16384
+
+
+class _CatalogOidAssigner:
+    """Derives this source's OIDs from names, with uniqueness enforced.
+
+    DuckDB's own catalog ids are NOT stable across restarts of the same file
+    (measured: a table's ``table_oid`` changes on every reopen, and a number
+    can even move to a DIFFERENT table), so they cannot be passed through. A
+    lazy source must hand the same object the same OID on every scan and every
+    restart, with no storage of its own -- so the OID is derived from the
+    object's name, deterministically. That derivation is teleduck's own
+    business: riffq and pg_catalog ship no hashing, and OIDs a source supplies
+    pass through them verbatim.
+
+    Uniqueness is enforced, not assumed. A hash into a 31-bit space can
+    collide, and a collision between two relations is SILENT downstream (both
+    pg_class rows insert; pg_attribute joins one table's columns onto the
+    other). Every assignment is therefore recorded, and a fresh derivation
+    that lands on a taken number probes upward to the next free one. The probe
+    outcome depends on assignment order, so it is deterministic per process
+    and best-effort across restarts -- the trade a stateless source can offer,
+    priced at roughly one collision per two billion object pairs.
+
+    Thread-safe by a lock around every resolution, and not incidentally: riffq
+    builds per-database contexts concurrently and every context's scans
+    resolve the same "db" keys through ONE shared source, so an unlocked
+    check-then-act let two threads assign X and X+1 to one object -- measured,
+    not hypothesized, before the lock was added.
+    """
+
+    def __init__(self):
+        """Start with nothing assigned."""
+        self._assigned_by_key = {}
+        self._taken_oids = set()
+        self._assignment_lock = threading.Lock()
+
+    def resolve(self, salt, *parts):
+        """The OID for the object `parts` names, same answer on every call.
+
+        `salt` separates object classes ("db", "ns", "rel", "type") so a
+        database and a table sharing a name do not share a number.
+        """
+        key = (salt, *parts)
+        with self._assignment_lock:
+            if key in self._assigned_by_key:
+                return self._assigned_by_key[key]
+            oid = self._derive(key)
+            while oid in self._taken_oids:
+                oid += 1
+            self._assigned_by_key[key] = oid
+            self._taken_oids.add(oid)
+            return oid
+
+    @staticmethod
+    def _derive(key):
+        """Hash `key` into [_FIRST_USER_OID, _FIRST_USER_OID + 2e9).
+
+        Each component is length-prefixed so no name can imitate the boundary
+        between components: with a plain separator, ("s1", "t1") and the
+        single part "s1/t1" could hash identically.
+        """
+        digest = hashlib.sha256()
+        for component in key:
+            digest.update(f"{len(component)}:{component}".encode())
+        return _FIRST_USER_OID + int.from_bytes(digest.digest()[:8], "big") % 2_000_000_000
 
 
 class DuckdbCatalogSource:
@@ -85,6 +149,7 @@ class DuckdbCatalogSource:
 
     def __init__(self, con):
         self._con = con
+        self._oids = _CatalogOidAssigner()
 
     def databases(self, callback):
         rows = self._con.cursor().execute(
@@ -92,7 +157,7 @@ class DuckdbCatalogSource:
         ).fetchall()
         callback(
             [
-                {"oid": _stable_oid("db", name), "name": name}
+                {"oid": self._oids.resolve("db", name), "name": name}
                 for (name,) in rows
                 if name not in ("system", "temp")
             ]
@@ -107,7 +172,7 @@ class DuckdbCatalogSource:
         ).fetchall()
         callback(
             [
-                {"oid": _stable_oid("ns", database, schema), "name": schema}
+                {"oid": self._oids.resolve("ns", database, schema), "name": schema}
                 for (schema,) in rows
             ]
         )
@@ -136,8 +201,8 @@ class DuckdbCatalogSource:
             kind = "view" if (table_type or "").upper().startswith("VIEW") else "table"
             out.append(
                 {
-                    "oid": _stable_oid("rel", database, schema, table_name),
-                    "reltype_oid": _stable_oid("type", database, schema, table_name),
+                    "oid": self._oids.resolve("rel", database, schema, table_name),
+                    "reltype_oid": self._oids.resolve("type", database, schema, table_name),
                     "name": table_name,
                     "kind": kind,
                     "has_index": table_name in indexed,

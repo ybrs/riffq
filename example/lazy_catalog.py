@@ -19,11 +19,12 @@ then connect with psql and watch the catalog stay in sync as you create tables::
     appdb=> \\d orders
 """
 
+import itertools
 import logging
+import threading
 
 import pyarrow as pa
 import riffq
-from riffq.helpers import stable_oid
 
 logging.basicConfig(level=logging.INFO)
 
@@ -42,6 +43,29 @@ CATALOG = {
 # pg_type OIDs the example understands, keyed by a coarse type name.
 TYPE_OIDS = {"int": 23, "bigint": 20, "text": 25, "bool": 16, "float": 701}
 
+# The example's own identifier registry: the first sight of an object assigns
+# the next number and RECORDS it, so every later scan answers the same -- the
+# same get-or-allocate rule riffq's persistent oid registry applies to declared
+# objects. A source must own its identifiers (riffq passes them through
+# verbatim and ships no derivation), and owning state makes a counter the right
+# tool: 16384 is where PostgreSQL's reserved built-in range ends. The lock
+# matters even here -- scans from concurrent connections race, and an unlocked
+# check-then-act can hand one object two numbers.
+OID_REGISTRY = {}
+_oid_counter = itertools.count(16384)
+_oid_lock = threading.Lock()
+
+
+def oid_for(kind, *names):
+    """The recorded oid for the object `names` describes, allocating on first
+    sight. `kind` ("db", "ns", "rel", "type") keeps a database and a table
+    that share a name apart."""
+    key = (kind, *names)
+    with _oid_lock:
+        if key not in OID_REGISTRY:
+            OID_REGISTRY[key] = next(_oid_counter)
+        return OID_REGISTRY[key]
+
 
 class DictCatalogSource:
     """A lazy catalog source over the in-memory ``CATALOG`` dict.
@@ -52,13 +76,13 @@ class DictCatalogSource:
 
     def databases(self, callback):
         callback(
-            [{"oid": stable_oid("db", name), "name": name} for name in CATALOG]
+            [{"oid": oid_for("db", name), "name": name} for name in CATALOG]
         )
 
     def schemas(self, database, callback):
         callback(
             [
-                {"oid": stable_oid("ns", database, schema), "name": schema}
+                {"oid": oid_for("ns", database, schema), "name": schema}
                 for schema in CATALOG.get(database, {})
             ]
         )
@@ -68,8 +92,8 @@ class DictCatalogSource:
         callback(
             [
                 {
-                    "oid": stable_oid("rel", database, schema, name),
-                    "reltype_oid": stable_oid("type", database, schema, name),
+                    "oid": oid_for("rel", database, schema, name),
+                    "reltype_oid": oid_for("type", database, schema, name),
                     "name": name,
                     "kind": "table",
                 }
@@ -91,11 +115,11 @@ class DictCatalogSource:
     # rows; a row whose ``name`` matches a built-in one replaces it.
 
     def config(self, callback):
-        """``pg_catalog.pg_config`` build settings — report our own version."""
+        """``pg_catalog.pg_config`` build settings - report our own version."""
         callback([{"name": "VERSION", "setting": "riffq lazy-catalog example"}])
 
     def settings(self, callback):
-        """``pg_catalog.pg_settings`` runtime parameters — override the live
+        """``pg_catalog.pg_settings`` runtime parameters - override the live
         value of session-mutable ones (here, ``search_path``)."""
         callback([{"name": "search_path", "setting": "public"}])
 

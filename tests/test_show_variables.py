@@ -108,6 +108,42 @@ class ShowVariablesTest(unittest.TestCase):
         """SHOW server_version is answered by riffq, not the query handler."""
         self.assertNotEqual(self.show("SHOW server_version"), DELEGATED_SENTINEL)
 
+    def test_session_user_is_answered_by_riffq(self):
+        """SHOW session_user reports the authenticated user.
+
+        The connections here authenticate as ``user``. This used to fall
+        through to the query handler, so it could disagree with
+        ``SELECT session_user`` on the same connection.
+        """
+        self.assertEqual(self.show("SHOW session_user"), "user")
+
+    def test_session_authorization_agrees_with_session_user(self):
+        """SHOW session_authorization is the GUC spelling of the same role."""
+        self.assertEqual(
+            self.show("SHOW session_authorization"),
+            self.show("SHOW session_user"),
+        )
+
+    def test_show_all_lists_the_tracked_variables(self):
+        """SHOW ALL answers with one row per tracked variable.
+
+        psycopg and GUI tools issue SHOW ALL while connecting; it used to
+        reach the query handler because the SHOW parser only accepted a
+        single variable name.
+        """
+        with psycopg.connect(
+            f"postgresql://user@127.0.0.1:{self.port}/db"
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SHOW ALL")
+                rows = cur.fetchall()
+        by_name = {row[0]: row[1] for row in rows}
+        self.assertNotIn(DELEGATED_SENTINEL, by_name.values())
+        self.assertEqual(by_name["session_user"], "user")
+        self.assertIn("search_path", by_name)
+        self.assertIn("server_version", by_name)
+        self.assertIn("timezone", by_name)
+
     def test_unknown_variable_falls_through_to_the_query_handler(self):
         """A SHOW riffq does not answer is still passed to the handler.
 

@@ -2701,18 +2701,23 @@ impl pgwire::api::stmt::QueryParser for MyQueryParser {
     ///
     /// The declared parameter types are ignored here; the real types come from
     /// the portal at Bind time, where the client's actual values are known.
+    /// An empty query answers `None`, which pgwire stores as an empty
+    /// statement executing to `EmptyQueryResponse`, as `PostgreSQL` does.
     async fn parse_sql<C>(
         &self,
         _client: &C,
         sql: &str,
         _types: &[Option<Type>],
-    ) -> PgWireResult<Self::Statement>
+    ) -> PgWireResult<Option<Self::Statement>>
     where
         C: ClientInfo + Unpin + Send + Sync,
     {
-        Ok(MyStatement {
+        if sql.trim().is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(MyStatement {
             query: sql.to_string(),
-        })
+        }))
     }
 
     /// Always empty: riffq answers Describe itself rather than through the

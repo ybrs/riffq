@@ -45,8 +45,9 @@ class Connection(riffq.BaseConnection):
         # simple username/password check
         callback(user == "user" and password == "secret")
 
-    def handle_connect(self, ip, port, callback=callable):
-        # allow every incoming connection
+    def handle_connect(self, ip, port, server_name=None, metadata=None, callback=callable):
+        # allow every incoming connection; metadata holds the handshake
+        # (user, database, application_name, ...) for routing decisions
         callback(True)
 
     def handle_disconnect(self, ip, port, callback=callable):
@@ -128,8 +129,22 @@ pip install riffq --pre
 You can extend the base class for 
 - handle_query
 - handle_auth - To check for username/password
-- handle_connect - To check ip/port restriction
+- handle_connect - To check ip/port restriction; receives the handshake as `metadata`
 - handle_disconnect - WIP
+
+### Connection metadata and session settings
+
+`handle_connect` receives a `metadata` dict with the handshake as the client
+sent it (`user`, `database`, `application_name`, `client_encoding`, ...),
+verbatim. The same snapshot is available later per connection id:
+`server.get_client_metadata(connection_id)` raises `KeyError` for an id that
+never connected, was refused, or already disconnected.
+
+`server.get_client_settings(connection_id)` answers the live session instead:
+the variables `SET` stores per connection (`application_name`, `search_path`,
+`timezone`, ...). A `SET` the client sent shows up here, never in the
+metadata snapshot. A live connection with no session (a server without
+catalog emulation builds none) raises `RuntimeError`.
 
 ```python
 class Connection(riffq.BaseConnection):
@@ -137,8 +152,9 @@ class Connection(riffq.BaseConnection):
         # simple username/password check
         callback(user == "user" and password == "secret")
 
-    def handle_connect(self, ip, port, callback=callable):
-        # allow every incoming connection
+    def handle_connect(self, ip, port, server_name=None, metadata=None, callback=callable):
+        # allow every incoming connection; metadata holds the handshake
+        # (user, database, application_name, ...) for routing decisions
         callback(True)
 
     def handle_disconnect(self, ip, port, callback=callable):

@@ -101,6 +101,7 @@ class BaseConnection(metaclass=ABCMeta):
         ip: str,
         port: int,
         server_name: str = None,
+        metadata: Optional[Dict[str, str]] = None,
         callback: Callable[..., None] = lambda *a, **k: None,
     ) -> None:
         """Handle successful TCP connection establishment.
@@ -108,6 +109,11 @@ class BaseConnection(metaclass=ABCMeta):
         Args:
             ip: Remote peer IP address.
             port: Remote peer port.
+            server_name: TLS SNI name the client asked for, if any.
+            metadata: The handshake as the client sent it (`user`,
+                `database`, `application_name`, `client_encoding`, ...),
+                verbatim. A connect-time snapshot: a later `SET` updates the
+                connection's session, not this dict.
             callback: Invoke with `True` to accept or raise to reject.
         """
         return callback(True)
@@ -178,6 +184,12 @@ class RiffqServer:
 
     def set_lazy_catalog(self, source: Any) -> None:
         """Install a lazy (callback-driven) catalog source for catalog emulation.
+
+        Besides the four required methods (`databases`, `schemas`, `relations`,
+        `columns`), a source may implement two optional ones: `config(callback)`
+        reports `pg_catalog.pg_config` rows and `settings(callback)` reports
+        `pg_catalog.pg_settings` rows; a row whose name matches a built-in one
+        replaces it. Omit them and the built-ins serve their defaults.
 
         Instead of eagerly pre-registering every database/schema/table with
         `register_database`/`register_schema`/`register_table`, supply one
@@ -313,6 +325,7 @@ class RiffqServer:
         ip: str,
         port: int,
         server_name: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
         callback: Callable[..., None] = lambda *a, **k: None,
     ) -> None:
         """Forward a connect notification to the connection instance.
@@ -321,11 +334,14 @@ class RiffqServer:
             connection_id: Server assigned identifier for this client.
             ip: Remote peer IP address.
             port: Remote peer port.
+            server_name: TLS SNI name the client asked for, if any.
+            metadata: The handshake as the client sent it (see
+                `BaseConnection.handle_connect`), forwarded as is.
             callback: Function to acknowledge handling.
         """
         # logger.info(f"new connnection {connection_id} {ip} {port}")
         conn = self.get_connection(connection_id=connection_id)
-        conn.handle_connect(ip, port, callback=callback, server_name=server_name)
+        conn.handle_connect(ip, port, callback=callback, server_name=server_name, metadata=metadata)
 
     def handle_query(
         self,
@@ -377,6 +393,37 @@ class RiffqServer:
         checkpoint state (e.g. close a DuckDB connection) for a clean shutdown.
         """
         self._server.handle_shutdown(callback)
+
+    def get_client_settings(self, connection_id: int) -> Dict[str, str]:
+        """The live session settings for a connection, as the session holds them.
+
+        Answers the variables the catalog stores per connection
+        (`application_name`, `datestyle`, `search_path`, `timezone`,
+        `session_user`): a `SET` the client sent shows up here, unlike in
+        `get_client_metadata`, which is the connect-time snapshot.
+
+        Raises:
+            KeyError: For an id that never connected, was refused, or already
+                disconnected.
+            RuntimeError: For a live connection with no session - a server
+                without catalog emulation builds none.
+        """
+        return self._server.get_client_settings(connection_id)
+
+    def get_client_metadata(self, connection_id: int) -> Optional[Dict[str, str]]:
+        """The handshake metadata for a live connection, as the client sent it.
+
+        Answers the same map the `on_connect` handler receives as `metadata`:
+        `user`, `database`, and every startup parameter (`application_name`,
+        `client_encoding`, ...), verbatim. This is a connect-time snapshot,
+        not live session state - a later `SET` updates the connection's
+        session, not this dict.
+
+        Raises:
+            KeyError: For an id that never connected, was refused, or already
+                disconnected. Query it while the connection is alive.
+        """
+        return self._server.get_client_metadata(connection_id)
 
     def start(self, tls: bool = False, catalog_emulation: bool = False, server_version: Optional[str] = None) -> None:
         """Start the server event loop.

@@ -3,6 +3,7 @@ use datafusion::sql::sqlparser::dialect::PostgreSqlDialect;
 use datafusion_pg_catalog::session::{ClientOpts, execute_sql, set_session_user};
 use futures::{Sink, SinkExt, Stream};
 use log::{debug, error, info};
+use pyo3::exceptions::PyKeyError;
 use pyo3::prelude::*;
 use pyo3::types::{PyCapsule, PyDict, PyList, PyTuple};
 use pyo3::{Bound, IntoPyObjectExt, PyAny};
@@ -27,7 +28,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
-static CONNECTION_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Source of connection ids. Starts at 1 so that 0 permanently means "no
+/// connection": handshake-less sockets never receive an id, and every
+/// fallback for a missing id (`unwrap_or(0)` in the query paths,
+/// `get_client_metadata(0)`) must resolve to nothing rather than to the
+/// first real client.
+static CONNECTION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 use bytes::Bytes;
 use futures::stream;
@@ -174,6 +180,7 @@ pub enum WorkerMessage {
         ip: String,
         port: u16,
         server_name: Option<String>,
+        metadata: HashMap<String, String>,
         responder: oneshot::Sender<BoolCallbackResult>,
     },
     /// Tell the host a client has gone. No responder: nothing waits on the
@@ -1212,12 +1219,35 @@ mod encode_tests {
 pub struct PythonWorker {
     sender: Sender<WorkerMessage>,
     auth_cb: CallbackSlot,
+    connection_metadata: ConnectionMetadataStore,
+    connection_contexts: ConnectionContextStore,
 }
 
 /// Where one of the host's Python callbacks lives: empty until the host
 /// installs it, and shared between the worker thread and the API that installs
 /// it, which is why it is behind an `Arc<Mutex<..>>`.
 type CallbackSlot = Arc<Mutex<Option<Py<PyAny>>>>;
+
+/// One connection's session context handle: the cell the admit path installs
+/// the connection's own `SessionContext` into once its database is known.
+/// Cloned out of the per-connection processor at admit so a later lookup can
+/// read live session state (`ClientOpts`) without going through a query.
+type ConnectionContextHandle = Arc<Mutex<Option<Arc<SessionContext>>>>;
+/// Live session contexts keyed by connection id, mirroring
+/// [`ConnectionMetadataStore`] below: written once at admit, removed on
+/// disconnect. The handle's cell stays empty for connections with no session
+/// (a server without catalog emulation builds none).
+type ConnectionContextStore = Arc<Mutex<HashMap<u64, ConnectionContextHandle>>>;
+/// One connection's handshake metadata, keyed by connection id.
+///
+/// The map is the pgwire per-connection metadata as the client handshake left
+/// it: `connection_id`, `user`, `database`, and every startup parameter the
+/// driver sent (`application_name`, `client_encoding`, `DateStyle`, ...),
+/// verbatim. Entries are written once, when the connection is admitted, and
+/// removed when it disconnects, so the map stays proportional to the live
+/// connection count. It is a handshake snapshot, not live session state: a
+/// later `SET` updates the connection's `ClientOpts`, not this map.
+type ConnectionMetadataStore = Arc<Mutex<HashMap<u64, HashMap<String, String>>>>;
 
 /// The Python object a host installed in `slot`, or None if it installed
 /// nothing.
@@ -1280,6 +1310,7 @@ fn run_python_worker_loop(
                 ip,
                 port,
                 server_name,
+                metadata,
                 responder,
             } => ask_connect_callback(
                 connect_cb,
@@ -1287,6 +1318,7 @@ fn run_python_worker_loop(
                 &ip,
                 port,
                 server_name.as_deref(),
+                &metadata,
                 responder,
             ),
             WorkerMessage::Disconnect {
@@ -1427,6 +1459,7 @@ fn ask_connect_callback(
     ip: &str,
     port: u16,
     server_name: Option<&str>,
+    metadata: &HashMap<String, String>,
     responder: oneshot::Sender<BoolCallbackResult>,
 ) {
     let Some(cb) = clone_installed_callback(connect_cb) else {
@@ -1460,6 +1493,16 @@ fn ask_connect_callback(
         } else {
             let _ = kwargs.set_item("server_name", py.None());
         }
+        // The handshake metadata as the client sent it: connection_id, user,
+        // database, and every startup parameter (application_name,
+        // client_encoding, ...), verbatim. A handler that only admits clients
+        // can ignore it; one that routes by application can read it here
+        // instead of querying it back later.
+        let py_metadata = PyDict::new(py);
+        for (key, value) in metadata {
+            let _ = py_metadata.set_item(key, value);
+        }
+        let _ = kwargs.set_item("metadata", py_metadata);
         if let Err(e) = cb.call(py, args, Some(&kwargs)) {
             e.print(py);
         }
@@ -1569,6 +1612,8 @@ impl PythonWorker {
         connect_cb: CallbackSlot,
         disconnect_cb: CallbackSlot,
         auth_cb: CallbackSlot,
+        connection_metadata: ConnectionMetadataStore,
+        connection_contexts: ConnectionContextStore,
     ) -> Self {
         let (tx, rx) = channel::<WorkerMessage>();
         let auth_cb_thread = auth_cb.clone();
@@ -1579,6 +1624,8 @@ impl PythonWorker {
         PythonWorker {
             sender: tx,
             auth_cb,
+            connection_metadata,
+            connection_contexts,
         }
     }
 
@@ -1641,6 +1688,7 @@ impl PythonWorker {
         ip: String,
         port: u16,
         server_name: Option<&str>,
+        metadata: HashMap<String, String>,
     ) -> BoolCallbackResult {
         let (tx, rx) = oneshot::channel();
         self.sender
@@ -1649,6 +1697,7 @@ impl PythonWorker {
                 ip,
                 port,
                 server_name: server_name.map(std::string::ToString::to_string),
+                metadata,
                 responder: tx,
             })
             .expect("Send failed!");
@@ -1706,12 +1755,55 @@ impl PythonWorker {
     /// Returns as soon as the message is queued: nothing waits on the host's
     /// answer, and a send that fails because the worker is already shutting
     /// down is ignored, since there is no connection left to report it to.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the metadata lock was poisoned, which means a previous call
+    /// panicked while holding it.
     pub fn on_disconnect(&self, connection_id: u64, ip: String, port: u16) {
+        // Drop the handshake snapshot with the connection, so the store stays
+        // proportional to the live connection count and a queried id can only
+        // name a connection that is still here.
+        self.connection_metadata
+            .lock()
+            .unwrap()
+            .remove(&connection_id);
+        self.connection_contexts
+            .lock()
+            .unwrap()
+            .remove(&connection_id);
         let _ = self.sender.send(WorkerMessage::Disconnect {
             connection_id,
             ip,
             port,
         });
+    }
+
+    /// Record one admitted connection's handshake metadata snapshot.
+    ///
+    /// Called once per connection, from the admit path both handshakes share,
+    /// so refused clients never enter the store.
+    fn store_connection_metadata(&self, connection_id: u64, metadata: HashMap<String, String>) {
+        self.connection_metadata
+            .lock()
+            .unwrap()
+            .insert(connection_id, metadata);
+    }
+
+    /// Record one admitted connection's session context handle.
+    ///
+    /// Called from the same admit path, after the context is installed: the
+    /// handle is empty for connections with no session (no catalog
+    /// emulation), and the reader reports that distinctly from an unknown id.
+    fn store_connection_context(
+        &self,
+        connection_id: u64,
+        context: Arc<Mutex<Option<Arc<SessionContext>>>>,
+    ) {
+        self.connection_contexts
+            .lock()
+            .unwrap()
+            .insert(connection_id, context);
     }
 }
 
@@ -2416,6 +2508,7 @@ impl RiffqProcessor {
                 addr.ip().to_string(),
                 addr.port(),
                 client.sni_server_name(),
+                client.metadata().clone(),
             )
             .await;
         if !allowed.allowed {
@@ -2446,6 +2539,10 @@ impl RiffqProcessor {
     {
         let pwd = password_message.into_password()?;
         let id = self.assign_connection_id(client);
+        // Snapshot after assign: the map now holds the startup parameters
+        // plus user, database and connection_id, which is what the host sees
+        // in on_connect and get_client_metadata.
+        let handshake_metadata = client.metadata().clone();
 
         let login_info = pgwire::api::auth::LoginInfo::from_client_info(client);
         let allowed = self
@@ -2471,6 +2568,7 @@ impl RiffqProcessor {
                 addr.ip().to_string(),
                 addr.port(),
                 client.sni_server_name(),
+                handshake_metadata,
             )
             .await;
         if !allowed.allowed {
@@ -2519,6 +2617,19 @@ impl RiffqProcessor {
         C::Error: std::fmt::Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
+        // Snapshot the handshake metadata for get_client_metadata: at this
+        // point the map is complete (startup parameters plus the assigned
+        // connection_id) and the client is admitted, so refused clients never
+        // enter the store and need no pruning. The entry leaves with the
+        // connection in PythonWorker::on_disconnect.
+        if let Some(id) = client
+            .metadata()
+            .get("connection_id")
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            self.py_worker
+                .store_connection_metadata(id, client.metadata().clone());
+        }
         self.install_context_for_database(
             client
                 .metadata()
@@ -2527,6 +2638,17 @@ impl RiffqProcessor {
             client.metadata().get(pgwire::api::METADATA_USER).cloned(),
         )
         .await?;
+        if let Some(id) = client
+            .metadata()
+            .get("connection_id")
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            // After the install so a reader never sees an admitted connection
+            // with no context handle: without catalog emulation the cell
+            // stays empty and the reader says so instead of raising KeyError.
+            self.py_worker
+                .store_connection_context(id, self.ctx.clone());
+        }
         finish_authentication(client, params).await
     }
 }
@@ -3443,6 +3565,8 @@ pub struct Server {
     schemas: Vec<(String, String)>,
     tables: Vec<RegisteredTable>,
     lazy_catalog_source: Arc<Mutex<Option<Py<PyAny>>>>,
+    connection_metadata: ConnectionMetadataStore,
+    connection_contexts: ConnectionContextStore,
 }
 
 #[pymethods]
@@ -3465,6 +3589,8 @@ impl Server {
             schemas: Vec::new(),
             tables: Vec::new(),
             lazy_catalog_source: Arc::new(Mutex::new(None)),
+            connection_metadata: Arc::new(Mutex::new(HashMap::new())),
+            connection_contexts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -3479,13 +3605,86 @@ impl Server {
     }
 
     /// Install the connect handler, called as `cb(connection_id, ip, port,
-    /// callback=..., server_name=...)` once a client finishes the handshake.
+    /// callback=..., server_name=..., metadata=...)` once a client finishes
+    /// the handshake.
     ///
-    /// The handler calls `callback(True)` to admit the client or
-    /// `callback(False, message=..., severity=..., sqlstate=...)` to turn it
-    /// away. With no handler installed every client is admitted.
+    /// `metadata` is the handshake as the client sent it: `connection_id`,
+    /// `user`, `database`, and every startup parameter (`application_name`,
+    /// `client_encoding`, ...), verbatim. The handler calls `callback(True)`
+    /// to admit the client or `callback(False, message=..., severity=...,
+    /// sqlstate=...)` to turn it away. With no handler installed every client
+    /// is admitted.
     fn on_connect(&mut self, _py: Python, cb: Py<PyAny>) {
         *self.on_connect_cb.lock().unwrap() = Some(cb);
+    }
+
+    /// The handshake metadata for `connection_id`, as the client sent it.
+    ///
+    /// Answers the same map the `on_connect` handler receives as `metadata`:
+    /// `connection_id`, `user`, `database`, and every startup parameter
+    /// (`application_name`, `client_encoding`, ...), verbatim. This is a
+    /// connect-time snapshot, not live session state - a later `SET` updates
+    /// the connection's session, not this map.
+    ///
+    /// # Errors
+    ///
+    /// Raises `KeyError` for an id that never connected, was refused, or
+    /// already disconnected (pruned): in every case there is no connection
+    /// the metadata could describe.
+    fn get_client_metadata(&self, connection_id: u64) -> PyResult<HashMap<String, String>> {
+        self.connection_metadata
+            .lock()
+            .unwrap()
+            .get(&connection_id)
+            .cloned()
+            .ok_or_else(|| PyKeyError::new_err(format!("no such connection: {connection_id}")))
+    }
+
+    /// The live session settings for `connection_id`, as the session holds them.
+    ///
+    /// Answers the variables the catalog stores per connection
+    /// (`application_name`, `datestyle`, `search_path`, `timezone`,
+    /// `session_user`): a `SET` the client sent shows up here, unlike in
+    /// [`get_client_metadata`](Self::get_client_metadata), which is the
+    /// connect-time snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Raises `KeyError` for an id that never connected, was refused, or
+    /// already disconnected (pruned). Raises `RuntimeError` for a live
+    /// connection with no session - a server without catalog emulation
+    /// builds none - since there are no settings to report.
+    fn get_client_settings(&self, connection_id: u64) -> PyResult<HashMap<String, String>> {
+        use datafusion::common::config::ExtensionOptions;
+
+        let handle = self
+            .connection_contexts
+            .lock()
+            .unwrap()
+            .get(&connection_id)
+            .cloned()
+            .ok_or_else(|| PyKeyError::new_err(format!("no such connection: {connection_id}")))?;
+        let ctx = handle.lock().unwrap().clone().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "connection {connection_id} has no session; start with catalog_emulation=True \
+                 for per-connection session state"
+            ))
+        })?;
+        let state = ctx.state();
+        let opts = state
+            .config_options()
+            .extensions
+            .get::<ClientOpts>()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err(
+                    "this session has no ClientOpts, so it has no session settings",
+                )
+            })?;
+        Ok(opts
+            .entries()
+            .into_iter()
+            .map(|entry| (entry.key, entry.value.unwrap_or_default()))
+            .collect())
     }
 
     /// Install the disconnect handler, called as `cb(connection_id, ip, port)`
@@ -3757,6 +3956,8 @@ impl Server {
                 connect_cb,
                 disconnect_cb,
                 auth_cb,
+                self.connection_metadata.clone(),
+                self.connection_contexts.clone(),
             ));
             let catalog = self
                 .catalog_to_serve(catalog_emulation, oid_registry_path.as_deref())
@@ -3940,8 +4141,13 @@ async fn accept_connections(
             if let Err(e) = process_socket(socket, tls_acceptor_ref, factory).await {
                 error!("process_socket error: {e:?}");
             }
-            let connection_id = id_rx.await.unwrap_or(0);
-            py_worker_clone.on_disconnect(connection_id, ip, port);
+            // A socket that closed without a startup message never received
+            // an id. Substituting 0 here used to prune connection 0's
+            // metadata and fire a phantom on_disconnect(0) - and 0 was the
+            // first real client's id. Skip cleanup when none was assigned.
+            if let Ok(connection_id) = id_rx.await {
+                py_worker_clone.on_disconnect(connection_id, ip, port);
+            }
         });
     }
 }

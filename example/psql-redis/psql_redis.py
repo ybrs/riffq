@@ -273,7 +273,7 @@ class Connection(riffq.BaseConnection):
             logging.exception("execution error")
             callback(("ERROR", "XX000", str(exc)), is_error=True)
 
-    def handle_connect(self, ip, port, callback=...):
+    def handle_connect(self, ip, port, metadata=None, callback=...):
         logging.info("connection from %s %s", ip, port)
         callback(True)
 

@@ -126,6 +126,18 @@ class MyCatalog:
             {"name": "name", "type_oid": 25, "nullable": True},   # 25 = text
         ])
 
+    # Both methods below are OPTIONAL. Omit them and pg_config / pg_settings
+    # serve their built-in defaults. Implement them to override or extend those
+    # rows; a row whose ``name`` matches a built-in one replaces it.
+    def config(self, callback):
+        # -> pg_catalog.pg_config build settings - report our own version
+        callback([{"name": "VERSION", "setting": "riffq 0.4"}])
+
+    def settings(self, callback):
+        # -> pg_catalog.pg_settings runtime parameters - override the live
+        # value of session-mutable ones (here, ``search_path``)
+        callback([{"name": "search_path", "setting": "public"}])
+
 server.set_lazy_catalog(MyCatalog())
 server.start(catalog_emulation=True)
 ```
@@ -153,6 +165,11 @@ server.start(catalog_emulation=True)
   client.
 - **Errors propagate.** An exception raised in any source method is returned to
   the SQL client as an error - it never fails silently.
+- **`config` / `settings` override the server variables.** The two optional
+  methods report `pg_catalog.pg_config` and `pg_catalog.pg_settings` rows;
+  a row whose name matches a built-in replaces it, the rest keep their
+  defaults. Use them to advertise the embedding's own version or to pin a
+  session-mutable default the engine behind riffq actually honors.
 - **Composable with declarations.** With a lazy source AND `register_*` calls
   configured, the catalog serves their union: declared base databases plus
   whatever the source reports, a database both contribute to merging its

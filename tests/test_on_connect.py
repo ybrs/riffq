@@ -13,7 +13,9 @@ def _run_server(port: int):
     def handle_query(sql, callback, **kwargs):
         callback(([{"name": "val", "type": "int"}], [[1]]))
 
-    def handle_connect(conn_id, ip, port, *, callback, server_name=None):
+    def handle_connect(conn_id, ip, port, *, callback, server_name=None, metadata=None):
+        assert metadata is not None
+        assert metadata["user"] == "user"
         callback(False)
 
     server = riffq.Server(f"127.0.0.1:{port}")

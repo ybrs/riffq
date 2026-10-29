@@ -2,7 +2,7 @@
 //!
 //! Keep this in one place so the encoder, DESCRIBE-only execution
 //! and any future planner code all agree on column OIDs.
-use log::info;
+use log::debug;
 
 use arrow::datatypes::DataType;
 use pgwire::api::Type;
@@ -42,7 +42,7 @@ pub fn arrow_type_to_pgwire(dt: &DataType) -> Type {
         LargeList, LargeUtf8, List, Time32, Time64, Timestamp, UInt8, UInt16, UInt32, UInt64, Utf8,
         Utf8View,
     };
-    info!("Datatype -> {dt:?}");
+    debug!("Datatype -> {dt:?}");
     match dt {
         /* -- integers ---------------------------- */
         // SMALLINT

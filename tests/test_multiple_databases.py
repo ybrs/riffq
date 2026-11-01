@@ -44,7 +44,7 @@ class MultipleDatabaseTest(unittest.TestCase):
         cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
         cls.proc.start()
         start = time.time()
-        # Having multiple databases can take sometime. This is a known issue. 
+        # Having multiple databases can take sometime. This is a known issue.
         while time.time() - start < 30:
             with socket.socket() as sock:
                 if sock.connect_ex(("127.0.0.1", cls.port)) == 0:

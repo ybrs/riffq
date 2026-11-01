@@ -51,7 +51,7 @@ class DuckDbLazyCatalogTest(unittest.TestCase):
 
         wait_for_catalog(
             cls.port,
-            "db",
+            cls.database_name,
             f"SELECT datname FROM pg_catalog.pg_database WHERE datname='{cls.database_name}'",
             cls.database_name,
         )
@@ -63,7 +63,7 @@ class DuckDbLazyCatalogTest(unittest.TestCase):
 
     def test_table_created_after_startup_is_visible(self):
         conn = psycopg.connect(
-            f"postgresql://user:123@127.0.0.1:{self.port}/db", autocommit=True
+            f"postgresql://user:123@127.0.0.1:{self.port}/{self.database_name}", autocommit=True
         )
         with conn.cursor() as cur:
             # The table does not exist yet ...

@@ -6,7 +6,8 @@ import sys
 
 repo_root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repo_root / "src"))
-from teleduck.__main__ import main
+from teleduck.__main__ import main  # noqa: E402 - importable only once sys.path is set above
+
 
 class CliTest(unittest.TestCase):
     def test_cli_invokes_run_server(self):
@@ -92,6 +93,7 @@ class CliTest(unittest.TestCase):
                 tls_key_file=None,
                 read_only=True,
             )
+
 
 if __name__ == '__main__':
     unittest.main()

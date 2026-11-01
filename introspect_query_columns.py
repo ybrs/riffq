@@ -2,6 +2,7 @@
 import argparse
 import psycopg2
 
+
 def main():
     parser = argparse.ArgumentParser(description="Show columns and types for a SQL query")
     parser.add_argument("--host", default="localhost")
@@ -22,7 +23,6 @@ def main():
     cur = conn.cursor()
     cur.execute(args.query)
 
-    type_oids = tuple({col.type_code for col in cur.description})
     type_names = {}
     # if type_oids:
     #     typcur = conn.cursor()
@@ -41,6 +41,7 @@ def main():
 
     cur.close()
     conn.close()
+
 
 if __name__ == "__main__":
     main()

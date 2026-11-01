@@ -1,7 +1,6 @@
 import multiprocessing
 import socket
 import subprocess
-import sys
 import time
 from pathlib import Path
 import tempfile
@@ -9,6 +8,7 @@ import tempfile
 import psycopg
 import unittest
 from helpers import stop_server
+
 
 def _run_server_tls(port: int, cert: str, key: str):
     import riffq
@@ -19,7 +19,7 @@ def _run_server_tls(port: int, cert: str, key: str):
 
         sql_clean = sql.strip().lower()
         if sql_clean == "select 1":
-            callback(to_arrow([{"name": "val", "type": "int"}], [[1]]) )
+            callback(to_arrow([{"name": "val", "type": "int"}], [[1]]))
             return
         if args:
             value = int(args[0])

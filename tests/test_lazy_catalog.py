@@ -101,7 +101,7 @@ class LazyCatalogTest(unittest.TestCase):
 
     def _conn(self):
         return psycopg.connect(
-            f"postgresql://user@127.0.0.1:{self.port}/db", autocommit=True
+            f"postgresql://user@127.0.0.1:{self.port}/appdb", autocommit=True
         )
 
     def test_pg_config_and_settings_overrides(self):
@@ -255,7 +255,7 @@ class LazyCatalogErrorPathTest(unittest.TestCase):
     def _expect_error(self, mode, needle):
         _, port = self.procs[mode]
         conn = psycopg.connect(
-            f"postgresql://user@127.0.0.1:{port}/db", autocommit=True
+            f"postgresql://user@127.0.0.1:{port}/appdb", autocommit=True
         )
         try:
             with conn.cursor() as cur:

@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import psycopg
 import unittest
-from server_readiness import wait_for_catalog, stop_server
+from server_readiness import duckdb_database_name, wait_for_catalog, stop_server
 
 
 def _run_server(db_file: str, port: int, scripts, sqls):
@@ -25,6 +25,7 @@ class SqlInitTest(unittest.TestCase):
     def setUpClass(cls):
         cls.port = 55442
         fd, cls.db_file = tempfile.mkstemp(suffix=".db")
+        cls.database_name = duckdb_database_name(cls.db_file)
         os.close(fd)
         os.unlink(cls.db_file)
 
@@ -55,7 +56,7 @@ class SqlInitTest(unittest.TestCase):
         # so poll the seeded row count until it settles instead of sleeping.
         waited = wait_for_catalog(
             cls.port,
-            "db",
+            cls.database_name,
             "SELECT count(*) FROM t",
             2,
         )
@@ -72,7 +73,7 @@ class SqlInitTest(unittest.TestCase):
 
     def test_scripts_executed(self):
         conn = psycopg.connect(
-            f"postgresql://user:123@127.0.0.1:{self.port}/db"
+            f"postgresql://user:123@127.0.0.1:{self.port}/{self.database_name}"
         )
         with conn.cursor() as cur:
             cur.execute("SELECT count(*) FROM t")

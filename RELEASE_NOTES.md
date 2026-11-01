@@ -1,5 +1,88 @@
 # Release Notes
 
+## release-0.3.0
+
+### Breaking: no hashing in riffq - `riffq.helpers.stable_oid` is removed
+
+Deriving an OID from a name is not the catalog's job, and a 31-bit hash space
+collides silently at scale. Declared objects now get their OIDs from a
+persistent registry instead (below); a lazy source that derives its own
+identifiers owns that derivation itself, including uniqueness (teleduck does
+this over DuckDB's information schema, with a probe-on-collision fallback).
+
+### OIDs come from a registry; pass `oid_registry_path` to persist them
+
+`start(catalog_emulation=True, oid_registry_path="catalog-oids.redb")` records
+every declared object's OID in a redb file (pure Rust, ACID). The first
+registration of a name allocates the next OID; every later run - after a
+restart, after reordering declarations - gets the recorded value back, so
+clients that cache OIDs keep resolving. Allocation is one cluster-wide counter,
+as PostgreSQL's own is: two databases' objects no longer share numbers.
+
+Without `oid_registry_path`, an in-memory registry stands in and `start()`
+emits a `DeprecationWarning`: OIDs are then stable only while declaration
+order does not change between runs. This fallback will become an error.
+
+### Breaking: duplicate registrations raise instead of being skipped
+
+`register_database`, `register_schema` and `register_table` now raise
+`ValueError` ("... already exists") for a name already registered, as
+PostgreSQL refuses CREATE for an existing name. Previously a duplicate was
+silently skipped.
+
+### Breaking: declared+lazy name collisions are errors, not shadowing
+
+With both `register_*` declarations and `set_lazy_catalog` configured, a
+database or relation name reported by BOTH is refused at scan time, naming the
+object - previously the declared side silently won. A shared SCHEMA name still
+merges; that is how a live source mounts tables into a declared database's
+`public`.
+
+
+## release-0.2.0
+
+### Breaking: a registered database is the only connectable database
+
+With `catalog_emulation=True`, a client connecting under a database name the
+host never registered is now refused with `FATAL 3D000 database "..." does not
+exist`, the way PostgreSQL refuses it. Previously any name connected and was
+quietly served some other database's catalog.
+
+The fix is one line - connect under the name you registered:
+
+```python
+server.register_database("mydb")          # already there
+# psql postgresql://user@host:5433/mydb   <- use this name
+```
+
+A server started with `catalog_emulation=True` and no databases registered at
+all now raises from `start()` instead of binding a port and refusing every
+client. Register one, or install a lazy source that reports one.
+
+**Servers started without `catalog_emulation` are unaffected**: riffq holds no
+catalog there, the host answers metadata queries itself, and any database name
+still connects.
+
+Most existing code already registers a database and connects under some other
+name without noticing, because the old fallback hid it - worth checking the
+connection strings rather than assuming.
+
+### One catalog context per database
+
+Each database now gets its own catalog, built in full the first time a client
+connects to it rather than at startup. Consequences:
+
+- A connection sees only its own database's schemas, tables and columns.
+  `pg_database` still lists every database from any of them.
+- `information_schema` reports the connected database in `table_catalog`, and it
+  agrees with `current_database()`. On the lazy path both used to disagree, with
+  48 views reporting the internal name `datafusion`.
+- A database that appears after the server started - one an ATTACH or a lazy
+  source turns up later - is connectable without a restart.
+- The server binds its port immediately. The per-database build cost (roughly a
+  second) is paid by the first connection to each database instead of by
+  startup, and only for databases something actually connects to.
+
 ## release-0.1.10
 
 The `release-0.1.8` and `release-0.1.9` tags never reached PyPI - both were built

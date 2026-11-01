@@ -1,3 +1,4 @@
+import unittest
 import types
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -92,9 +93,6 @@ def make_conn():
 
     conn.send_reader = _send_reader_tuple  # type: ignore
     return mod, conn
-
-
-import unittest
 
 
 class TestRedisExample(unittest.TestCase):

@@ -15,3 +15,12 @@ docs-site/
 
 # TLS material certbot writes here - a live private key, never in the repo
 teleduck/certs/
+
+# Driver integration-test toolchain (built/downloaded by setup_toolchain.sh) and
+# compiled harness output; all regenerated locally, never committed. The .NET
+# harness's packages.lock.json is deliberately NOT ignored -- it is what pins
+# the dependency set a cold restore reproduces.
+tests/integration/.toolchain/
+tests/integration/java/*.class
+tests/integration/dotnet/bin/
+tests/integration/dotnet/obj/

@@ -15,6 +15,7 @@ from ._riffq import Server  # Rust class
 from . import connection
 from .connection import BaseConnection, RiffqServer
 
-# Re‑exports for a tidy public API
-BaseConnection = connection.BaseConnection
-RiffqServer = connection.RiffqServer
+# Named explicitly so the three imports above read as the package's public
+# surface rather than as incidental imports, which is also what stops a linter
+# treating them as unused.
+__all__ = ["Server", "connection", "BaseConnection", "RiffqServer"]

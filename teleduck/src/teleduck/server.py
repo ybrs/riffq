@@ -1,14 +1,15 @@
 import atexit
+import threading
+
 import duckdb
 import pyarrow as pa
 import riffq
-from riffq.helpers import to_arrow
 import logging
-import threading
 from pathlib import Path
 from typing import Iterable, Optional
 import os
 import hashlib
+
 
 def map_type(data_type: str) -> str:
     dt = data_type.upper()
@@ -63,18 +64,74 @@ def duckdb_type_to_oid(data_type: str) -> int:
     return 25  # text / varchar / everything else
 
 
-def _stable_oid(salt: str, *parts: str) -> int:
-    """Derive a stable, built-in-clear OID from a namespace `salt` and `parts`.
+# PostgreSQL reserves OIDs below this for its own built-in objects; everything
+# teleduck derives stays at or above it.
+_FIRST_USER_OID = 16384
 
-    The same inputs always yield the same OID (so ``pg_class.oid`` and
-    ``pg_attribute.attrelid`` agree across scans and joins resolve), distinct
-    object classes use distinct salts to avoid collisions, and the result sits
-    well above the built-in OID range and inside the signed-32-bit range that
-    the catalog row types use.
+
+class _CatalogOidAssigner:
+    """Derives this source's OIDs from names, with uniqueness enforced.
+
+    DuckDB's own catalog ids are NOT stable across restarts of the same file
+    (measured: a table's ``table_oid`` changes on every reopen, and a number
+    can even move to a DIFFERENT table), so they cannot be passed through. A
+    lazy source must hand the same object the same OID on every scan and every
+    restart, with no storage of its own -- so the OID is derived from the
+    object's name, deterministically. That derivation is teleduck's own
+    business: riffq and pg_catalog ship no hashing, and OIDs a source supplies
+    pass through them verbatim.
+
+    Uniqueness is enforced, not assumed. A hash into a 31-bit space can
+    collide, and a collision between two relations is SILENT downstream (both
+    pg_class rows insert; pg_attribute joins one table's columns onto the
+    other). Every assignment is therefore recorded, and a fresh derivation
+    that lands on a taken number probes upward to the next free one. The probe
+    outcome depends on assignment order, so it is deterministic per process
+    and best-effort across restarts -- the trade a stateless source can offer,
+    priced at roughly one collision per two billion object pairs.
+
+    Thread-safe by a lock around every resolution, and not incidentally: riffq
+    builds per-database contexts concurrently and every context's scans
+    resolve the same "db" keys through ONE shared source, so an unlocked
+    check-then-act let two threads assign X and X+1 to one object -- measured,
+    not hypothesized, before the lock was added.
     """
-    key = "\x00".join((salt,) + parts)
-    h = int(hashlib.sha1(key.encode("utf-8")).hexdigest()[:8], 16)
-    return 16384 + (h % 2_000_000_000)
+
+    def __init__(self):
+        """Start with nothing assigned."""
+        self._assigned_by_key = {}
+        self._taken_oids = set()
+        self._assignment_lock = threading.Lock()
+
+    def resolve(self, salt, *parts):
+        """The OID for the object `parts` names, same answer on every call.
+
+        `salt` separates object classes ("db", "ns", "rel", "type") so a
+        database and a table sharing a name do not share a number.
+        """
+        key = (salt, *parts)
+        with self._assignment_lock:
+            if key in self._assigned_by_key:
+                return self._assigned_by_key[key]
+            oid = self._derive(key)
+            while oid in self._taken_oids:
+                oid += 1
+            self._assigned_by_key[key] = oid
+            self._taken_oids.add(oid)
+            return oid
+
+    @staticmethod
+    def _derive(key):
+        """Hash `key` into [_FIRST_USER_OID, _FIRST_USER_OID + 2e9).
+
+        Each component is length-prefixed so no name can imitate the boundary
+        between components: with a plain separator, ("s1", "t1") and the
+        single part "s1/t1" could hash identically.
+        """
+        digest = hashlib.sha256()
+        for component in key:
+            digest.update(f"{len(component)}:{component}".encode())
+        return _FIRST_USER_OID + int.from_bytes(digest.digest()[:8], "big") % 2_000_000_000
 
 
 class DuckdbCatalogSource:
@@ -92,6 +149,7 @@ class DuckdbCatalogSource:
 
     def __init__(self, con):
         self._con = con
+        self._oids = _CatalogOidAssigner()
 
     def databases(self, callback):
         rows = self._con.cursor().execute(
@@ -99,7 +157,7 @@ class DuckdbCatalogSource:
         ).fetchall()
         callback(
             [
-                {"oid": _stable_oid("db", name), "name": name}
+                {"oid": self._oids.resolve("db", name), "name": name}
                 for (name,) in rows
                 if name not in ("system", "temp")
             ]
@@ -114,7 +172,7 @@ class DuckdbCatalogSource:
         ).fetchall()
         callback(
             [
-                {"oid": _stable_oid("ns", database, schema), "name": schema}
+                {"oid": self._oids.resolve("ns", database, schema), "name": schema}
                 for (schema,) in rows
             ]
         )
@@ -143,8 +201,8 @@ class DuckdbCatalogSource:
             kind = "view" if (table_type or "").upper().startswith("VIEW") else "table"
             out.append(
                 {
-                    "oid": _stable_oid("rel", database, schema, table_name),
-                    "reltype_oid": _stable_oid("type", database, schema, table_name),
+                    "oid": self._oids.resolve("rel", database, schema, table_name),
+                    "reltype_oid": self._oids.resolve("type", database, schema, table_name),
                     "name": table_name,
                     "kind": kind,
                     "has_index": table_name in indexed,
@@ -191,13 +249,13 @@ class Connection(riffq.BaseConnection):
 
         if sql.lower().startswith("begin"):
             return callback("BEGIN", is_tag=True)
-        
+
         if sql.lower().startswith("commit"):
             return callback("COMMIT", is_tag=True)
-        
+
         if sql.lower().startswith("rollback"):
             return callback("ROLLBACK", is_tag=True)
-        
+
         if sql.lower().startswith("discard all"):
             return callback("DISCARD ALL", is_tag=True)
 
@@ -228,7 +286,7 @@ class Connection(riffq.BaseConnection):
                 ["transaction_isolation"],
             )
             return self.send_reader(batch, callback)
-        
+
         if sql == "select current_schema()":
             batch = self.arrow_batch(
                 [pa.array(["main"])],
@@ -277,6 +335,7 @@ class Connection(riffq.BaseConnection):
             ok = ok and hashed == env_password_sha1
 
         callback(ok)
+
 
 def run_server(
     db_file: str,
@@ -359,11 +418,9 @@ def run_server(
     if use_tls:
         server.set_tls(cert_path, key_path)
 
-
     # Drive pg_catalog lazily from the live DuckDB connection: every catalog
     # scan re-reads DuckDB's schema, so tables created after startup show up
-    # without any re-registration. (Replaces the previous eager walk that
-    # snapshotted databases/schemas/tables once at boot.)
+    # without any re-registration.
     server.set_lazy_catalog(DuckdbCatalogSource(duckdb_con))
 
     # riffq catches SIGINT/SIGTERM inside its tokio runtime and invokes this
@@ -373,7 +430,8 @@ def run_server(
     server.handle_shutdown(_checkpoint_and_close)
 
     server.start(catalog_emulation=True, tls=use_tls)
-    
+
+
 if __name__ == "__main__":
     import click
 
@@ -383,8 +441,28 @@ if __name__ == "__main__":
     @click.option("--use-tls/--no-use-tls", "use_tls", default=True, show_default=True, help="Use TLS for the server")
     @click.option("--tls-cert-file", default=None, type=click.Path(), help="Path to TLS certificate")
     @click.option("--tls-key-file", default=None, type=click.Path(), help="Path to TLS key")
-    @click.option("--read-only/--no-read-only", "read_only", default=False, show_default=True, help="Open database in read-only mode")
-    def _main(db_file: str, port: int, use_tls: bool, tls_cert_file: str | None, tls_key_file: str | None, read_only: bool):
-        run_server(db_file, port, use_tls=use_tls, tls_cert_file=tls_cert_file, tls_key_file=tls_key_file, read_only=read_only)
+    @click.option(
+        "--read-only/--no-read-only",
+        "read_only",
+        default=False,
+        show_default=True,
+        help="Open database in read-only mode",
+    )
+    def _main(
+        db_file: str,
+        port: int,
+        use_tls: bool,
+        tls_cert_file: str | None,
+        tls_key_file: str | None,
+        read_only: bool,
+    ):
+        run_server(
+            db_file,
+            port,
+            use_tls=use_tls,
+            tls_cert_file=tls_cert_file,
+            tls_key_file=tls_key_file,
+            read_only=read_only,
+        )
 
     _main()

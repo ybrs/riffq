@@ -1,16 +1,12 @@
 import multiprocessing
 import socket
-import subprocess
-import sys
 import time
 import threading
-from pathlib import Path
 
 import psycopg
 import unittest
 from helpers import stop_server
 
-import pyarrow as pa
 
 def _run_server(port: int):
     import riffq
@@ -69,12 +65,15 @@ class ConnectionIdTest(unittest.TestCase):
 
     def test_parallel_connections_unique(self):
         results = []
+
         def worker():
             results.append(self._fetch_id())
         t1 = threading.Thread(target=worker)
         t2 = threading.Thread(target=worker)
-        t1.start(); t2.start()
-        t1.join(); t2.join()
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
         self.assertEqual(len(results), 2)
         self.assertEqual(len(set(results)), 2)
 

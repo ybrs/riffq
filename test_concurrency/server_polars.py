@@ -1,12 +1,11 @@
 import logging
-import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
-import pandas
 import polars as pl
 import riffq
 
 executor = ThreadPoolExecutor(max_workers=4)
+
 
 def get_schema_from_polars(df: pl.DataFrame):
     polars_to_simple = {
@@ -36,6 +35,7 @@ def get_schema_from_polars(df: pl.DataFrame):
         schema.append({"name": col, "type": mapped})
     return schema
 
+
 def run_heavy_polars_query():
     df = heavy_df
     # This forces heavy CPU math in native Polars (Rust)
@@ -44,6 +44,7 @@ def run_heavy_polars_query():
     ]).select([
         pl.col("result").sum()
     ]).collect()
+
 
 def _handle_query(sql, callback, **kwargs):
     print("< received (python):", sql)
@@ -77,7 +78,6 @@ def _handle_query(sql, callback, **kwargs):
         return callback(([{"name": "current_schema", "type": "string"}],
                          [["public"]]))
 
-
     if query.startswith("begin"):
         return callback("BEGIN", is_tag=True)
     if query.startswith("commit"):
@@ -86,7 +86,6 @@ def _handle_query(sql, callback, **kwargs):
         return callback("ROLLBACK", is_tag=True)
     if query.startswith("discard all"):
         return callback("DISCARD ALL", is_tag=True)
-
 
     if query.strip().lower().replace(';', '') == "select heavy_query":
         df = run_heavy_polars_query()
@@ -109,6 +108,7 @@ def _handle_query(sql, callback, **kwargs):
         )
         callback(result)
 
+
 def handle_query(sql, callback, **kwargs):
     def task():
         try:
@@ -116,6 +116,7 @@ def handle_query(sql, callback, **kwargs):
         except Exception:
             logging.exception("exception on executing query")
     executor.submit(task)
+
 
 def main():
     global test_concurrency_df, heavy_df
@@ -135,6 +136,7 @@ def main():
     server = riffq.Server("127.0.0.1:55503")
     server.on_query(handle_query)
     server.start()
+
 
 if __name__ == "__main__":
     main()

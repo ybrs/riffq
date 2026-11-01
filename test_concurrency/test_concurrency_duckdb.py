@@ -1,21 +1,17 @@
 import unittest
 import time
-import signal
-import threading
-import duckdb
 import logging
-from datetime import datetime
 from sqlalchemy import create_engine, text
 from multiprocessing import Process
-import riffq
-import logging
 
 from utils import wait_for_server, stop_server, ensure_started
 logging.basicConfig(level=logging.DEBUG)
 
+
 def start_duckdb_server():
     from test_concurrency.server_duckdb import main
     main()
+
 
 def run_heavy_query():
     logging.info("sending long running query")

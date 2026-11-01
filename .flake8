@@ -1,0 +1,17 @@
+[flake8]
+# Line length matches what this codebase is already written to: the test suites
+# carry client SQL captured verbatim, which loses its value as evidence when it
+# is split across lines. 79 would flag nearly every line and drown the rest.
+max-line-length = 120
+
+# Directories that hold code this project did not write and does not maintain.
+# Linting them reports third-party findings nobody here can act on, and walking
+# site-packages alone takes longer than the rest of the hook.
+extend-exclude =
+    venv,
+    .venv,
+    target,
+    teleduck/build,
+    tests/integration/.toolchain,
+    query-proxy/node_modules,
+    __pycache__

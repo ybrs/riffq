@@ -6,16 +6,18 @@ It is for illustration purposes. We use hashsets as tables.
 """
 import redis
 from sqlglot import parse_one, exp
-import logging, pyarrow as pa, riffq
+import logging
+import pyarrow as pa
+import riffq
 from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO)
 
-# Note: We could put connection in handle_auth and 
+# Note: We could put connection in handle_auth and
 #   put the connection as a property to Connection class
 #   but sometimes you'd want to prepare connections before client connects
 #   (eg: for creating a pool etc. and sharing connections between clients)
-#   this is to illustrate that case so connections is outside of Connection class 
+#   this is to illustrate that case so connections is outside of Connection class
 redis_connections = defaultdict(
     lambda: redis.Redis(host="localhost", port=6379, db=0, password=None, decode_responses=True)
 )
@@ -40,6 +42,7 @@ def _expr_to_scalar(node: exp.Expression) -> str:
         return node.name
     # Render using SQL and then unquote a single pair if present
     return _unquote(node.sql())
+
 
 class Connection(riffq.BaseConnection):
     def handle_auth(self, user, password, host, database=None, callback=callable):
@@ -200,7 +203,7 @@ class Connection(riffq.BaseConnection):
         if "key" in want_cols:
             cols.append(pa.array(ids))
             names.append("key")
-            
+
         if "value" in want_cols:
             cols.append(pa.array(values))
             names.append("value")
@@ -251,7 +254,7 @@ class Connection(riffq.BaseConnection):
 
         if isinstance(ast, exp.Select):
             return self.handle_select(ast, callback)
-        
+
         if isinstance(ast, exp.Insert):
             return self.handle_insert(ast, callback)
 
@@ -270,7 +273,7 @@ class Connection(riffq.BaseConnection):
             logging.exception("execution error")
             callback(("ERROR", "XX000", str(exc)), is_error=True)
 
-    def handle_connect(self, ip, port, callback=...):
+    def handle_connect(self, ip, port, metadata=None, callback=...):
         logging.info("connection from %s %s", ip, port)
         callback(True)
 
@@ -278,6 +281,7 @@ class Connection(riffq.BaseConnection):
         if self.conn_id in redis_connections:
             del redis_connections[self.conn_id]
         callback(True)
+
 
 def main():
     server = riffq.RiffqServer("127.0.0.1:5444", connection_cls=Connection)

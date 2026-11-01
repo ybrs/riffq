@@ -1,10 +1,9 @@
 import logging
-import threading
 
 import riffq
 import duckdb
-import pandas
 from concurrent.futures import ThreadPoolExecutor
+
 
 def get_schema_from_duckdb(columns, types):
     duckdb_to_simple = {
@@ -64,18 +63,19 @@ def _handle_query(sql, callback, **kwargs):
                 {"name": "version", "type": "string"},
             ],
             [
-                ["PostgreSQL 14.13 (Homebrew) on aarch64-apple-darwin23.4.0, compiled by Apple clang version 15.0.0 (clang-1500.3.9.4), 64-bit",]
+                [
+                    "PostgreSQL 14.13 (Homebrew) on aarch64-apple-darwin23.4.0, "
+                    "compiled by Apple clang version 15.0.0 (clang-1500.3.9.4), 64-bit",
+                ]
             ]
         )
 
         return callback(result)
 
-
     if query == "show transaction isolation level":
         return callback(([
             {"name": "transaction_isolation", "type": "string"},
         ], [["read committed"]]))
-
 
     if query == "show standard_conforming_strings":
         return callback(([
@@ -87,7 +87,6 @@ def _handle_query(sql, callback, **kwargs):
             {"name": "current_schema", "type": "string"},
         ], [["public"]]))
 
-
     if query.startswith("begin"):
         return callback("BEGIN", is_tag=True)
     if query.startswith("commit"):
@@ -97,7 +96,6 @@ def _handle_query(sql, callback, **kwargs):
     if query.startswith("discard all"):
         return callback("DISCARD ALL", is_tag=True)
 
-
     try:
         res = local_con.sql(sql)
         if res is None:
@@ -105,13 +103,14 @@ def _handle_query(sql, callback, **kwargs):
             return
         schema = get_schema_from_duckdb(res.columns, res.types)
         callback((schema, res.fetchall()))
-    except Exception as e:
+    except Exception:
         logging.exception("error on executing query")
         result = (
-            [ {"name": "error", "type": "str"}, {"name": "message", "type": "str"} ],
-            [ ["ERROR", "unknown query"] ]
+            [{"name": "error", "type": "str"}, {"name": "message", "type": "str"}],
+            [["ERROR", "unknown query"]]
         )
         callback(result)
+
 
 def handle_query(sql, callback, **kwargs):
     def task():
@@ -120,6 +119,7 @@ def handle_query(sql, callback, **kwargs):
         except Exception:
             logging.exception("exception on executing query")
     executor.submit(task)
+
 
 def main():
     global duckdb_con, executor
@@ -137,7 +137,7 @@ def main():
     duckdb_con.execute("truncate table test_concurrency;")
     duckdb_con.execute("""
     INSERT INTO test_concurrency (id, created_at, key, value)
-    VALUES 
+    VALUES
         (1, ?, 'alpha', 'value1'),
         (2, ?, 'beta', 'value2'),
         (3, ?, 'gamma', 'value3')

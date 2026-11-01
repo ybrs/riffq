@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Iterable, Optional
 
+
 def map_type(data_type: str) -> str:
     dt = data_type.upper()
     if "INT" in dt:
@@ -20,6 +21,7 @@ def map_type(data_type: str) -> str:
         return "datetime"
     return "str"
 
+
 class Connection(riffq.BaseConnection):
     def _handle_query(self, sql, callback, **kwargs):
         cur = duckdb_con.cursor()
@@ -30,13 +32,13 @@ class Connection(riffq.BaseConnection):
 
         if sql.startswith("begin"):
             return callback("BEGIN", is_tag=True)
-        
+
         if sql.startswith("commit"):
             return callback("COMMIT", is_tag=True)
-        
+
         if sql.startswith("rollback"):
             return callback("ROLLBACK", is_tag=True)
-        
+
         if sql.startswith("discard all"):
             return callback("DISCARD ALL", is_tag=True)
 
@@ -60,7 +62,7 @@ class Connection(riffq.BaseConnection):
                 ["transaction_isolation"],
             )
             return self.send_reader(batch, callback)
-        
+
         if sql == "select current_schema()":
             batch = self.arrow_batch(
                 [pa.array(["public"])],
@@ -85,6 +87,7 @@ class Connection(riffq.BaseConnection):
     def handle_auth(self, user, password, host, database=None, callback=callable):
         # return callback(user == "user" and password == "secret")
         callback(True)
+
 
 def run_server(
     db_file: str,
@@ -154,6 +157,7 @@ def run_server(
         server._server.register_table("duckdb", schema_name, table_name, columns)
 
     server.start(catalog_emulation=True)
+
 
 if __name__ == "__main__":
     import click

@@ -6,19 +6,22 @@ import duckdb
 import pyarrow as pa
 import riffq
 
+
 def send_reader(reader, callback):
     if hasattr(reader, "__arrow_c_stream__"):
         capsule = reader.__arrow_c_stream__()
     else:
-        from pyarrow.cffi import export_stream # type: ignore
+        from pyarrow.cffi import export_stream  # type: ignore
         capsule = export_stream(reader)
     callback(capsule)
+
 
 def arrow_batch(values, names):
     return pa.RecordBatchReader.from_batches(
         pa.schema(list(zip(names, [v.type for v in values]))),
         [pa.record_batch(values, names=names)],
     )
+
 
 def _handle_query(sql, callback, **kwargs):
     cur = duckdb_con.cursor()
@@ -58,7 +61,7 @@ def _handle_query(sql, callback, **kwargs):
             ["standard_conforming_strings"],
         )
         return send_reader(batch, callback)
-    
+
     if query == "select current_schema()":
         batch = arrow_batch(
             [pa.array(["public"])],
@@ -86,8 +89,10 @@ def _handle_query(sql, callback, **kwargs):
         )
         send_reader(batch, callback)
 
+
 def handle_query(sql, callback, **kwargs):
     executor.submit(_handle_query, sql, callback, **kwargs)
+
 
 def main():
     global duckdb_con, executor
@@ -119,6 +124,7 @@ def main():
     server = riffq.Server("127.0.0.1:55502")
     server.on_query(handle_query)
     server.start()
+
 
 if __name__ == "__main__":
     main()

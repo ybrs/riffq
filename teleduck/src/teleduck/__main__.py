@@ -1,6 +1,7 @@
 from .server import run_server
 import click
 
+
 @click.command()
 @click.argument("db_file", type=click.Path())
 @click.option("--host", default="127.0.0.1", show_default=True, help="Host to listen on")
@@ -21,7 +22,13 @@ import click
 @click.option("--use-tls/--no-use-tls", "use_tls", default=True, show_default=True, help="Use TLS for the server")
 @click.option("--tls-cert-file", default=None, type=click.Path(), help="Path to TLS certificate")
 @click.option("--tls-key-file", default=None, type=click.Path(), help="Path to TLS key")
-@click.option("--read-only/--no-read-only", "read_only", default=False, show_default=True, help="Open database in read-only mode")
+@click.option(
+    "--read-only/--no-read-only",
+    "read_only",
+    default=False,
+    show_default=True,
+    help="Open database in read-only mode",
+)
 def main(
     db_file: str,
     host: str,
@@ -44,6 +51,7 @@ def main(
         tls_key_file=tls_key_file,
         read_only=read_only,
     )
+
 
 if __name__ == "__main__":
     main()

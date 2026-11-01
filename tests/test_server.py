@@ -1,14 +1,11 @@
 import multiprocessing
 import socket
-import subprocess
-import sys
 import time
-from pathlib import Path
 
 import psycopg
 import unittest
 from helpers import stop_server
-import pyarrow as pa
+
 
 def _run_server(port: int):
     import riffq
@@ -19,7 +16,7 @@ def _run_server(port: int):
         # modern pyarrow
         if hasattr(rdr, "__arrow_c_stream__"):
             capsule = rdr.__arrow_c_stream__()
-        else:            
+        else:
             from pyarrow.cffi import export_stream  # type: ignore
             capsule = export_stream(rdr)
         callback(capsule)
@@ -46,7 +43,7 @@ def _run_server(port: int):
                 names=["a", "b", "c", "d"],
             )
             return send_batch(batch, callback)
-                    
+
         if sql_clean == "select bool":
             batch = pa.record_batch([pa.array([True], pa.bool_())], names=["flag"])
             return send_batch(batch, callback)
@@ -65,6 +62,7 @@ def _run_server(port: int):
     server = riffq.Server(f"127.0.0.1:{port}")
     server.on_query(handle_query)
     server.start()
+
 
 class ServerTest(unittest.TestCase):
     @classmethod
@@ -140,6 +138,7 @@ class ServerTest(unittest.TestCase):
             cur.execute("COMMIT")
             self.assertEqual(cur.statusmessage, "COMMIT")
         conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

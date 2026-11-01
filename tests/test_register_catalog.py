@@ -4,7 +4,6 @@ import time
 import psycopg
 import unittest
 from helpers import stop_server
-import pyarrow as pa
 
 
 def _run_server(port: int):
@@ -48,7 +47,7 @@ class RegisterCatalogTest(unittest.TestCase):
         stop_server(cls.proc)
 
     def test_registered_objects(self):
-        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/db")
+        conn = psycopg.connect(f"postgresql://user@127.0.0.1:{self.port}/mydb")
         with conn.cursor() as cur:
             cur.execute("SELECT datname FROM pg_catalog.pg_database WHERE datname='mydb'")
             self.assertEqual(cur.fetchone()[0], "mydb")

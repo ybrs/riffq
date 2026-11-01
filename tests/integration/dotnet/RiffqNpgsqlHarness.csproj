@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Npgsql harness the .NET integration tier runs against a fixture server.
+    It prints one JSON document on stdout; the Python side asserts on it, the
+    same split the Java harnesses use.
+
+    Npgsql is pinned to an exact version (no floating range) and
+    RestorePackagesWithLockFile records every resolved package and its content
+    hash in packages.lock.json. setup_toolchain.sh then restores in locked
+    mode, which fails rather than silently resolving something new, so a cold
+    container rebuilds byte-identical dependencies.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>RiffqNpgsqlHarness</AssemblyName>
+    <RootNamespace>RiffqNpgsqlHarness</RootNamespace>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <!-- Keep the build self-contained and quiet: no telemetry ping, no first-run
+         banner, and no NuGet audit call-out to a vulnerability service. -->
+    <NuGetAudit>false</NuGetAudit>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Npgsql" Version="9.0.5" />
+  </ItemGroup>
+
+</Project>

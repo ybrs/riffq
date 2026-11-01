@@ -1,13 +1,11 @@
 import multiprocessing
 import socket
-import subprocess
-import sys
 import time
-from pathlib import Path
 
 import psycopg
 import unittest
 from helpers import stop_server
+
 
 def _run_server(port: int):
     import riffq

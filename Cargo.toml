@@ -1,6 +1,6 @@
 [package]
 name = "riffq"
-version = "0.1.11"
+version = "0.3.0"
 edition = "2024"
 
 [lib]
@@ -16,9 +16,9 @@ incremental = true
 codegen-units = 4
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module", "chrono"] }
 
-pgwire = "0.40.0"
+pgwire = "0.42"
 # pgwire = { git = "https://github.com/ybrs/pgwire", branch = "expose-sni", package = "pgwire" }
 
 bytes = "1.5"
@@ -26,22 +26,23 @@ tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 async-trait = "0.1"
 hex = "0.4.3"
-postgres-types = "0.2"
+postgres-types = { version = "0.2", features = ["with-chrono-0_4"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
 rustls-pki-types = "1"
-arrow = { version = "58.0.0", features = ["ffi", "canonical_extension_types"] }
+arrow = { version = "59.3.2", features = ["ffi", "canonical_extension_types"] }
 sqlparser = "0.62"
 
 
 chrono = "0.4.41"
 log = "0.4"
-datafusion = "54.0.0"
-# Pinned to a pg_catalog main commit (DataFusion 54). Bump the rev to pull in
-# newer pg_catalog changes.
-datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", rev = "984e4962e977058fba33516e69e89a347683afcf", package = "datafusion_pg_catalog" }
+datafusion = "55.2.0"
+# The published pg_catalog, pinned to the merged main tip so a rebuild always
+# resolves the same sources. Bump the rev (and run cargo update) whenever a new
+# pg_catalog main is meant to flow into riffq.
+datafusion_pg_catalog = { git = "https://github.com/ybrs/pg_catalog", rev = "b39f8bc995ab7d88146e20fdca3fd37b6f80c912", package = "datafusion_pg_catalog" }
 
 env_logger = "0.11.8"
 
 
-arrow-schema  = { version = "58.0.0" }
+arrow-schema  = { version = "59.3.2" }

@@ -29,7 +29,10 @@ class FakeAbortCursor:
     def execute(self, sql):
         s = sql.strip().lower()
         if self._conn.aborted:
-            raise UpstreamError("ERROR:  current transaction is aborted, commands ignored until end of transaction block")
+            raise UpstreamError(
+                "ERROR:  current transaction is aborted, "
+                "commands ignored until end of transaction block"
+            )
         if s == "select bad":
             self._conn.aborted = True
             raise UpstreamError("ERROR:  bad query", code="42846")
@@ -94,4 +97,3 @@ class QueryProxyAbortTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

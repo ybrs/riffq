@@ -1,5 +1,5 @@
 """
-This is for simply printing out queries coming from postgresl client and sending it to 
+This is for simply printing out queries coming from postgresl client and sending it to
 postgresql server.
 """
 import logging
@@ -16,8 +16,6 @@ from psycopg import RawCursor
 
 
 logging.basicConfig(level=logging.DEBUG)
-
-
 
 
 class Connection(riffq.BaseConnection):
@@ -107,6 +105,7 @@ class Connection(riffq.BaseConnection):
         self._handle_query(sql, callback, **kwargs)
         # self.executor.submit(self._handle_query, sql, callback, **kwargs)
 
+
 def main():
 
     parser = argparse.ArgumentParser(description="Show columns and types for a SQL query")
@@ -131,6 +130,7 @@ def main():
 
     server = riffq.RiffqServer("0.0.0.0:5433", connection_cls=Connection)
     server.start(tls=False, catalog_emulation=False, server_version="17.02")
+
 
 if __name__ == "__main__":
     main()

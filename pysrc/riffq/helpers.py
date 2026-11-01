@@ -1,11 +1,18 @@
 """Helper utilities for building Arrow results.
 
-Currently provides `to_arrow` for constructing an Arrow C Stream from a simple
-schema description and row data. This is handy for small, programmatic results
-without depending on a database engine.
+Provides `to_arrow` for constructing an Arrow C Stream from a simple schema
+description and row data (handy for small, programmatic results without
+depending on a database engine).
 """
 
 import pyarrow as pa
+
+# The first OID PostgreSQL leaves to user objects. Retained for hosts and
+# tests that assert their objects sit clear of the built-in range; the OIDs
+# themselves come from the catalog's oid registry (or are supplied verbatim by
+# a lazy source), never derived from names here -- riffq ships no hashing.
+FIRST_USER_OID = 16384
+
 
 _type = {
     "int": pa.int64(),
@@ -18,7 +25,7 @@ _type = {
 }
 
 
-def to_arrow(schema_desc:list[dict], rows:list) -> 'pa._ffi.lib.PyCapsule':
+def to_arrow(schema_desc: list[dict], rows: list) -> 'pa._ffi.lib.PyCapsule':
     """Build an Arrow C Stream from schema and rows for regular python values
 
     The schema is a list of dicts like `{ "name": str, "type": str }` where
@@ -28,7 +35,7 @@ def to_arrow(schema_desc:list[dict], rows:list) -> 'pa._ffi.lib.PyCapsule':
 
     Example usage:
     >>> callback(to_arrow([{"name": "val", "type": "int"}], [
-        [1], 
+        [1],
         [2]
     ]))
 

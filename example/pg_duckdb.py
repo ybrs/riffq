@@ -4,6 +4,7 @@ import pyarrow as pa
 import riffq
 logging.basicConfig(level=logging.DEBUG)
 
+
 class Connection(riffq.BaseConnection):
     def _handle_query(self, sql, callback, **kwargs):
         cur = duckdb_con.cursor()
@@ -29,7 +30,7 @@ class Connection(riffq.BaseConnection):
                 ["transaction_isolation"],
             )
             return self.send_reader(batch, callback)
-        
+
         if text == "select current_schema()":
             batch = self.arrow_batch(
                 [pa.array(["public"])],
@@ -51,19 +52,21 @@ class Connection(riffq.BaseConnection):
     def handle_query(self, sql, callback=callable, **kwargs):
         self.executor.submit(self._handle_query, sql, callback, **kwargs)
 
+
 def main():
     global duckdb_con
     duckdb_con = duckdb.connect()
     duckdb_con.execute(
         """
-        CREATE VIEW klines AS 
-        SELECT * 
+        CREATE VIEW klines AS
+        SELECT *
         FROM 'data/klines.parquet'
         """
     )
     server = riffq.RiffqServer("127.0.0.1:5433", connection_cls=Connection)
     server.set_tls("certs/server.crt", "certs/server.key")
     server.start()
+
 
 if __name__ == "__main__":
     main()

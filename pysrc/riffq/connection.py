@@ -15,7 +15,6 @@ accept an Arrow C Stream capsule for result sets, or an error.
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Type
 import pyarrow as pa
 from ._riffq import Server
@@ -24,6 +23,7 @@ import logging
 import os
 
 logger = logging.getLogger('riffq:connection')
+
 
 class BaseConnection(metaclass=ABCMeta):
     """Abstract per client connection.
@@ -77,7 +77,14 @@ class BaseConnection(metaclass=ABCMeta):
         )
 
     @abstractmethod
-    def handle_auth(self, user: str, password: str, host: str, database: Optional[str] = None, callback: Callable[..., None] = lambda *a, **k: None) -> None:
+    def handle_auth(
+        self,
+        user: str,
+        password: str,
+        host: str,
+        database: Optional[str] = None,
+        callback: Callable[..., None] = lambda *a, **k: None,
+    ) -> None:
         """Authenticate a client.
 
         Args:
@@ -89,12 +96,24 @@ class BaseConnection(metaclass=ABCMeta):
         """
         return callback(user == "user" and password == "secret")
 
-    def handle_connect(self, ip: str, port: int, server_name:str=None, callback: Callable[..., None] = lambda *a, **k: None) -> None:
+    def handle_connect(
+        self,
+        ip: str,
+        port: int,
+        server_name: str = None,
+        metadata: Optional[Dict[str, str]] = None,
+        callback: Callable[..., None] = lambda *a, **k: None,
+    ) -> None:
         """Handle successful TCP connection establishment.
 
         Args:
             ip: Remote peer IP address.
             port: Remote peer port.
+            server_name: TLS SNI name the client asked for, if any.
+            metadata: The handshake as the client sent it (`user`,
+                `database`, `application_name`, `client_encoding`, ...),
+                verbatim. A connect-time snapshot: a later `SET` updates the
+                connection's session, not this dict.
             callback: Invoke with `True` to accept or raise to reject.
         """
         return callback(True)
@@ -146,7 +165,7 @@ class RiffqServer:
         self.connections: Dict[int, BaseConnection] = {}
         self.connection_cls: Type[BaseConnection] = connection_cls
 
-    def set_tls(self, crt:str, key:str):
+    def set_tls(self, crt: str, key: str):
         """Enable TLS with certificate and key files.
 
         Args:
@@ -165,6 +184,12 @@ class RiffqServer:
 
     def set_lazy_catalog(self, source: Any) -> None:
         """Install a lazy (callback-driven) catalog source for catalog emulation.
+
+        Besides the four required methods (`databases`, `schemas`, `relations`,
+        `columns`), a source may implement two optional ones: `config(callback)`
+        reports `pg_catalog.pg_config` rows and `settings(callback)` reports
+        `pg_catalog.pg_settings` rows; a row whose name matches a built-in one
+        replaces it. Omit them and the built-ins serve their defaults.
 
         Instead of eagerly pre-registering every database/schema/table with
         `register_database`/`register_schema`/`register_table`, supply one
@@ -192,6 +217,13 @@ class RiffqServer:
         source's objects. A duplicate object (same name in the same scope) is an
         error; a source object whose name collides with a built-in replaces it.
 
+        The databases ``databases(callback)`` reports are the connectable ones:
+        each gets its own catalog, built on first connect, and a client asking
+        for a name the source does not report is refused with
+        ``FATAL 3D000 database "..." does not exist``. The source is asked afresh
+        on every connection, so a database it starts reporting after the server
+        started is reachable without a restart.
+
         When a lazy source is set, the eager ``register_*`` registrations are
         ignored. Requires ``start(catalog_emulation=True)``.
 
@@ -201,14 +233,26 @@ class RiffqServer:
         self._server.set_lazy_catalog(source)
 
     def register_database(self, database_name: str) -> None:
-        """Register a logical database for catalog emulation.
+        """Register a database for catalog emulation.
 
         When `start(catalog_emulation=True)` is used, the server responds to
         client metadata queries (pg_catalog) using entries registered via these
         helpers.
 
+        A registered database is also a *connectable* one, and the only kind:
+        each gets its own catalog, built the first time a client connects to it,
+        and a client asking for any other name is refused with
+        ``FATAL 3D000 database "..." does not exist`` as PostgreSQL does. So the
+        name registered here is the name clients must use in their connection
+        string, and a server that emulates the catalog needs at least one - with
+        none, `start(catalog_emulation=True)` raises rather than accepting a port
+        it could never serve anyone on.
+
+        None of this applies without `catalog_emulation`: there the host answers
+        catalog queries itself and any database name connects.
+
         Args:
-            database_name: Name of the database to expose via `pg_catalog`.
+            database_name: Name of the database to expose and accept.
         """
         self._server.register_database(database_name)
 
@@ -221,7 +265,13 @@ class RiffqServer:
         """
         self._server.register_schema(database_name, schema_name)
 
-    def register_table(self, database_name: str, schema_name: str, table_name: str, columns: List[Dict[str, Dict[str, Any]]]) -> None:
+    def register_table(
+        self,
+        database_name: str,
+        schema_name: str,
+        table_name: str,
+        columns: List[Dict[str, Dict[str, Any]]],
+    ) -> None:
         """Register a table and its columns for catalog emulation.
 
         The `columns` argument describes each column as a single key dict mapping
@@ -246,7 +296,15 @@ class RiffqServer:
             self.connections[connection_id] = conn
         return conn
 
-    def handle_auth(self, connection_id: int, user: str, password: str, host: str, database: Optional[str] = None, callback: Callable[..., None] = lambda *a, **k: None) -> None:
+    def handle_auth(
+        self,
+        connection_id: int,
+        user: str,
+        password: str,
+        host: str,
+        database: Optional[str] = None,
+        callback: Callable[..., None] = lambda *a, **k: None,
+    ) -> None:
         """Forward an authentication request to the connection instance.
 
         Args:
@@ -261,20 +319,37 @@ class RiffqServer:
         conn = self.get_connection(connection_id=connection_id)
         conn.handle_auth(user, password, host, database=database, callback=callback)
 
-    def handle_connect(self, connection_id: int, ip: str, port: int, server_name:Optional[str]=None, callback: Callable[..., None] = lambda *a, **k: None) -> None:
+    def handle_connect(
+        self,
+        connection_id: int,
+        ip: str,
+        port: int,
+        server_name: Optional[str] = None,
+        metadata: Optional[Dict[str, str]] = None,
+        callback: Callable[..., None] = lambda *a, **k: None,
+    ) -> None:
         """Forward a connect notification to the connection instance.
 
         Args:
             connection_id: Server assigned identifier for this client.
             ip: Remote peer IP address.
             port: Remote peer port.
+            server_name: TLS SNI name the client asked for, if any.
+            metadata: The handshake as the client sent it (see
+                `BaseConnection.handle_connect`), forwarded as is.
             callback: Function to acknowledge handling.
         """
         # logger.info(f"new connnection {connection_id} {ip} {port}")
         conn = self.get_connection(connection_id=connection_id)
-        conn.handle_connect(ip, port, callback=callback, server_name=server_name)
+        conn.handle_connect(ip, port, callback=callback, server_name=server_name, metadata=metadata)
 
-    def handle_query(self, sql: str, callback: Callable[..., None], connection_id: Optional[int] = None, **kwargs: Any) -> None:
+    def handle_query(
+        self,
+        sql: str,
+        callback: Callable[..., None],
+        connection_id: Optional[int] = None,
+        **kwargs: Any,
+    ) -> None:
         """Forward a query to the connection instance.
 
         Args:
@@ -287,7 +362,13 @@ class RiffqServer:
         conn = self.get_connection(connection_id=connection_id)
         conn.handle_query(sql, callback=callback, **kwargs)
 
-    def handle_disconnect(self, connection_id: int, ip: str, port: int, callback: Callable[..., None] = lambda *a, **k: None) -> None:
+    def handle_disconnect(
+        self,
+        connection_id: int,
+        ip: str,
+        port: int,
+        callback: Callable[..., None] = lambda *a, **k: None,
+    ) -> None:
         """Forward a disconnect notification and release the connection.
 
         Args:
@@ -313,13 +394,45 @@ class RiffqServer:
         """
         self._server.handle_shutdown(callback)
 
+    def get_client_settings(self, connection_id: int) -> Dict[str, str]:
+        """The live session settings for a connection, as the session holds them.
+
+        Answers the variables the catalog stores per connection
+        (`application_name`, `datestyle`, `search_path`, `timezone`,
+        `session_user`): a `SET` the client sent shows up here, unlike in
+        `get_client_metadata`, which is the connect-time snapshot.
+
+        Raises:
+            KeyError: For an id that never connected, was refused, or already
+                disconnected.
+            RuntimeError: For a live connection with no session - a server
+                without catalog emulation builds none.
+        """
+        return self._server.get_client_settings(connection_id)
+
+    def get_client_metadata(self, connection_id: int) -> Optional[Dict[str, str]]:
+        """The handshake metadata for a live connection, as the client sent it.
+
+        Answers the same map the `on_connect` handler receives as `metadata`:
+        `user`, `database`, and every startup parameter (`application_name`,
+        `client_encoding`, ...), verbatim. This is a connect-time snapshot,
+        not live session state - a later `SET` updates the connection's
+        session, not this dict.
+
+        Raises:
+            KeyError: For an id that never connected, was refused, or already
+                disconnected. Query it while the connection is alive.
+        """
+        return self._server.get_client_metadata(connection_id)
+
     def start(self, tls: bool = False, catalog_emulation: bool = False, server_version: Optional[str] = None) -> None:
         """Start the server event loop.
 
         Args:
             tls: Turn ssl/tls on or off. When tls is true, remember you need to set server.set_tls(cert_path, key_path)
             catalog_emulation: Turn pg_catalog & information_schema query handling by riffq.
-            server_version: Server version string eg: "17.6 (Homebrew)" If you omit this, we use hardcoded string in src/lib.rs
+            server_version: Server version string eg: "17.6 (Homebrew)".
+                If you omit this, we use the hardcoded string in src/lib.rs.
         Returns:
             None. Starts the underlying Rust server loop.
         """

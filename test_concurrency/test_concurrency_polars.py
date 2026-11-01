@@ -1,18 +1,17 @@
 import unittest
 import time
 import logging
-from datetime import datetime
 from sqlalchemy import create_engine, text
 from multiprocessing import Process
-import riffq
-import logging
 
 from utils import wait_for_server, stop_server, ensure_started
 logging.basicConfig(level=logging.DEBUG)
 
+
 def start_polars_server():
     from server_polars import main
     main()
+
 
 def run_heavy_query():
     logging.info("sending long running query")
@@ -37,7 +36,7 @@ class TestPolarsConcurrency(unittest.TestCase):
 
     def test_concurrent_queries(self):
         engine = wait_for_server(port=55503)
-        
+
         fast_query_times = []
 
         heavy_proc = Process(target=run_heavy_query)

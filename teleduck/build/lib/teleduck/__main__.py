@@ -1,6 +1,7 @@
 from .server import run_server
 import click
 
+
 @click.command()
 @click.argument("db_file", type=click.Path())
 @click.option("--host", default="127.0.0.1", show_default=True, help="Host to listen on")
@@ -26,6 +27,7 @@ def main(
     sqls: tuple[str, ...],
 ):
     run_server(db_file, port, host=host, sql_scripts=list(sql_scripts), sql=list(sqls))
+
 
 if __name__ == "__main__":
     main()

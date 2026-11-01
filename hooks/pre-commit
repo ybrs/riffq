@@ -1,0 +1,47 @@
+#!/bin/sh
+# Reject any commit that does not pass ./run_all_tests.sh in full.
+#
+# The pipeline itself lives in run_all_tests.sh, which is tracked in the repo and
+# runnable by hand. This hook adds only the part that is specific to committing:
+# reformatting the tree and refusing a commit whose staged snapshot no longer
+# matches it.
+#
+# There are no conditionals here and no environment-variable escape hatch: a
+# one-line README edit rebuilds the extension and runs every suite including the
+# ODBC, JDBC, .NET and CloudBeaver tiers. The only way past it is
+# `git commit --no-verify`, which git implements itself and no hook can disable.
+# A commit made that way is unverified.
+set -e
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+if [ ! -x ./run_all_tests.sh ]; then
+    echo "pre-commit: ./run_all_tests.sh missing or not executable" >&2
+    exit 1
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+    toolchain_bin=/tmp/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin
+    if [ -x "$toolchain_bin/cargo" ]; then
+        PATH="$toolchain_bin:$PATH"
+        CARGO_HOME=${CARGO_HOME:-/tmp/.cargo}
+        RUSTUP_HOME=${RUSTUP_HOME:-/tmp/.rustup}
+        export PATH CARGO_HOME RUSTUP_HOME
+    fi
+fi
+
+# cargo fmt REWRITES the tree rather than just reporting on it, so the commit is
+# rejected whenever it had anything to do: the staged snapshot no longer matches
+# the formatted source, and committing it would record code that was never the
+# code that got tested. Review the reformatting, re-stage, commit again.
+echo "pre-commit: cargo fmt"
+tree_before=$(git status --porcelain)
+cargo fmt
+tree_after=$(git status --porcelain)
+if [ "$tree_before" != "$tree_after" ]; then
+    echo "pre-commit: cargo fmt reformatted the tree - review the changes and re-stage" >&2
+    exit 1
+fi
+
+./run_all_tests.sh

@@ -5,7 +5,7 @@ from pathlib import Path
 # Make `teleduck` importable regardless of how the suite is launched.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from teleduck.server import duckdb_type_to_oid
+from teleduck.server import duckdb_type_to_oid  # noqa: E402 - importable only once sys.path is set above
 
 
 class DuckdbTypeToOidTest(unittest.TestCase):

@@ -86,7 +86,7 @@ goes stale until you re-register.
 
 For a live source, install a **lazy catalog** instead. You supply one source
 object and Riffq pulls catalog metadata from it on *every* `pg_catalog` /
-`information_schema` scan, so the catalog always reflects the current state —
+`information_schema` scan, so the catalog always reflects the current state -
 tables created after startup included. Nothing is cached.
 
 ```python
@@ -126,19 +126,35 @@ class MyCatalog:
             {"name": "name", "type_oid": 25, "nullable": True},   # 25 = text
         ])
 
+    # Both methods below are OPTIONAL. Omit them and pg_config / pg_settings
+    # serve their built-in defaults. Implement them to override or extend those
+    # rows; a row whose ``name`` matches a built-in one replaces it.
+    def config(self, callback):
+        # -> pg_catalog.pg_config build settings - report our own version
+        callback([{"name": "VERSION", "setting": "riffq 0.4"}])
+
+    def settings(self, callback):
+        # -> pg_catalog.pg_settings runtime parameters - override the live
+        # value of session-mutable ones (here, ``search_path``)
+        callback([{"name": "search_path", "setting": "public"}])
+
 server.set_lazy_catalog(MyCatalog())
 server.start(catalog_emulation=True)
 ```
 
 ### Rules of the contract
 
-- **You own the OIDs.** Riffq writes them through verbatim. They must be stable
-  across calls (so catalog joins like `pg_class.oid = pg_attribute.attrelid`
-  resolve) and unique among your objects. Keep them **above the built-in range**
-  so they don't collide with built-in rows on OID joins — use `16384`
-  (PostgreSQL's first normal object id) as a safe base, as the example and
-  Teleduck do. A common trick is `16384 + stable_hash(name)` (see the example
-  below).
+- **You own the OIDs.** Riffq writes them through verbatim and ships no
+  derivation of its own. They must be stable across calls (so catalog joins
+  like `pg_class.oid = pg_attribute.attrelid` resolve) and unique among your
+  objects - UNIQUENESS INCLUDED: if you derive OIDs rather than store them,
+  enforce it yourself, the way Teleduck's assigner records every assignment
+  and probes to the next free number on a collision. Keep them **above the
+  built-in range** (`16384`, PostgreSQL's first normal object id) so they
+  never collide with built-in rows on OID joins. If your source owns state,
+  prefer a recorded counter over hashing, as `example/lazy_catalog.py` shows;
+  declared (`register_*`) objects get exactly that from riffq's persistent
+  oid registry (`start(oid_registry_path=...)`).
 - **`type_oid` is a `pg_type` OID** you choose, e.g. `23` int4, `20` int8,
   `25` text, `16` bool, `701` float8, `1700` numeric, `1082` date, `1114`
   timestamp. This keeps Riffq independent of your engine's type system.
@@ -148,9 +164,18 @@ server.start(catalog_emulation=True)
   (e.g. two tables of the same name in one schema) is an **error** surfaced to the
   client.
 - **Errors propagate.** An exception raised in any source method is returned to
-  the SQL client as an error — it never fails silently.
-- **Opt-in & exclusive.** When a lazy source is set, the eager
-  `register_database`/`register_schema`/`register_table` calls are ignored.
+  the SQL client as an error - it never fails silently.
+- **`config` / `settings` override the server variables.** The two optional
+  methods report `pg_catalog.pg_config` and `pg_catalog.pg_settings` rows;
+  a row whose name matches a built-in replaces it, the rest keep their
+  defaults. Use them to advertise the embedding's own version or to pin a
+  session-mutable default the engine behind riffq actually honors.
+- **Composable with declarations.** With a lazy source AND `register_*` calls
+  configured, the catalog serves their union: declared base databases plus
+  whatever the source reports, a database both contribute to merging its
+  contents. A database or relation name BOTH report is refused at scan time
+  with an error naming it; a shared schema name merges to the declared side,
+  which is how live tables mount into a declared database's `public`.
   Requires `start(catalog_emulation=True)`.
 
 A complete runnable example backed by an in-memory dict (no external engine) is
@@ -278,9 +303,44 @@ WHERE oid = 'myhash'::oid;
 
 ```
 
+## Databases are connectable, not just listed
+
+A registered database is the unit of isolation. Each one gets its own catalog,
+built the first time a client connects to it, showing that database's schemas
+and tables and no other database's - the same thing a PostgreSQL connection
+sees. `pg_database` still lists every database from any of them.
+
+That makes the registered name the name clients connect under:
+
+```python
+server.register_database("mydb")
+server.start(catalog_emulation=True)
+```
+
+```
+psql "postgresql://user@127.0.0.1:5433/mydb"   # served
+psql "postgresql://user@127.0.0.1:5433/other"  # FATAL: database "other" does not exist
+```
+
+Connecting under an unregistered name is refused with PostgreSQL's own
+`3D000`, and the error lists the databases that do exist. A server started with
+`catalog_emulation=True` and no databases at all raises from `start()`, rather
+than binding a port it could never serve anyone on.
+
+With a lazy source the reported databases play the same role, and because the
+source is consulted on every connection, a database it starts reporting later is
+reachable without a restart.
+
+None of this applies without `catalog_emulation`: there riffq holds no catalog,
+the host answers metadata queries itself, and any database name connects.
+
 ## API Reference
 
-### Register a logical database name 
+### Register a database name
+
+Registers the database for `pg_catalog` and makes it connectable under that
+name. See [Databases are connectable, not just
+listed](#databases-are-connectable-not-just-listed).
 
 ```python
 RiffqServer.register_database(database_name: str) -> None:
@@ -305,7 +365,9 @@ RiffqServer.register_table(database_name: str,
 
 Pull catalog metadata from `source` on every scan instead of snapshotting it.
 See [Lazy (callback-driven) catalog](#lazy-callback-driven-catalog) for the
-source object's contract. Mutually exclusive with the eager `register_*` calls.
+source object's contract. Composable with the `register_*` declarations: both
+configured means their union, with database/relation name collisions refused
+loudly and shared schema names merging to the declared side.
 
 ```python
 RiffqServer.set_lazy_catalog(source) -> None:

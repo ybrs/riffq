@@ -7,7 +7,7 @@ import time
 import unittest
 from pathlib import Path
 import duckdb
-from server_readiness import wait_for_catalog
+from server_readiness import duckdb_database_name, wait_for_catalog
 
 
 def _run_server(db_file, port, sqls):
@@ -39,6 +39,7 @@ class CheckpointOnShutdownTest(unittest.TestCase):
     def setUpClass(cls):
         cls.port = 55463
         fd, cls.db_file = tempfile.mkstemp(suffix=".db")
+        cls.database_name = duckdb_database_name(cls.db_file)
         os.close(fd)
         os.unlink(cls.db_file)
         sqls = ["CREATE TABLE t(v INTEGER);", "INSERT INTO t VALUES (1), (2), (3);"]
@@ -47,7 +48,7 @@ class CheckpointOnShutdownTest(unittest.TestCase):
         )
         cls.proc.start()
         _wait_for_socket(cls.port)
-        wait_for_catalog(cls.port, "db", "SELECT count(*) FROM t", 3)
+        wait_for_catalog(cls.port, cls.database_name, "SELECT count(*) FROM t", 3)
 
     @classmethod
     def tearDownClass(cls):

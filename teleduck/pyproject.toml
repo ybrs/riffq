@@ -7,7 +7,7 @@ name = "teleduck"
 version = "0.1.0"
 description = "Serve DuckDB over PostgreSQL protocol using riffq"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 dependencies = [
     "duckdb",
     "pyarrow",

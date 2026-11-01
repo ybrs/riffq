@@ -1,5 +1,47 @@
 # Release Notes
 
+## release-0.4.0
+
+### Lazy (callback-driven) catalog
+
+The host can now supply one source object and riffq pulls `pg_catalog` /
+`information_schema` rows from it on every scan, so tables created after
+startup show up immediately with nothing cached: `databases(callback)`,
+`schemas(database, callback)`, `relations(database, schema, callback)` and
+`columns(database, schema, relation, callback)`, plus optional
+`config(callback)` / `settings(callback)` overrides for `pg_config` and
+`pg_settings`. It composes with the `register_*` declarations (both
+configured means their union, with doubly-reported databases and relations
+refused loudly). The source owns its OIDs (stable, unique, above 16384);
+declared objects get theirs from a persistent registry via
+`start(oid_registry_path=...)`. See `docs/catalog.md` and
+`example/lazy_catalog.py`; teleduck uses this path against live DuckDB.
+
+### Handshake metadata and live session settings
+
+`on_connect` handlers receive the client's startup handshake as a `metadata`
+dict, and `server.get_client_metadata(connection_id)` answers the same
+snapshot later (unknown ids raise `KeyError`). `SET` on a session variable
+the catalog owns is now applied to the connection's session and answered
+with the `SET` tag, and `server.get_client_settings(connection_id)` reads
+the live variables back. `SHOW` additionally answers `timezone`,
+`session_user`, `session_authorization`, `server_version` and
+`transaction_isolation`, and `current_user` / `session_user` /
+`current_role` report the authenticated user.
+
+Heads up for existing `on_connect` handlers: the new `metadata` keyword
+argument breaks handlers with an exact signature. Accept `**kwargs` or add
+`metadata=None`.
+
+### Dependencies
+
+- `datafusion` 54.0.0 -> 55.2.0, `arrow` / `arrow-schema` 58.x -> 59.3.2,
+  `pgwire` 0.40 -> 0.42.
+- `datafusion_pg_catalog` is consumed from a pinned git rev instead of a
+  version; its eager registration functions were removed in favor of
+  declarations (`DatabaseDef` / `SchemaDef` / `RelationDef`). This does not
+affect riffq's Python API.
+
 ## release-0.3.0
 
 ### Breaking: no hashing in riffq - `riffq.helpers.stable_oid` is removed

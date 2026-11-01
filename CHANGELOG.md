@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.1
+
+Maintenance release: dependency upgrades and the Python version floor.
+Nothing else changed.
+
+### Dependencies
+
+- `pyo3` 0.28 -> 0.30 (resolves 0.30.1), closing the upstream security
+  advisories. No source changes were needed: the extension already used
+  the `Python::attach` / `Bound` APIs.
+- Python `sqlparse` 0.5.5 -> 0.6.0 in `requirements.txt`, likewise for the
+  upstream fixes. Only the debug query proxy uses it.
+- `pyo3` 0.30 dropped Python 3.8, so the package floor moves to Python 3.9
+  (`pyproject.toml`, `teleduck/pyproject.toml`). Development and tests need
+  Python 3.10 or newer (`requirements.txt` pins `sqlparse==0.6.0`, which
+  requires 3.10+); see the README.
+
 ## 0.4.0
 
 ### Lazy catalog path

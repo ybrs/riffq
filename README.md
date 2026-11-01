@@ -315,7 +315,10 @@ pip install riffq --pre
 
 ## Running Locally
 
-Install the development requirements and run the test suite:
+Install the development requirements and run the test suite. Development
+and tests need Python 3.10 or newer: `requirements.txt` pins
+`sqlparse==0.6.0`, which requires 3.10+. (The published package supports
+Python 3.9 and newer.)
 
 ```bash
 git clone git@github.com:ybrs/riffq.git

@@ -16,7 +16,7 @@ incremental = true
 codegen-units = 4
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["extension-module", "chrono"] }
+pyo3 = { version = "0.30", features = ["extension-module", "chrono"] }
 
 pgwire = "0.42"
 # pgwire = { git = "https://github.com/ybrs/pgwire", branch = "expose-sni", package = "pgwire" }

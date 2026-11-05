@@ -19,7 +19,7 @@ import time
 import unittest
 
 import psycopg
-from helpers import stop_server
+from helpers import launch_server_process, stop_server
 
 import pyarrow as pa
 
@@ -108,19 +108,7 @@ class ClientMetadataTest(unittest.TestCase):
         cls.manager = multiprocessing.Manager()
         cls.seen = cls.manager.dict()
         cls.gone = cls.manager.list()
-        cls.proc = multiprocessing.Process(
-            target=_run_server, args=(cls.port, cls.seen, cls.gone), daemon=True
-        )
-        cls.proc.start()
-        start = time.time()
-        while time.time() - start < 10:
-            with socket.socket() as sock:
-                if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
-                    break
-            time.sleep(0.1)
-        else:
-            stop_server(cls.proc)
-            raise RuntimeError("Server did not start")
+        cls.proc = launch_server_process(_run_server, cls.port, args=(cls.seen, cls.gone))
 
     @classmethod
     def tearDownClass(cls):
@@ -146,10 +134,18 @@ class ClientMetadataTest(unittest.TestCase):
         """The `on_connect` handler sees the client's startup parameters."""
         # Other tests in this class connect too, and every handshake is
         # recorded, so scope the assertion to this test's own connection.
+        # The `seen` write lands from the server subprocess (via the manager
+        # proxy), so poll for it: the client's connect returns as soon as the
+        # wire handshake completes, which can precede the server-side callback
+        # under load.
         self.seen.clear()
         with self.connect():
             pass
+        deadline = time.time() + 10
         by_id = dict(self.seen)
+        while len(by_id) != 1 and time.time() < deadline:
+            time.sleep(0.1)
+            by_id = dict(self.seen)
         self.assertEqual(len(by_id), 1)
         metadata = next(iter(by_id.values()))
         self.assertEqual(metadata["application_name"], ANNOUNCED_APP_NAME)

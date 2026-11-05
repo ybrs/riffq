@@ -7,25 +7,11 @@ pin that rule, the error a client sees when it trips over it, and the two ways i
 deliberately does not apply: a server that emulates no catalog, and a server
 whose lazy source gains a database while it runs.
 """
-import multiprocessing
-import socket
 import threading
-import time
 import unittest
 
 import psycopg
-from helpers import stop_server
-
-
-def _wait_for_port(port, timeout=30):
-    """Block until something is listening on `port`, or raise."""
-    start = time.time()
-    while time.time() - start < timeout:
-        with socket.socket() as sock:
-            if sock.connect_ex(("127.0.0.1", port)) == 0:
-                return
-        time.sleep(0.1)
-    raise RuntimeError(f"server never bound port {port}")
+from helpers import launch_server_process, stop_server
 
 
 def _handle_query(sql, callback, **kwargs):
@@ -64,11 +50,7 @@ class DatabaseAdmissionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.port = 55480
-        cls.proc = multiprocessing.Process(
-            target=_run_declaring_server, args=(cls.port,), daemon=True
-        )
-        cls.proc.start()
-        _wait_for_port(cls.port)
+        cls.proc = launch_server_process(_run_declaring_server, cls.port)
 
     @classmethod
     def tearDownClass(cls):
@@ -109,11 +91,7 @@ class NoCatalogEmulationAdmitsAnyDatabaseTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.port = 55481
-        cls.proc = multiprocessing.Process(
-            target=_run_server_without_catalog_emulation, args=(cls.port,), daemon=True
-        )
-        cls.proc.start()
-        _wait_for_port(cls.port)
+        cls.proc = launch_server_process(_run_server_without_catalog_emulation, cls.port)
 
     @classmethod
     def tearDownClass(cls):
@@ -203,11 +181,7 @@ class ConcurrentFirstConnectionsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.port = 55483
-        cls.proc = multiprocessing.Process(
-            target=_run_lazy_server, args=(cls.port,), daemon=True
-        )
-        cls.proc.start()
-        _wait_for_port(cls.port)
+        cls.proc = launch_server_process(_run_lazy_server, cls.port)
 
     @classmethod
     def tearDownClass(cls):

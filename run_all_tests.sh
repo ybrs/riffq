@@ -95,6 +95,20 @@ step "unittest teleduck/tests/" $PYTHON -m unittest discover -s teleduck/tests
 # loader reads it, so the pyodbc wheel resolves this toolchain's unixODBC rather
 # than the system one - which is why this goes through make rather than calling
 # unittest directly.
+# Fail fast when the ODBC tier would run but pyodbc cannot load: without this
+# the tier burns 90s and reports 17 import errors instead of one clear cause.
+# The two usual causes are a venv that never ran the toolchain setup and a
+# system without libtool's runtime (the wheel needs libltdl.so.7 to load
+# libodbc, and setup_toolchain.sh cannot provide a system library).
+if [ -f tests/integration/.toolchain/psqlodbc/lib/psqlodbcw.so ]; then
+    if ! LD_LIBRARY_PATH="tests/integration/.toolchain/unixodbc/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        "$PYTHON" -c "import pyodbc" 2>/dev/null; then
+        echo "run_all_tests: ODBC drivers present but pyodbc does not import;" >&2
+        echo "run: make integration-toolchain (installs pyodbc into venv/)" >&2
+        echo "and, if the import names libltdl.so.7: apt-get install libltdl7" >&2
+        exit 1
+    fi
+fi
 step "driver integration tests" make integration-test
 
 # The JDBC tier once per pinned pgjdbc release: clients ship whichever version

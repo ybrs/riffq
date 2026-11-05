@@ -21,13 +21,10 @@ require every OID to be unchanged. A separate test hands the server a registry
 FILE and then also reverses the DECLARATION order, which only the registry can
 survive.
 """
-import multiprocessing
-import socket
-import time
 import unittest
 
 import psycopg
-from helpers import stop_server
+from helpers import launch_server_process, stop_server
 import tempfile
 
 from riffq.helpers import FIRST_USER_OID
@@ -84,17 +81,6 @@ DATABASE_OID_PROBE = (
     "SELECT datname, oid FROM pg_catalog.pg_database "
     "WHERE datname IN ('db1', 'db2') ORDER BY datname"
 )
-
-
-def _wait_for_port(port, timeout=30):
-    """Block until something is listening on `port`, or raise."""
-    start = time.time()
-    while time.time() - start < timeout:
-        with socket.socket() as sock:
-            if sock.connect_ex(("127.0.0.1", port)) == 0:
-                return
-        time.sleep(0.1)
-    raise RuntimeError(f"server never bound port {port}")
 
 
 class LazyTwoDatabaseSource:
@@ -174,15 +160,7 @@ def _start_server(port, lazy):
     that static's starting state rather than re-creating it -- which is exactly
     the thing under test. It also avoids forking a multi-threaded parent.
     """
-    context = multiprocessing.get_context("spawn")
-    process = context.Process(target=_run_server, args=(port, lazy), daemon=True)
-    process.start()
-    try:
-        _wait_for_port(port, timeout=120)
-    except RuntimeError:
-        stop_server(process)
-        raise
-    return process
+    return launch_server_process(_run_server, port, args=(lazy,), start_method="spawn")
 
 
 def _collect_oids(port, connect_order):
@@ -311,19 +289,12 @@ def _run_server_with_registry(port, registry_path, declaration_order):
 
 def _start_server_with_registry(port, registry_path, declaration_order):
     """Launch a registry-backed server in a fresh process and wait for it."""
-    context = multiprocessing.get_context("spawn")
-    process = context.Process(
-        target=_run_server_with_registry,
-        args=(port, registry_path, declaration_order),
-        daemon=True,
+    return launch_server_process(
+        _run_server_with_registry,
+        port,
+        args=(registry_path, declaration_order),
+        start_method="spawn",
     )
-    process.start()
-    try:
-        _wait_for_port(port, timeout=120)
-    except RuntimeError:
-        stop_server(process)
-        raise
-    return process
 
 
 class RegistryFileSurvivesReorderedDeclarationsTest(unittest.TestCase):

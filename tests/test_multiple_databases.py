@@ -1,9 +1,6 @@
-import multiprocessing
-import socket
-import time
 import psycopg
 import unittest
-from helpers import stop_server, wait_for_catalog
+from helpers import launch_server_process, stop_server, wait_for_catalog
 
 
 def _run_server(port: int):
@@ -41,18 +38,7 @@ class MultipleDatabaseTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.port = 55441
-        cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
-        cls.proc.start()
-        start = time.time()
-        # Having multiple databases can take sometime. This is a known issue.
-        while time.time() - start < 30:
-            with socket.socket() as sock:
-                if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
-                    break
-            time.sleep(0.1)
-        else:
-            stop_server(cls.proc)
-            raise RuntimeError("Server did not start")
+        cls.proc = launch_server_process(_run_server, cls.port)
 
         # the TCP port accepts connections before catalog emulation finishes
         # loading, so the first client would race a half-ready server. poll the

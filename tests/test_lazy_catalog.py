@@ -1,9 +1,6 @@
-import multiprocessing
-import socket
-import time
 import psycopg
 import unittest
-from helpers import stop_server
+from helpers import launch_server_process, stop_server
 
 
 def _run_server(port: int):
@@ -81,19 +78,7 @@ class LazyCatalogTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.port = 55490
-        cls.proc = multiprocessing.Process(
-            target=_run_server, args=(cls.port,), daemon=True
-        )
-        cls.proc.start()
-        start = time.time()
-        while time.time() - start < 10:
-            with socket.socket() as sock:
-                if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
-                    break
-            time.sleep(0.1)
-        else:
-            stop_server(cls.proc)
-            raise RuntimeError("Server did not start")
+        cls.proc = launch_server_process(_run_server, cls.port)
 
     @classmethod
     def tearDownClass(cls):
@@ -232,20 +217,7 @@ class LazyCatalogErrorPathTest(unittest.TestCase):
         cls.procs = {}
         for mode, off in cls.MODES.items():
             port = cls.PORT_BASE + off
-            proc = multiprocessing.Process(
-                target=_run_faulty_server, args=(port, mode), daemon=True
-            )
-            proc.start()
-            cls.procs[mode] = (proc, port)
-            start = time.time()
-            while time.time() - start < 10:
-                with socket.socket() as sock:
-                    if sock.connect_ex(("127.0.0.1", port)) == 0:
-                        break
-                time.sleep(0.1)
-            else:
-                stop_server(proc)
-                raise RuntimeError(f"server for mode {mode} did not start")
+            cls.procs[mode] = (launch_server_process(_run_faulty_server, port, args=(mode,)), port)
 
     @classmethod
     def tearDownClass(cls):

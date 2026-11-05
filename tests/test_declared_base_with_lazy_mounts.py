@@ -24,10 +24,10 @@ import time
 import unittest
 
 import psycopg
-from helpers import stop_server
+from helpers import launch_server_process, stop_server
 
 PORT = 55489
-COLLIDING_PORT = 55490
+COLLIDING_PORT = 55448
 
 # The canonical pg_namespace oid of public, which the declared base's schema
 # must keep even while the live source also claims a public of its own.
@@ -228,18 +228,7 @@ class CollidingDatabaseNameIsRefusedTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         """Start the fixture whose two sources both claim the auth name."""
-        cls.proc = multiprocessing.Process(
-            target=_run_colliding_server, args=(COLLIDING_PORT,), daemon=True
-        )
-        cls.proc.start()
-        start = time.time()
-        while time.time() - start < 60:
-            with socket.socket() as sock:
-                if sock.connect_ex(("127.0.0.1", COLLIDING_PORT)) == 0:
-                    return
-            time.sleep(0.1)
-        stop_server(cls.proc)
-        raise RuntimeError("Server did not start")
+        cls.proc = launch_server_process(_run_colliding_server, COLLIDING_PORT)
 
     @classmethod
     def tearDownClass(cls):

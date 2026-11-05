@@ -8,3 +8,4 @@
 
 - For function parameters never use one letter parameters. Always be descriptive.
 - Try to keep newly added functions less than 100 lines
+- NEVER skip the pre-commit hook. NEVER use `git commit --no-verify` or `git commit -n`, NEVER unset or bypass `core.hooksPath`. Before any commit verify `git config --get core.hooksPath` prints `hooks` and let `hooks/pre-commit` run to completion via a normal `git commit`. A commit made with `--no-verify` is unverified and forbidden.

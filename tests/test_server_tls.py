@@ -1,13 +1,10 @@
-import multiprocessing
-import socket
 import subprocess
-import time
 from pathlib import Path
 import tempfile
 
 import psycopg
 import unittest
-from helpers import stop_server
+from helpers import launch_server_process, stop_server
 
 
 def _run_server_tls(port: int, cert: str, key: str):
@@ -38,7 +35,7 @@ def _run_server_tls(port: int, cert: str, key: str):
 class ServerTLSTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.port = 55434
+        cls.port = 55443
         cls.tmp = tempfile.TemporaryDirectory()
         cert = Path(cls.tmp.name) / "server.crt"
         key = Path(cls.tmp.name) / "server.key"
@@ -47,18 +44,7 @@ class ServerTLSTest(unittest.TestCase):
             "-keyout", str(key), "-x509", "-days", "1",
             "-out", str(cert), "-subj", "/CN=localhost"
         ])
-        cls.proc = multiprocessing.Process(target=_run_server_tls, args=(cls.port, str(cert), str(key)), daemon=True)
-        cls.proc.start()
-
-        start = time.time()
-        while time.time() - start < 10:
-            with socket.socket() as sock:
-                if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
-                    break
-            time.sleep(0.1)
-        else:
-            stop_server(cls.proc)
-            raise RuntimeError("Server did not start")
+        cls.proc = launch_server_process(_run_server_tls, cls.port, args=(str(cert), str(key)))
 
     @classmethod
     def tearDownClass(cls):

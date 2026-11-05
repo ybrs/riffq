@@ -19,13 +19,10 @@ oid scheme.
 Grown from claude-scripts/show_two_database_catalog_view.py, which printed these
 same probes for a human to eyeball.
 """
-import multiprocessing
-import socket
-import time
 import unittest
 
 import psycopg
-from helpers import stop_server
+from helpers import launch_server_process, stop_server
 
 # Each database gets its own schema and its own table, so anything visible
 # across the boundary is unambiguous about which side it came from.
@@ -168,20 +165,6 @@ def _run_server(port, lazy):
     server.start(catalog_emulation=True)
 
 
-def _start_server(port, lazy):
-    """Launch a server and wait for it to bind, returning the process."""
-    process = multiprocessing.Process(target=_run_server, args=(port, lazy), daemon=True)
-    process.start()
-    started = time.monotonic()
-    while time.monotonic() - started < 120:
-        with socket.socket() as sock:
-            if sock.connect_ex(("127.0.0.1", port)) == 0:
-                return process
-        time.sleep(0.1)
-    stop_server(process)
-    raise RuntimeError(f"server on port {port} did not start")
-
-
 def _catalog_view(port, database):
     """Run every probe against `database` and return {label: rows}."""
     view = {}
@@ -200,8 +183,8 @@ class TwoDatabaseIsolationTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.eager = _start_server(EAGER_PORT, lazy=False)
-        cls.lazy = _start_server(LAZY_PORT, lazy=True)
+        cls.eager = launch_server_process(_run_server, EAGER_PORT, args=(False,))
+        cls.lazy = launch_server_process(_run_server, LAZY_PORT, args=(True,))
         # Collected once: each connection builds that database's context, which
         # is the expensive part, and every test reads the same four views.
         cls.views = {

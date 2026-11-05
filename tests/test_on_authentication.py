@@ -1,10 +1,7 @@
-import multiprocessing
-import socket
-import time
 
 import psycopg
 import unittest
-from helpers import stop_server
+from helpers import launch_server_process, stop_server
 
 
 def _run_server(port: int):
@@ -27,17 +24,7 @@ class AuthenticationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.port = 55438
-        cls.proc = multiprocessing.Process(target=_run_server, args=(cls.port,), daemon=True)
-        cls.proc.start()
-        start = time.time()
-        while time.time() - start < 10:
-            with socket.socket() as sock:
-                if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
-                    break
-            time.sleep(0.1)
-        else:
-            stop_server(cls.proc)
-            raise RuntimeError("Server did not start")
+        cls.proc = launch_server_process(_run_server, cls.port)
 
     @classmethod
     def tearDownClass(cls):

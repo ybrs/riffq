@@ -69,7 +69,7 @@ WARNING_PROBE = textwrap.dedent(
     """
     import riffq
 
-    server = riffq.Server("127.0.0.1:55491")
+    server = riffq.Server("127.0.0.1:55449")
     server.register_database("auth")
     server.on_query(lambda sql, callback, **kwargs: callback("OK", is_tag=True))
     try:

@@ -12,13 +12,10 @@ connection. Unknown or disconnected ids must raise `KeyError`; a live
 connection on a server without catalog emulation has no session and raises
 `RuntimeError`.
 """
-import multiprocessing
-import socket
-import time
 import unittest
 
 import psycopg
-from helpers import stop_server
+from helpers import launch_server_process, stop_server
 
 import pyarrow as pa
 
@@ -77,19 +74,7 @@ class SessionSettingsTest(unittest.TestCase):
     def setUpClass(cls):
         """Start the catalog-emulating server sessions live on."""
         cls.port = 55494
-        cls.proc = multiprocessing.Process(
-            target=_run_server, args=(cls.port,), daemon=True
-        )
-        cls.proc.start()
-        start = time.time()
-        while time.time() - start < 10:
-            with socket.socket() as sock:
-                if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
-                    break
-            time.sleep(0.1)
-        else:
-            stop_server(cls.proc)
-            raise RuntimeError("Server did not start")
+        cls.proc = launch_server_process(_run_server, cls.port)
 
     @classmethod
     def tearDownClass(cls):
@@ -165,19 +150,7 @@ class NoSessionTest(unittest.TestCase):
     def setUpClass(cls):
         """Start the plain server sessions never live on."""
         cls.port = 55495
-        cls.proc = multiprocessing.Process(
-            target=_run_plain_server, args=(cls.port,), daemon=True
-        )
-        cls.proc.start()
-        start = time.time()
-        while time.time() - start < 10:
-            with socket.socket() as sock:
-                if sock.connect_ex(("127.0.0.1", cls.port)) == 0:
-                    break
-            time.sleep(0.1)
-        else:
-            stop_server(cls.proc)
-            raise RuntimeError("Server did not start")
+        cls.proc = launch_server_process(_run_plain_server, cls.port)
 
     @classmethod
     def tearDownClass(cls):

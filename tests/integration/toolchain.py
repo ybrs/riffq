@@ -20,6 +20,7 @@ config) when they are not already in effect. ``make integration-test`` sets the
 same variables up front, so no re-exec happens there; the re-exec only makes
 ad-hoc invocations (running one test module directly) work too.
 """
+import importlib.util
 import os
 import sys
 import unittest
@@ -192,7 +193,13 @@ _SETUP_HINT = "run tests/integration/setup_toolchain.sh"
 
 
 def has_odbc():
-    """Return True when both ODBC drivers and their registration file exist."""
+    """Return True when the ODBC drivers, their registration file, and the
+    pyodbc module that drives them are all present."""
+    # find_spec locates the module without importing it, so this stays safe
+    # before the re-exec below applies the library path: importing pyodbc here
+    # would fail on the dynamic loader (libodbc) rather than report absence.
+    if importlib.util.find_spec("pyodbc") is None:
+        return False
     return (
         os.path.exists(PSQLODBC_UNICODE)
         and os.path.exists(PSQLODBC_ANSI)
@@ -228,7 +235,7 @@ def has_cloudbeaver():
 def require_odbc():
     """Skip decorator for tests needing the ODBC toolchain, naming what is missing."""
     return unittest.skipUnless(
-        has_odbc(), f"ODBC toolchain (psqlodbc) not installed; {_SETUP_HINT}"
+        has_odbc(), f"ODBC toolchain (psqlodbc drivers) or the pyodbc module not installed; {_SETUP_HINT}"
     )
 
 

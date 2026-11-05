@@ -1,4 +1,5 @@
 import logging
+import time
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import polars as pl
@@ -88,7 +89,19 @@ def _handle_query(sql, callback, **kwargs):
         return callback("DISCARD ALL", is_tag=True)
 
     if query.strip().lower().replace(';', '') == "select heavy_query":
-        df = run_heavy_polars_query()
+        # Floor the heavy query at seconds of real CPU work. The concurrency
+        # test asserts fast queries complete *during* it, but native Polars on
+        # a fast release-built runner finishes 10M rows in under a second,
+        # which fits fewer than the asserted two. Recomputing keeps genuine
+        # compute pressure on the worker pool (a sleep would only prove
+        # scheduling, not that compute concurrent with IO still answers), while
+        # the deadline makes the duration machine-independent: fast machines
+        # get at least the floor, slow ones get longer and still pass.
+        deadline = time.monotonic() + 5.0
+        while True:
+            df = run_heavy_polars_query()
+            if time.monotonic() >= deadline:
+                break
         schema = get_schema_from_polars(df)
         rows = df.to_numpy().tolist()
         return callback((schema, rows))
